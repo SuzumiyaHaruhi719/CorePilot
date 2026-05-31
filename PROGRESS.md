@@ -22,10 +22,13 @@
 - CCD core-grid selector (32 LPs, presets incl. 仅 V-Cache CCD), apply affinity + priority
 - Group persistence (autosave), import/export JSON, master 停用优化 toggle
 - Right-click: add-to-group / apply / remove / end / copy
+- In-app auto-enforcer: newly-launched matching processes auto-bound to their group while CorePilot runs
 
-### ② 任务管理器 (secondary tabs: 性能 / 进程 / 详细信息)
+### ② 任务管理器 (secondary tabs: 性能 / 进程 / 详细信息 / 启动 / 服务)
 - Performance: live CPU + Mem + GPU%/VRAM + Disk + Network cards, per-core/per-CCD heatmap, user-selectable metric chips (autosaved)
 - Processes + Details: sortable table, End task (confirm), right-click priority/copy
+- Startup: list (Run keys + Startup folder) + enable/disable (StartupApproved)
+- Services: list (SCM) + start / stop / restart
 
 ### ③ 游戏监控
 - Live dashboard: big CPU/GPU/RAM gauges + sparklines, disk/net rates
@@ -41,12 +44,13 @@
 - CPU/GPU power + temps: None (honest — needs a kernel sensor driver)
 
 ## 🔵 Deferred / honest gaps (documented for morning)
-- In-game FPS overlay (PresentMon) — Monitor shows live sensors; FPS marked "即将上线"
-- Persistent background daemon + tray auto-reapply on process launch — rules persist + apply on demand/assignment, but no boot-time watcher yet
+- In-game FPS overlay (PresentMon) — Monitor shows live sensors; FPS card marked "即将上线"
+- Boot-time background daemon + tray — in-app enforcer auto-applies rules while CorePilot runs; no separate boot-launched watcher yet
 - Real wattage/temperature — needs an optional signed sensor driver (not auto-installed without consent)
-- Full Task Manager parity (App history / Startup / Users / Services tabs) — core views (Perf/Processes/Details) done
-- Release installer + auto-elevation manifest — see below
+- Task Manager App history / Users tabs — Perf/Processes/Details/Startup/Services done
+- Re-enable acrylic blur as an option (removed per request)
 
-## Next
-- Win elevation manifest (build.rs) + `tauri build` → NSIS installer
-- Re-enable acrylic as an option
+## Build artifacts
+- `npm run tauri build` → standalone `src-tauri/target/release/corepilot.exe` (~9.6 MB, auto-elevates)
+  + installer `…/bundle/nsis/CorePilot_0.1.0_x64-setup.exe`
+- Auto-elevation manifest embedded via `build.rs`
