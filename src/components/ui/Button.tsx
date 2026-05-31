@@ -1,0 +1,42 @@
+import { motion } from "motion/react";
+import type { ReactNode } from "react";
+import { cn } from "../../lib/cn";
+
+type Variant = "primary" | "ghost" | "danger" | "subtle";
+
+interface ButtonProps {
+  children: ReactNode;
+  onClick?: () => void;
+  variant?: Variant;
+  disabled?: boolean;
+  className?: string;
+  title?: string;
+}
+
+const VARIANTS: Record<Variant, string> = {
+  primary: "grad-accent text-white glow-sm hover:brightness-110",
+  ghost: "border border-line bg-surface2 text-ink hover:bg-surface3",
+  subtle: "text-muted hover:bg-surface3 hover:text-ink",
+  danger: "border border-danger/40 bg-danger/15 text-danger hover:bg-danger/25",
+};
+
+export function Button({ children, onClick, variant = "ghost", disabled, className, title }: ButtonProps) {
+  return (
+    <motion.button
+      type="button"
+      title={title}
+      disabled={disabled}
+      onClick={onClick}
+      whileHover={disabled ? undefined : { scale: 1.03 }}
+      whileTap={disabled ? undefined : { scale: 0.96 }}
+      className={cn(
+        "no-drag inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-medium transition-colors",
+        VARIANTS[variant],
+        disabled && "cursor-not-allowed opacity-40",
+        className,
+      )}
+    >
+      {children}
+    </motion.button>
+  );
+}
