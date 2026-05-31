@@ -31,17 +31,17 @@ export function NavRail() {
           <button
             key={item.id}
             onClick={() => setTab(item.id)}
-            className="no-drag relative flex h-[60px] w-[72px] flex-col items-center justify-center gap-1 rounded-xl"
+            className="no-drag relative flex h-[60px] w-[72px] flex-col items-center justify-center gap-1 rounded-xl transition-colors hover:bg-surface2/40"
           >
             {active && (
               <motion.span
                 layoutId="nav-pill"
                 className="absolute inset-0 rounded-xl border border-accent/40 bg-accent/10 glow"
-                transition={{ type: "spring", stiffness: 380, damping: 30 }}
+                transition={{ type: "spring", stiffness: 300, damping: 28 }}
               />
             )}
             <motion.span
-              whileHover={{ scale: 1.14, y: -1 }}
+              whileHover={{ scale: 1.08, y: -2 }}
               whileTap={{ scale: 0.92 }}
               className={cn(
                 "relative z-10 transition-colors",

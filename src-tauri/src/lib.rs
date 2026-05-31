@@ -35,6 +35,8 @@ pub fn run() {
             commands::flush_dns,
             commands::end_task,
             commands::get_sensors,
+            commands::get_power_plan,
+            commands::set_power_plan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

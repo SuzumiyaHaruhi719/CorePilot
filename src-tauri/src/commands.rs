@@ -121,3 +121,13 @@ pub fn end_task(pid: u32) -> CoreResult<()> {
 pub fn get_sensors() -> crate::error::CoreResult<crate::sensors::SensorSample> {
     Ok(crate::sensors::sample())
 }
+
+#[tauri::command]
+pub fn get_power_plan() -> CoreResult<String> {
+    optimize::get_power_plan()
+}
+
+#[tauri::command]
+pub fn set_power_plan(plan: String) -> CoreResult<()> {
+    optimize::set_power_plan(&plan)
+}

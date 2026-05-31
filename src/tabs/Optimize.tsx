@@ -1,7 +1,8 @@
 import { AnimatePresence, motion } from "motion/react";
-import { Check, Globe, Loader2, MemoryStick, RefreshCw, Trash2, Wand2, Zap } from "lucide-react";
+import { Check, Globe, Loader2, MemoryStick, Power, RefreshCw, Trash2, Wand2, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useState, type CSSProperties } from "react";
+import { Segmented } from "../components/ui/Segmented";
 import { TabHeader } from "../components/ui/TabHeader";
 import { cn } from "../lib/cn";
 import { formatBytes } from "../lib/format";
@@ -76,6 +77,7 @@ export function Optimize() {
   const [mem, setMem] = useState<MemDetail | null>(null);
   const [heroBusy, setHeroBusy] = useState(false);
   const [heroResult, setHeroResult] = useState<string | null>(null);
+  const [powerPlan, setPlan] = useState("");
 
   async function refresh() {
     try {
@@ -85,8 +87,18 @@ export function Optimize() {
     }
   }
 
+  async function changePlan(plan: string) {
+    setPlan(plan);
+    try {
+      await api.setPowerPlan(plan);
+    } catch {
+      /* ignore */
+    }
+  }
+
   useEffect(() => {
     void refresh();
+    api.getPowerPlan().then(setPlan).catch(() => undefined);
   }, []);
 
   async function runFree(): Promise<string> {
@@ -134,6 +146,12 @@ export function Optimize() {
       }
       try {
         await api.flushDns();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await api.setPowerPlan("high");
+        setPlan("high");
       } catch {
         /* ignore */
       }
@@ -187,6 +205,28 @@ export function Optimize() {
               transition={{ type: "spring", stiffness: 120, damping: 22 }}
             />
           </div>
+        </div>
+
+        {/* Power plan */}
+        <div className="glass hairline flex items-center justify-between rounded-2xl p-4">
+          <div className="flex items-center gap-2.5">
+            <span className="grid h-9 w-9 place-items-center rounded-xl bg-warn/15 text-warn">
+              <Power size={17} />
+            </span>
+            <div>
+              <div className="text-[13.5px] font-semibold text-ink">电源计划</div>
+              <div className="text-[11.5px] text-dim">高性能模式降低 CPU 调度延迟，适合游戏</div>
+            </div>
+          </div>
+          <Segmented
+            id="plan"
+            value={powerPlan === "high" ? "high" : "balanced"}
+            onChange={changePlan}
+            options={[
+              { value: "balanced", label: "平衡" },
+              { value: "high", label: "高性能" },
+            ]}
+          />
         </div>
 
         {/* Hero one-click */}

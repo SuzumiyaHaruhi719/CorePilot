@@ -136,9 +136,9 @@ export function ProcessTable({
                 <span className="nums w-[38px] text-right text-ink">{p.cpu.toFixed(1)}</span>
               </div>
 
-              <span className="nums text-right text-dim">—</span>
+              <span className="nums text-right text-dim">{p.gpu > 0.05 ? p.gpu.toFixed(1) : "—"}</span>
               <span className="nums text-right text-muted">{formatBytes(p.mem, 0)}</span>
-              <span className="nums text-right text-dim">—</span>
+              <span className="nums text-right text-dim">{p.power > 0.05 ? p.power.toFixed(0) : "—"}</span>
             </div>
           );
         })}

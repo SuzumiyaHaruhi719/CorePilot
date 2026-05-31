@@ -147,7 +147,6 @@ pub fn clean_temp() -> CleanResult {
 }
 
 pub fn flush_dns() -> CoreResult<()> {
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let status = std::process::Command::new("ipconfig")
         .arg("/flushdns")
         .creation_flags(CREATE_NO_WINDOW)
@@ -157,4 +156,47 @@ pub fn flush_dns() -> CoreResult<()> {
         return Err(CoreError::Msg("ipconfig /flushdns failed".into()));
     }
     Ok(())
+}
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const PLAN_BALANCED: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
+const PLAN_HIGH: &str = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
+
+fn run_powercfg(args: &[&str]) -> CoreResult<()> {
+    let status = std::process::Command::new("powercfg")
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|e| CoreError::Msg(e.to_string()))?;
+    if !status.success() {
+        return Err(CoreError::Msg("powercfg failed".into()));
+    }
+    Ok(())
+}
+
+/// Switch the active Windows power plan ("balanced" | "high").
+pub fn set_power_plan(plan: &str) -> CoreResult<()> {
+    let guid = match plan {
+        "balanced" => PLAN_BALANCED,
+        "high" => PLAN_HIGH,
+        _ => return Err(CoreError::Msg(format!("unknown power plan: {plan}"))),
+    };
+    run_powercfg(&["/setactive", guid])
+}
+
+pub fn get_power_plan() -> CoreResult<String> {
+    let output = std::process::Command::new("powercfg")
+        .args(["/getactivescheme"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| CoreError::Msg(e.to_string()))?;
+    let text = String::from_utf8_lossy(&output.stdout).to_lowercase();
+    let name = if text.contains(PLAN_HIGH) {
+        "high"
+    } else if text.contains(PLAN_BALANCED) {
+        "balanced"
+    } else {
+        "other"
+    };
+    Ok(name.to_string())
 }
