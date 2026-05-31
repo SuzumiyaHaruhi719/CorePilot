@@ -2,6 +2,7 @@
 
 use crate::affinity;
 use crate::error::CoreResult;
+use crate::optimize::{self, CleanResult, MemDetail};
 use crate::process::{self, ProcInfo};
 use crate::state::AppState;
 use crate::sysmon::{self, Metrics};
@@ -84,4 +85,39 @@ pub fn get_process_affinity(pid: u32) -> CoreResult<AffinityInfo> {
 #[tauri::command]
 pub fn set_priority(pid: u32, class: u32) -> CoreResult<()> {
     affinity::set_priority(pid, class)
+}
+
+#[tauri::command]
+pub fn get_memory_detail() -> CoreResult<MemDetail> {
+    optimize::memory_detail()
+}
+
+#[tauri::command]
+pub fn free_working_sets() -> CoreResult<()> {
+    optimize::free_working_sets()
+}
+
+#[tauri::command]
+pub fn purge_standby() -> CoreResult<()> {
+    optimize::purge_standby()
+}
+
+#[tauri::command]
+pub fn clean_temp() -> CoreResult<CleanResult> {
+    Ok(optimize::clean_temp())
+}
+
+#[tauri::command]
+pub fn flush_dns() -> CoreResult<()> {
+    optimize::flush_dns()
+}
+
+#[tauri::command]
+pub fn end_task(pid: u32) -> CoreResult<()> {
+    process::kill(pid)
+}
+
+#[tauri::command]
+pub fn get_sensors() -> crate::error::CoreResult<crate::sensors::SensorSample> {
+    Ok(crate::sensors::sample())
 }

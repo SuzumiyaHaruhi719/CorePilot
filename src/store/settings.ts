@@ -5,7 +5,7 @@ export type AccentName = "violet" | "cyan" | "teal" | "amber" | "rose";
 
 /** OKLCH hue per accent — applied at runtime to `--color-accent`. */
 export const ACCENT_HUE: Record<AccentName, number> = {
-  violet: 274,
+  violet: 280,
   cyan: 220,
   teal: 182,
   amber: 75,
@@ -14,6 +14,7 @@ export const ACCENT_HUE: Record<AccentName, number> = {
 
 export type GlowLevel = "soft" | "medium" | "intense";
 export type Language = "zh" | "en";
+export type PerfCard = "cpu" | "mem" | "gpu" | "disk" | "net" | "power";
 
 interface SettingsState {
   accent: AccentName;
@@ -22,7 +23,9 @@ interface SettingsState {
   reduceMotion: boolean;
   language: Language;
   pollMs: number;
-  update: (patch: Partial<Omit<SettingsState, "update">>) => void;
+  perfCards: Record<PerfCard, boolean>;
+  update: (patch: Partial<Omit<SettingsState, "update" | "togglePerfCard">>) => void;
+  togglePerfCard: (card: PerfCard) => void;
 }
 
 /**
@@ -37,7 +40,10 @@ export const useSettings = create<SettingsState>()(
       reduceMotion: false,
       language: "zh",
       pollMs: 1500,
+      perfCards: { cpu: true, mem: true, gpu: true, disk: true, net: true, power: true },
       update: (patch) => set(patch),
+      togglePerfCard: (card) =>
+        set((s) => ({ perfCards: { ...s.perfCards, [card]: !s.perfCards[card] } })),
     }),
     { name: "corepilot-settings", version: 1 },
   ),

@@ -1,9 +1,10 @@
-import { Cpu, Plus, Search, SlidersHorizontal } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { CircleMinus, Copy, Cpu, Plus, Search, SlidersHorizontal, X, Zap } from "lucide-react";
+import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { CoreGrid } from "../components/cores/CoreGrid";
 import { GroupRail } from "../components/cores/GroupRail";
 import { ProcessTable, type SortKey } from "../components/cores/ProcessTable";
 import { Button } from "../components/ui/Button";
+import { ContextMenu, type MenuState } from "../components/ui/ContextMenu";
 import { Modal } from "../components/ui/Modal";
 import { TabHeader } from "../components/ui/TabHeader";
 import { useProcesses } from "../hooks/useProcesses";
@@ -23,6 +24,7 @@ export function CoreAssignment() {
   const updateGroup = useGroups((s) => s.updateGroup);
   const removeGroup = useGroups((s) => s.removeGroup);
   const assignProcess = useGroups((s) => s.assignProcess);
+  const removeProcess = useGroups((s) => s.removeProcess);
   const importGroups = useGroups((s) => s.importGroups);
   const seeded = useGroups((s) => s.seeded);
   const markSeeded = useGroups((s) => s.markSeeded);
@@ -37,6 +39,7 @@ export function CoreAssignment() {
   const [coreModalOpen, setCoreModalOpen] = useState(false);
   const [editMask, setEditMask] = useState(0);
   const [status, setStatus] = useState("");
+  const [menu, setMenu] = useState<MenuState | null>(null);
 
   useEffect(() => {
     api.getTopology().then(setTopo).catch(() => undefined);
@@ -113,6 +116,63 @@ export function CoreAssignment() {
       else next.add(pid);
       return next;
     });
+  }
+
+  function toggleAll() {
+    setSelectedPids((prev) => {
+      const allOn = visible.length > 0 && visible.every((p) => prev.has(p.pid));
+      return allOn ? new Set() : new Set(visible.map((p) => p.pid));
+    });
+  }
+
+  function openRowMenu(e: ReactMouseEvent, proc: ProcInfo) {
+    e.preventDefault();
+    const group = groups.find((g) => g.patterns.includes(proc.name.toLowerCase()));
+    const items: MenuState["items"] = [];
+    if (selectedGroup) {
+      items.push({
+        label: `添加到「${selectedGroup.name}」`,
+        icon: Plus,
+        onClick: () => {
+          assignProcess(selectedGroup.id, proc.name);
+          if (optimizationEnabled) void applyToProcess(selectedGroup, proc).catch(() => undefined);
+          setStatus(`已添加 ${proc.name} 到「${selectedGroup.name}」`);
+        },
+      });
+    }
+    if (group) {
+      items.push({
+        label: "立即应用核心分配",
+        icon: Zap,
+        onClick: () => {
+          void applyToProcess(group, proc).catch(() => undefined);
+          setStatus(`已对 ${proc.name} 应用「${group.name}」`);
+        },
+      });
+      items.push({
+        label: "从分组移出",
+        icon: CircleMinus,
+        onClick: () => {
+          removeProcess(proc.name);
+          void api.setAffinity(proc.pid, fullMask).catch(() => undefined);
+          setStatus(`已将 ${proc.name} 移出分组`);
+        },
+      });
+    }
+    items.push({
+      label: "结束进程",
+      icon: X,
+      danger: true,
+      onClick: () => {
+        void api
+          .endTask(proc.pid)
+          .then(() => setStatus(`已结束 ${proc.name}`))
+          .catch(() => setStatus(`无法结束 ${proc.name}（受保护）`));
+      },
+    });
+    items.push({ label: "复制名称", icon: Copy, onClick: () => void navigator.clipboard.writeText(proc.name) });
+    items.push({ label: "复制 PID", icon: Copy, onClick: () => void navigator.clipboard.writeText(String(proc.pid)) });
+    setMenu({ x: e.clientX, y: e.clientY, items });
   }
 
   async function applyToProcess(group: GroupRule, proc: ProcInfo) {
@@ -296,6 +356,8 @@ export function CoreAssignment() {
             onSort={handleSort}
             selected={selectedPids}
             onToggle={toggleSelect}
+            onToggleAll={toggleAll}
+            onRowContextMenu={openRowMenu}
           />
         </div>
       </div>
@@ -317,6 +379,7 @@ export function CoreAssignment() {
           <CoreGrid topo={topo} mask={editMask} onChange={setEditMask} />
         </Modal>
       )}
+      <ContextMenu state={menu} onClose={() => setMenu(null)} />
     </>
   );
 }

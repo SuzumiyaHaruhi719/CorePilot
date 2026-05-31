@@ -59,6 +59,34 @@ export interface AffinityInfo {
   sysMask: number;
 }
 
+export interface MemDetail {
+  total: number;
+  avail: number;
+  used: number;
+  loadPct: number;
+}
+
+export interface CleanResult {
+  bytes: number;
+  files: number;
+}
+
+export interface Sensors {
+  gpuPct: number | null;
+  gpuName: string | null;
+  vramUsed: number | null;
+  vramTotal: number | null;
+  diskPct: number | null;
+  diskRead: number | null;
+  diskWrite: number | null;
+  netUp: number | null;
+  netDown: number | null;
+  cpuPower: number | null;
+  gpuPower: number | null;
+  cpuTemp: number | null;
+  gpuTemp: number | null;
+}
+
 /** Windows priority classes. */
 export const PRIORITY = {
   idle: 0x40,
@@ -79,4 +107,11 @@ export const api = {
     invoke<AffinityInfo>("get_process_affinity", { pid }),
   setPriority: (pid: number, priorityClass: number) =>
     invoke<void>("set_priority", { pid, class: priorityClass }),
+  getMemoryDetail: () => invoke<MemDetail>("get_memory_detail"),
+  freeWorkingSets: () => invoke<void>("free_working_sets"),
+  purgeStandby: () => invoke<void>("purge_standby"),
+  cleanTemp: () => invoke<CleanResult>("clean_temp"),
+  flushDns: () => invoke<void>("flush_dns"),
+  endTask: (pid: number) => invoke<void>("end_task", { pid }),
+  getSensors: () => invoke<Sensors>("get_sensors"),
 };

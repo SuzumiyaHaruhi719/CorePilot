@@ -1,0 +1,257 @@
+import { ArrowDown, ArrowUp, Cpu, HardDrive, MemoryStick, MonitorPlay, Wifi, Zap } from "lucide-react";
+import { motion } from "motion/react";
+import { useEffect, useState, type ReactNode } from "react";
+import { useMetricsHistory } from "../../hooks/useMetricsHistory";
+import { useSensors } from "../../hooks/useSensors";
+import { cn } from "../../lib/cn";
+import { formatBytes } from "../../lib/format";
+import { api, type CpuTopology, type Overview } from "../../lib/ipc";
+import { useSettings, type PerfCard } from "../../store/settings";
+import { CoreHeatmap } from "../charts/CoreHeatmap";
+import { Sparkline } from "../charts/Sparkline";
+import { AnimatedNumber } from "../ui/AnimatedNumber";
+
+const CARDS: { id: PerfCard; label: string }[] = [
+  { id: "cpu", label: "CPU" },
+  { id: "mem", label: "内存" },
+  { id: "gpu", label: "GPU" },
+  { id: "disk", label: "磁盘" },
+  { id: "net", label: "网络" },
+  { id: "power", label: "功耗" },
+];
+
+const fmtRate = (v: number | null | undefined) => (v == null ? "—" : `${formatBytes(v)}/s`);
+const fmtPct = (v: number | null | undefined) => (v == null ? "—" : `${v.toFixed(1)}%`);
+
+function Card({ children }: { children: ReactNode }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+      className="glass hairline rounded-2xl p-4"
+    >
+      {children}
+    </motion.div>
+  );
+}
+
+function CardHead({ icon, label, value, color }: { icon: ReactNode; label: string; value: ReactNode; color: string }) {
+  return (
+    <div className="mb-1 flex items-center justify-between">
+      <div className="flex items-center gap-2 text-[12.5px] font-semibold text-muted">
+        {icon} {label}
+      </div>
+      <div className="nums text-[20px] font-semibold" style={{ color }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-[10.5px] uppercase tracking-wider text-dim">{label}</div>
+      <div className="nums truncate text-[13px] font-medium text-ink">{value}</div>
+    </div>
+  );
+}
+
+export function PerfView() {
+  const { cpu, memPct, latest } = useMetricsHistory(60);
+  const { latest: sensors, gpuHist } = useSensors(60);
+  const [topo, setTopo] = useState<CpuTopology | null>(null);
+  const [overview, setOverview] = useState<Overview | null>(null);
+  const perfCards = useSettings((s) => s.perfCards);
+  const togglePerfCard = useSettings((s) => s.togglePerfCard);
+
+  useEffect(() => {
+    api.getTopology().then(setTopo).catch(() => undefined);
+    api.getOverview().then(setOverview).catch(() => undefined);
+  }, []);
+
+  const cpuNow = latest?.cpuOverall ?? 0;
+  const memUsed = latest?.memUsed ?? 0;
+  const memTotal = latest?.memTotal ?? 0;
+  const memNowPct = memTotal > 0 ? (memUsed / memTotal) * 100 : 0;
+  const vramPct =
+    sensors?.vramTotal && sensors.vramUsed ? (sensors.vramUsed / sensors.vramTotal) * 100 : null;
+
+  return (
+    <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-1 text-[11.5px] text-dim">显示</span>
+        {CARDS.map((c) => (
+          <button
+            key={c.id}
+            onClick={() => togglePerfCard(c.id)}
+            className={cn(
+              "no-drag rounded-lg border px-2.5 py-1 text-[11.5px] transition-colors",
+              perfCards[c.id]
+                ? "border-accent/40 bg-accent/15 text-ink"
+                : "border-line bg-surface2 text-dim hover:text-muted",
+            )}
+          >
+            {c.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        {perfCards.cpu && (
+          <Card>
+            <CardHead
+              icon={<Cpu size={15} className="text-accent" />}
+              label="CPU"
+              value={<AnimatedNumber value={cpuNow} digits={1} suffix="%" />}
+              color="var(--color-accent-bright)"
+            />
+            <div className="truncate text-[11px] text-dim" title={overview?.cpuName}>
+              {overview?.cpuName ?? "—"}
+            </div>
+            <div className="my-2">
+              <Sparkline data={cpu} max={100} hue={280} height={84} />
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <Stat label="核心" value={overview ? `${overview.physicalCores}` : "—"} />
+              <Stat label="逻辑处理器" value={overview ? `${overview.logicalCpus}` : "—"} />
+              <Stat label="V-Cache" value={overview?.vcacheCcd != null ? `CCD${overview.vcacheCcd}` : "—"} />
+            </div>
+          </Card>
+        )}
+
+        {perfCards.mem && (
+          <Card>
+            <CardHead
+              icon={<MemoryStick size={15} className="text-cyan" />}
+              label="内存"
+              value={<AnimatedNumber value={memNowPct} digits={1} suffix="%" />}
+              color="var(--color-cyan)"
+            />
+            <div className="nums text-[11px] text-dim">
+              {formatBytes(memUsed)} / {formatBytes(memTotal)}
+            </div>
+            <div className="my-2">
+              <Sparkline data={memPct} max={100} hue={224} height={84} />
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <Stat label="已用" value={formatBytes(memUsed)} />
+              <Stat label="可用" value={formatBytes(Math.max(memTotal - memUsed, 0))} />
+              <Stat label="总计" value={formatBytes(memTotal)} />
+            </div>
+          </Card>
+        )}
+
+        {perfCards.gpu && (
+          <Card>
+            <CardHead
+              icon={<MonitorPlay size={15} className="text-vcache" />}
+              label="GPU"
+              value={sensors?.gpuPct != null ? <AnimatedNumber value={sensors.gpuPct} digits={1} suffix="%" /> : "—"}
+              color="var(--color-vcache)"
+            />
+            <div className="truncate text-[11px] text-dim" title={sensors?.gpuName ?? undefined}>
+              {sensors?.gpuName ?? "—"}
+            </div>
+            <div className="my-2">
+              <Sparkline data={gpuHist} max={100} hue={184} height={84} />
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <Stat label="显存已用" value={sensors?.vramUsed != null ? formatBytes(sensors.vramUsed) : "—"} />
+              <Stat label="显存总量" value={sensors?.vramTotal != null ? formatBytes(sensors.vramTotal) : "—"} />
+              <Stat label="显存占用" value={fmtPct(vramPct)} />
+            </div>
+          </Card>
+        )}
+
+        {perfCards.disk && (
+          <Card>
+            <CardHead
+              icon={<HardDrive size={15} className="text-freq" />}
+              label="磁盘"
+              value={fmtPct(sensors?.diskPct)}
+              color="var(--color-freq)"
+            />
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <div className="flex items-center gap-2">
+                <ArrowDown size={14} className="text-ok" />
+                <div>
+                  <div className="text-[10.5px] text-dim">读取</div>
+                  <div className="nums text-[14px] font-medium text-ink">{fmtRate(sensors?.diskRead)}</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <ArrowUp size={14} className="text-warn" />
+                <div>
+                  <div className="text-[10.5px] text-dim">写入</div>
+                  <div className="nums text-[14px] font-medium text-ink">{fmtRate(sensors?.diskWrite)}</div>
+                </div>
+              </div>
+            </div>
+          </Card>
+        )}
+
+        {perfCards.net && (
+          <Card>
+            <CardHead
+              icon={<Wifi size={15} className="text-accent" />}
+              label="网络"
+              value={<span className="text-[14px]">{fmtRate((sensors?.netDown ?? 0) + (sensors?.netUp ?? 0))}</span>}
+              color="var(--color-accent-bright)"
+            />
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <div className="flex items-center gap-2">
+                <ArrowDown size={14} className="text-ok" />
+                <div>
+                  <div className="text-[10.5px] text-dim">下载</div>
+                  <div className="nums text-[14px] font-medium text-ink">{fmtRate(sensors?.netDown)}</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <ArrowUp size={14} className="text-warn" />
+                <div>
+                  <div className="text-[10.5px] text-dim">上传</div>
+                  <div className="nums text-[14px] font-medium text-ink">{fmtRate(sensors?.netUp)}</div>
+                </div>
+              </div>
+            </div>
+          </Card>
+        )}
+
+        {perfCards.power && (
+          <Card>
+            <CardHead
+              icon={<Zap size={15} className="text-warn" />}
+              label="功耗"
+              value={sensors?.cpuPower != null ? `${sensors.cpuPower.toFixed(0)}W` : "—"}
+              color="var(--color-warn)"
+            />
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              <Stat label="CPU" value={sensors?.cpuPower != null ? `${sensors.cpuPower.toFixed(0)} W` : "—"} />
+              <Stat label="GPU" value={sensors?.gpuPower != null ? `${sensors.gpuPower.toFixed(0)} W` : "—"} />
+              <Stat label="CPU 温度" value={sensors?.cpuTemp != null ? `${sensors.cpuTemp.toFixed(0)}°C` : "—"} />
+            </div>
+            {sensors?.cpuPower == null && (
+              <p className="mt-3 text-[11px] leading-relaxed text-dim">
+                功耗 / 温度需要硬件传感器驱动支持（计划在后续版本中通过可选传感器组件提供）。
+              </p>
+            )}
+          </Card>
+        )}
+      </div>
+
+      {perfCards.cpu && (
+        <Card>
+          <div className="mb-3 flex items-center gap-2 text-[12.5px] font-semibold text-muted">
+            <Cpu size={15} className="text-accent" /> 逻辑处理器利用率
+            <span className="text-[11px] font-normal text-dim">
+              ({overview ? `${overview.logicalCpus} 线程` : "—"})
+            </span>
+          </div>
+          <CoreHeatmap perCore={latest?.perCore ?? []} topo={topo} />
+        </Card>
+      )}
+    </div>
+  );
+}

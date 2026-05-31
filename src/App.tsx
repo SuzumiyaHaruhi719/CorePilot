@@ -34,13 +34,25 @@ function App() {
   useEffect(() => {
     const hue = ACCENT_HUE[accent];
     const root = document.documentElement.style;
-    root.setProperty("--color-accent", `oklch(72% 0.16 ${hue})`);
-    root.setProperty("--color-accent-bright", `oklch(80% 0.15 ${hue})`);
+    root.setProperty("--color-accent", `oklch(67% 0.185 ${hue})`);
+    root.setProperty("--color-accent-bright", `oklch(77% 0.16 ${hue})`);
   }, [accent]);
 
   useEffect(() => {
     document.documentElement.dataset.acrylic = String(acrylic);
   }, [acrylic]);
+
+  // Suppress the WebView's default right-click menu (keep it only for text fields).
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      e.preventDefault();
+    };
+    document.addEventListener("contextmenu", handler);
+    return () => document.removeEventListener("contextmenu", handler);
+  }, []);
 
   const Active = TABS[tab];
 
@@ -60,10 +72,10 @@ function App() {
             <AnimatePresence mode="wait">
               <motion.div
                 key={tab}
-                initial={{ opacity: 0, y: 12, filter: "blur(6px)" }}
-                animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-                exit={{ opacity: 0, y: -8, filter: "blur(6px)" }}
-                transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+                initial={{ opacity: 0, y: 10, scale: 0.994 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -6, scale: 0.994 }}
+                transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
                 className="flex h-full min-h-0 flex-col"
               >
                 <Active />

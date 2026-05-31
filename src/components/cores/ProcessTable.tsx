@@ -1,4 +1,5 @@
 import { ArrowDown, ArrowUp } from "lucide-react";
+import type { MouseEvent } from "react";
 import { cn } from "../../lib/cn";
 import { formatBytes } from "../../lib/format";
 import type { ProcInfo } from "../../lib/ipc";
@@ -13,6 +14,8 @@ interface ProcessTableProps {
   onSort: (key: SortKey) => void;
   selected: Set<number>;
   onToggle: (pid: number) => void;
+  onToggleAll: () => void;
+  onRowContextMenu?: (e: MouseEvent, proc: ProcInfo) => void;
 }
 
 const COLS = "grid-cols-[28px_minmax(0,1fr)_52px_94px_52px_96px_60px]";
@@ -43,8 +46,18 @@ function Head({ k, label, sortKey, sortDir, onSort, align = "right" }: HeadProps
   );
 }
 
-export function ProcessTable({ processes, sortKey, sortDir, onSort, selected, onToggle }: ProcessTableProps) {
+export function ProcessTable({
+  processes,
+  sortKey,
+  sortDir,
+  onSort,
+  selected,
+  onToggle,
+  onToggleAll,
+  onRowContextMenu,
+}: ProcessTableProps) {
   const groups = useGroups((s) => s.groups);
+  const allOn = processes.length > 0 && processes.every((p) => selected.has(p.pid));
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/40">
@@ -54,7 +67,16 @@ export function ProcessTable({ processes, sortKey, sortDir, onSort, selected, on
           COLS,
         )}
       >
-        <span />
+        <button
+          onClick={onToggleAll}
+          title="全选 / 取消全选"
+          className={cn(
+            "grid h-4 w-4 place-items-center rounded border transition-colors",
+            allOn ? "border-accent bg-accent" : "border-line-strong hover:border-accent/60",
+          )}
+        >
+          {allOn && <span className="h-2 w-2 rounded-[2px] bg-white" />}
+        </button>
         <Head k="name" label="进程名" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="left" />
         <Head k="threads" label="线程" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <Head k="cpu" label="CPU" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
@@ -71,6 +93,7 @@ export function ProcessTable({ processes, sortKey, sortDir, onSort, selected, on
             <div
               key={p.pid}
               onClick={() => onToggle(p.pid)}
+              onContextMenu={(e) => onRowContextMenu?.(e, p)}
               className={cn(
                 "grid cursor-pointer items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] transition-colors",
                 COLS,

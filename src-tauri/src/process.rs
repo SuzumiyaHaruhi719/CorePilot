@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use sysinfo::{ProcessesToUpdate, System};
 use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
 };
@@ -61,4 +62,15 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
             }
         })
         .collect()
+}
+
+/// Terminate a process (End task).
+pub fn kill(pid: u32) -> CoreResult<()> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, false.into(), pid)?;
+        let result = TerminateProcess(handle, 1);
+        let _ = CloseHandle(handle);
+        result?;
+    }
+    Ok(())
 }
