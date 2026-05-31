@@ -131,3 +131,23 @@ pub fn get_power_plan() -> CoreResult<String> {
 pub fn set_power_plan(plan: String) -> CoreResult<()> {
     optimize::set_power_plan(&plan)
 }
+
+#[tauri::command]
+pub fn list_services() -> CoreResult<Vec<crate::winsvc::ServiceItem>> {
+    crate::winsvc::list_services()
+}
+
+#[tauri::command]
+pub fn control_service(name: String, action: String) -> CoreResult<()> {
+    crate::winsvc::control_service(name, action)
+}
+
+#[tauri::command]
+pub fn list_startup() -> CoreResult<Vec<crate::winsvc::StartupItem>> {
+    crate::winsvc::list_startup()
+}
+
+#[tauri::command]
+pub fn set_startup_enabled(name: String, location: String, enabled: bool) -> CoreResult<()> {
+    crate::winsvc::set_startup_enabled(name, location, enabled)
+}

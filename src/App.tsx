@@ -5,6 +5,7 @@ import { StatusBar } from "./components/shell/StatusBar";
 import { TitleBar } from "./components/shell/TitleBar";
 import { api, type Overview } from "./lib/ipc";
 import { ACCENT_HUE, useSettings } from "./store/settings";
+import { useAffinityEnforcer } from "./hooks/useAffinityEnforcer";
 import { useUi, type TabId } from "./store/ui";
 import { CoreAssignment } from "./tabs/CoreAssignment";
 import { Monitor } from "./tabs/Monitor";
@@ -26,6 +27,7 @@ function App() {
   const acrylic = useSettings((s) => s.acrylic);
   const reduceMotion = useSettings((s) => s.reduceMotion);
   const [overview, setOverview] = useState<Overview | null>(null);
+  useAffinityEnforcer(overview ? 2 ** overview.logicalCpus - 1 : 0);
 
   useEffect(() => {
     api.getOverview().then(setOverview).catch(() => undefined);

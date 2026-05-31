@@ -3,15 +3,19 @@ import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
 import { PerfView } from "../components/taskmgr/PerfView";
 import { ProcessView } from "../components/taskmgr/ProcessView";
+import { ServicesView } from "../components/taskmgr/ServicesView";
+import { StartupView } from "../components/taskmgr/StartupView";
 import { SecondaryTabs } from "../components/ui/SecondaryTabs";
 import { TabHeader } from "../components/ui/TabHeader";
 
-type Sec = "perf" | "procs" | "details";
+type Sec = "perf" | "procs" | "details" | "startup" | "services";
 
 const SECS: { id: Sec; label: string }[] = [
   { id: "perf", label: "性能" },
   { id: "procs", label: "进程" },
   { id: "details", label: "详细信息" },
+  { id: "startup", label: "启动" },
+  { id: "services", label: "服务" },
 ];
 
 export function TaskManager() {
@@ -34,6 +38,8 @@ export function TaskManager() {
             {sec === "perf" && <PerfView />}
             {sec === "procs" && <ProcessView />}
             {sec === "details" && <ProcessView detailed />}
+            {sec === "startup" && <StartupView />}
+            {sec === "services" && <ServicesView />}
           </motion.div>
         </AnimatePresence>
       </div>

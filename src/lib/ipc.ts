@@ -87,6 +87,20 @@ export interface Sensors {
   gpuTemp: number | null;
 }
 
+export interface ServiceItem {
+  name: string;
+  display: string;
+  status: string;
+  startType: string;
+}
+
+export interface StartupItem {
+  name: string;
+  command: string;
+  location: string;
+  enabled: boolean;
+}
+
 /** Windows priority classes. */
 export const PRIORITY = {
   idle: 0x40,
@@ -116,4 +130,10 @@ export const api = {
   getSensors: () => invoke<Sensors>("get_sensors"),
   getPowerPlan: () => invoke<string>("get_power_plan"),
   setPowerPlan: (plan: string) => invoke<void>("set_power_plan", { plan }),
+  listServices: () => invoke<ServiceItem[]>("list_services"),
+  controlService: (name: string, action: "start" | "stop" | "restart") =>
+    invoke<void>("control_service", { name, action }),
+  listStartup: () => invoke<StartupItem[]>("list_startup"),
+  setStartupEnabled: (name: string, location: string, enabled: boolean) =>
+    invoke<void>("set_startup_enabled", { name, location, enabled }),
 };

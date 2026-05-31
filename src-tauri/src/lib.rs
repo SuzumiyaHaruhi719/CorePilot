@@ -7,6 +7,7 @@ mod sensors;
 mod state;
 mod sysmon;
 mod topology;
+mod winsvc;
 
 use state::AppState;
 
@@ -37,6 +38,10 @@ pub fn run() {
             commands::get_sensors,
             commands::get_power_plan,
             commands::set_power_plan,
+            commands::list_services,
+            commands::control_service,
+            commands::list_startup,
+            commands::set_startup_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
