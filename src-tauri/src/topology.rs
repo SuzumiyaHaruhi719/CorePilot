@@ -129,12 +129,15 @@ unsafe fn raw_detect() -> Option<CpuTopology> {
     // Build CCDs from L3 groups, ordered by lowest logical id for stable ids.
     l3s.sort_by_key(|l| l.mask.trailing_zeros());
     let max_l3 = l3s.iter().map(|l| l.size).max().unwrap_or(0);
-    let multi = l3s.len() > 1;
+    // V-Cache only exists when one CCD's L3 is *larger* than another's. On a
+    // non-3D dual-CCD part (equal L3 per CCD) no CCD is V-Cache; flagging the
+    // (equal) max on every CCD would be wrong, so require a smaller sibling.
+    let has_smaller = l3s.iter().any(|l| l.size < max_l3);
     let mut ccds: Vec<Ccd> = Vec::new();
     for (idx, l) in l3s.iter().enumerate() {
         ccds.push(Ccd {
             ccd_id: idx as u32,
-            is_vcache: multi && l.size == max_l3,
+            is_vcache: has_smaller && l.size == max_l3,
             l3_bytes: l.size,
             logical_cpus: bits(l.mask),
             mask: l.mask,
