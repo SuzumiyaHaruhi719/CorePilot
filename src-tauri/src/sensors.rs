@@ -151,6 +151,10 @@ fn ensure_sidecar() {
                         *SIDECAR.lock() = readings;
                     }
                 }
+                // Sidecar stopped emitting (crashed or exited): clear readings so
+                // the UI shows power/temp as unavailable ("—") rather than stale
+                // last-known values.
+                *SIDECAR.lock() = SidecarReadings::default();
                 // stdout closed → sidecar exited. Reap it; ignore the result.
                 let _ = child.wait();
             })
