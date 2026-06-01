@@ -40,8 +40,15 @@ internal static class Program
 {
     private const int PollIntervalMs = 1000;
 
-    private static int Main()
+    private static int Main(string[] args)
     {
+        // Diagnostic: enumerate motherboard Control/Fan/Temperature sensors to
+        // determine whether software fan control is possible on this board.
+        if (args.Length > 0 && args[0] == "--list")
+        {
+            return ListControls();
+        }
+
         // stdout is line-based; the Rust reader parses one JSON object per line.
         var stdout = Console.Out;
 
@@ -101,6 +108,59 @@ internal static class Program
             // ignore shutdown errors
         }
 
+        return 0;
+    }
+
+    /// <summary>
+    /// Diagnostic enumeration: open the board with motherboard + controller
+    /// support and list every Control / Fan / Temperature sensor, noting which
+    /// ones are software-controllable (`sensor.Control != null`). Read-only.
+    /// </summary>
+    private static int ListControls()
+    {
+        Computer c;
+        try
+        {
+            c = new Computer
+            {
+                IsMotherboardEnabled = true,
+                IsControllerEnabled = true,
+                IsCpuEnabled = true,
+                IsGpuEnabled = true,
+            };
+            c.Open();
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"open failed: {e.Message}");
+            return 1;
+        }
+
+        c.Accept(new UpdateVisitor());
+
+        void Dump(IHardware hw, string indent)
+        {
+            Console.WriteLine($"{indent}[HW] {hw.HardwareType} : {hw.Name}");
+            foreach (ISensor s in hw.Sensors)
+            {
+                if (s.SensorType is SensorType.Control or SensorType.Fan or SensorType.Temperature)
+                {
+                    string val = s.Value?.ToString("0.#", CultureInfo.InvariantCulture) ?? "null";
+                    Console.WriteLine($"{indent}   {s.SensorType,-11} {s.Name,-26} val={val,-7} controllable={s.Control != null} id={s.Identifier}");
+                }
+            }
+            foreach (IHardware sub in hw.SubHardware)
+            {
+                Dump(sub, indent + "  ");
+            }
+        }
+
+        foreach (IHardware hw in c.Hardware)
+        {
+            Dump(hw, string.Empty);
+        }
+
+        try { c.Close(); } catch { /* ignore */ }
         return 0;
     }
 
