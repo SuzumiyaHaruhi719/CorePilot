@@ -243,17 +243,19 @@ pub fn gpu_oc_info() -> GpuOcInfo {
     info.max_graphics_clock_mhz = max_graphics_clock(&device);
     info.supports_locked_clocks = info.max_graphics_clock_mhz > 0;
 
-    // Temp limit (thermal target = GPU_MAX threshold). Read current, capture the
-    // factory default once, and probe set-ability a single time with a no-op set
-    // (writing the current value back), caching the result so we don't write on
-    // every poll.
-    if let Ok(cur) = device.temperature_threshold(TemperatureThreshold::GpuMax) {
+    // Temp limit (thermal target). On consumer GeForce the GPU_MAX threshold is
+    // NOT settable via NVML, but the ACOUSTIC_CURR threshold IS — it's the
+    // temperature the card tries to hold (what Afterburner calls "temp limit").
+    // Read current, capture the factory default once, and probe set-ability a
+    // single time with a no-op set, caching the result.
+    if let Ok(cur) = device.temperature_threshold(TemperatureThreshold::AcousticCurr) {
         info.temp_limit_c = cur;
-        info.temp_limit_min_c = TEMP_LIMIT_FLOOR;
-        let slowdown = device
-            .temperature_threshold(TemperatureThreshold::Slowdown)
-            .unwrap_or(95);
-        info.temp_limit_max_c = slowdown.clamp(cur, 98);
+        info.temp_limit_min_c = device
+            .temperature_threshold(TemperatureThreshold::AcousticMin)
+            .unwrap_or(TEMP_LIMIT_FLOOR);
+        info.temp_limit_max_c = device
+            .temperature_threshold(TemperatureThreshold::AcousticMax)
+            .unwrap_or(90);
         {
             let mut def = DEFAULT_TEMP_LIMIT.lock();
             if def.is_none() {
@@ -266,7 +268,7 @@ pub fn gpu_oc_info() -> GpuOcInfo {
                 Some(v) => v,
                 None => {
                     let ok = device
-                        .set_temperature_threshold(TemperatureThreshold::GpuMax, cur as i32)
+                        .set_temperature_threshold(TemperatureThreshold::AcousticCurr, cur as i32)
                         .is_ok();
                     *cache = Some(ok);
                     ok
@@ -277,6 +279,36 @@ pub fn gpu_oc_info() -> GpuOcInfo {
     }
 
     info
+}
+
+/// Debug probe: for every NVML temperature-threshold type, read it and attempt
+/// a no-op set (current value back), reporting which are settable. Explains why
+/// temp-limit is unsupported on consumer GeForce (and reveals any alternative
+/// settable threshold). Not wired into the GUI — used by the CLI.
+pub fn gpu_temp_probe() -> Vec<String> {
+    let (_nvml, device) = match init_device() {
+        Ok(p) => p,
+        Err(e) => return vec![format!("init failed: {e}")],
+    };
+    let thresholds = [
+        ("GpuMax", TemperatureThreshold::GpuMax),
+        ("AcousticMin", TemperatureThreshold::AcousticMin),
+        ("AcousticCurr", TemperatureThreshold::AcousticCurr),
+        ("AcousticMax", TemperatureThreshold::AcousticMax),
+        ("Slowdown", TemperatureThreshold::Slowdown),
+        ("Shutdown", TemperatureThreshold::Shutdown),
+    ];
+    let mut out = Vec::new();
+    for (name, t) in thresholds {
+        match device.temperature_threshold(t) {
+            Ok(cur) => match device.set_temperature_threshold(t, cur as i32) {
+                Ok(()) => out.push(format!("{name}: read={cur}C  SET=OK (SETTABLE)")),
+                Err(e) => out.push(format!("{name}: read={cur}C  SET=Err({e})")),
+            },
+            Err(e) => out.push(format!("{name}: read=Err({e})")),
+        }
+    }
+    out
 }
 
 /// Apply the requested tuning changes. Each control is attempted independently;
@@ -387,12 +419,14 @@ pub fn gpu_oc_apply(settings: GpuOcSettings) -> Result<(), String> {
     // --- Temperature limit (thermal target = GPU_MAX threshold) ---
     if let Some(target_c) = settings.temp_limit_c {
         requested += 1;
-        let ceiling = device
-            .temperature_threshold(TemperatureThreshold::Slowdown)
-            .unwrap_or(95)
-            .min(98);
-        let clamped = clamp_u32(target_c, TEMP_LIMIT_FLOOR, ceiling);
-        if let Err(e) = device.set_temperature_threshold(TemperatureThreshold::GpuMax, clamped as i32) {
+        let lo = device
+            .temperature_threshold(TemperatureThreshold::AcousticMin)
+            .unwrap_or(TEMP_LIMIT_FLOOR);
+        let hi = device
+            .temperature_threshold(TemperatureThreshold::AcousticMax)
+            .unwrap_or(90);
+        let clamped = clamp_u32(target_c, lo, hi);
+        if let Err(e) = device.set_temperature_threshold(TemperatureThreshold::AcousticCurr, clamped as i32) {
             failures.push(format!("temp limit: {e}"));
         }
     }
@@ -468,7 +502,7 @@ pub fn gpu_oc_reset() -> Result<(), String> {
 
     // --- Restore factory thermal target ---
     if let Some(default_c) = *DEFAULT_TEMP_LIMIT.lock() {
-        match device.set_temperature_threshold(TemperatureThreshold::GpuMax, default_c as i32) {
+        match device.set_temperature_threshold(TemperatureThreshold::AcousticCurr, default_c as i32) {
             Ok(()) => requested += 1,
             Err(NvmlError::NotSupported) => {}
             Err(e) => {

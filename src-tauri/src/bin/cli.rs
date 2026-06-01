@@ -31,6 +31,7 @@ fn main() {
             }
         }
         "gpu-reset" => print_result(gpu::gpu_oc_reset()),
+        "gpu-temp-probe" => print_json(&gpu::gpu_temp_probe()),
         "gpu-engines" => {
             // PDH rate counters need two samples; prime, wait, then read.
             let _ = process::gpu_engine_loads();
