@@ -60,7 +60,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 export function PerfView() {
   const { cpu, memPct, latest } = useMetricsHistory(60);
-  const { latest: sensors, gpuHist } = useSensors(60);
+  const { latest: sensors, gpuHist, diskHist, netHist } = useSensors(60);
   const [topo, setTopo] = useState<CpuTopology | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
   const perfCards = useSettings((s) => s.perfCards);
@@ -173,7 +173,10 @@ export function PerfView() {
               value={fmtPct(sensors?.diskPct)}
               color="var(--color-freq)"
             />
-            <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="my-2">
+              <Sparkline data={diskHist} max={Math.max(...diskHist, 1)} hue={70} height={70} />
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-3">
               <div className="flex items-center gap-2">
                 <ArrowDown size={14} className="text-ok" />
                 <div>
@@ -200,7 +203,10 @@ export function PerfView() {
               value={<span className="text-[14px]">{fmtRate((sensors?.netDown ?? 0) + (sensors?.netUp ?? 0))}</span>}
               color="var(--color-accent-bright)"
             />
-            <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="my-2">
+              <Sparkline data={netHist} max={Math.max(...netHist, 1)} hue={224} height={70} />
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-3">
               <div className="flex items-center gap-2">
                 <ArrowDown size={14} className="text-ok" />
                 <div>

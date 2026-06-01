@@ -9,7 +9,10 @@ use sysinfo::{ProcessesToUpdate, System};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
-use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+use windows::Win32::System::Threading::{
+    GetProcessAffinityMask, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    TerminateProcess,
+};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
 };
@@ -28,6 +31,8 @@ pub struct ProcInfo {
     pub threads: u32,
     pub gpu: f32,
     pub power: f32,
+    /// Process CPU affinity mask (allowed logical CPUs); 0 when inaccessible.
+    pub affinity: u64,
     /// Dominant GPU engine label for this process (e.g. "3D", "Compute"), or
     /// `None` when GPU usage is negligible / unattributable.
     pub gpu_engine: Option<String>,
@@ -368,6 +373,7 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
                 threads: threads.get(&id).copied().unwrap_or(0),
                 gpu: gpu_pct,
                 power,
+                affinity: process_affinity(id),
                 gpu_engine,
                 gpu_adapter,
             }
@@ -384,4 +390,23 @@ pub fn kill(pid: u32) -> CoreResult<()> {
         result?;
     }
     Ok(())
+}
+
+/// Read a process's CPU affinity mask (allowed logical CPUs). Returns 0 when the
+/// process can't be opened (protected/system) — never panics.
+fn process_affinity(pid: u32) -> u64 {
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false.into(), pid) else {
+            return 0;
+        };
+        let mut proc_mask: usize = 0;
+        let mut sys_mask: usize = 0;
+        let ok = GetProcessAffinityMask(handle, &mut proc_mask, &mut sys_mask).is_ok();
+        let _ = CloseHandle(handle);
+        if ok {
+            proc_mask as u64
+        } else {
+            0
+        }
+    }
 }

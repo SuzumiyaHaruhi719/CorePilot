@@ -1,8 +1,9 @@
 import { ArrowDown, ArrowUp } from "lucide-react";
 import type { MouseEvent } from "react";
 import { cn } from "../../lib/cn";
+import { classifyCcd } from "../../lib/cpu";
 import { formatBytes } from "../../lib/format";
-import type { ProcInfo } from "../../lib/ipc";
+import type { CpuTopology, ProcInfo } from "../../lib/ipc";
 import { groupForProcess, useGroups } from "../../store/groups";
 
 export type SortKey = "name" | "threads" | "cpu" | "gpu" | "mem" | "power";
@@ -16,9 +17,26 @@ interface ProcessTableProps {
   onToggle: (pid: number) => void;
   onToggleAll: () => void;
   onRowContextMenu?: (e: MouseEvent, proc: ProcInfo) => void;
+  topo: CpuTopology | null;
 }
 
-const COLS = "grid-cols-[28px_minmax(0,1fr)_52px_94px_52px_96px_60px]";
+const COLS = "grid-cols-[28px_minmax(0,1fr)_76px_88px_50px_92px_56px]";
+
+/** Hardware threads + CCD a process spans (from its affinity mask). */
+function HwThreads({ mask, topo }: { mask: number; topo: CpuTopology | null }) {
+  const c = classifyCcd(mask, topo);
+  if (c.count === 0) return <span className="nums text-right text-dim">—</span>;
+  const dot =
+    c.kind === "vcache" ? "bg-vcache" : c.kind === "freq" ? "bg-freq" : c.kind === "mixed" ? "bg-accent" : "bg-dim/60";
+  const label =
+    c.kind === "vcache" ? "V-Cache CCD" : c.kind === "freq" ? "频率 CCD" : c.kind === "mixed" ? "跨 CCD" : "全部核心";
+  return (
+    <span className="flex items-center justify-end gap-1.5" title={`${c.count} 硬件线程 · ${label}`}>
+      <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dot)} />
+      <span className="nums text-muted">{c.count}</span>
+    </span>
+  );
+}
 
 interface HeadProps {
   k: SortKey;
@@ -55,6 +73,7 @@ export function ProcessTable({
   onToggle,
   onToggleAll,
   onRowContextMenu,
+  topo,
 }: ProcessTableProps) {
   const groups = useGroups((s) => s.groups);
   const allOn = processes.length > 0 && processes.every((p) => selected.has(p.pid));
@@ -78,7 +97,7 @@ export function ProcessTable({
           {allOn && <span className="h-2 w-2 rounded-[2px] bg-white" />}
         </button>
         <Head k="name" label="进程名" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="left" />
-        <Head k="threads" label="线程" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+        <Head k="threads" label="硬件线程" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <Head k="cpu" label="CPU" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <Head k="gpu" label="GPU" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <Head k="mem" label="内存" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
@@ -124,7 +143,7 @@ export function ProcessTable({
                 </span>
               </div>
 
-              <span className="nums text-right text-muted">{p.threads || "—"}</span>
+              <HwThreads mask={p.affinity} topo={topo} />
 
               <div className="flex items-center justify-end gap-1.5">
                 <span className="relative h-1 w-8 overflow-hidden rounded-full bg-surface3">

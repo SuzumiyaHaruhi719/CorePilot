@@ -8,7 +8,7 @@ import { ContextMenu, type MenuState } from "../components/ui/ContextMenu";
 import { Modal } from "../components/ui/Modal";
 import { TabHeader } from "../components/ui/TabHeader";
 import { useProcesses } from "../hooks/useProcesses";
-import { maskFromIds } from "../lib/cpu";
+import { maskFromIds, popcount } from "../lib/cpu";
 import { maskToCpuList } from "../lib/format";
 import { api, type CpuTopology, type ProcInfo } from "../lib/ipc";
 import { useGroups, type GroupRule } from "../store/groups";
@@ -80,7 +80,7 @@ export function CoreAssignment() {
           r = a.name.localeCompare(b.name);
           break;
         case "threads":
-          r = a.threads - b.threads;
+          r = popcount(a.affinity) - popcount(b.affinity);
           break;
         case "cpu":
           r = a.cpu - b.cpu;
@@ -358,6 +358,7 @@ export function CoreAssignment() {
             onToggle={toggleSelect}
             onToggleAll={toggleAll}
             onRowContextMenu={openRowMenu}
+            topo={topo}
           />
         </div>
       </div>

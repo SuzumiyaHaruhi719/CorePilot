@@ -3,9 +3,16 @@ import { api, type Sensors } from "../lib/ipc";
 import { useSettings } from "../store/settings";
 
 /** Polls hardware sensors (GPU / disk / network / power) for the perf view. */
-export function useSensors(points = 60): { latest: Sensors | null; gpuHist: number[] } {
+export function useSensors(points = 60): {
+  latest: Sensors | null;
+  gpuHist: number[];
+  diskHist: number[];
+  netHist: number[];
+} {
   const [latest, setLatest] = useState<Sensors | null>(null);
   const [gpuHist, setGpuHist] = useState<number[]>(() => new Array(points).fill(0));
+  const [diskHist, setDiskHist] = useState<number[]>(() => new Array(points).fill(0));
+  const [netHist, setNetHist] = useState<number[]>(() => new Array(points).fill(0));
   const pollMs = useSettings((s) => s.pollMs);
 
   useEffect(() => {
@@ -16,6 +23,8 @@ export function useSensors(points = 60): { latest: Sensors | null; gpuHist: numb
         if (!alive) return;
         setLatest(s);
         setGpuHist((prev) => [...prev.slice(1), s.gpuPct ?? 0]);
+        setDiskHist((prev) => [...prev.slice(1), (s.diskRead ?? 0) + (s.diskWrite ?? 0)]);
+        setNetHist((prev) => [...prev.slice(1), (s.netUp ?? 0) + (s.netDown ?? 0)]);
       } catch {
         /* command may not be available yet */
       }
@@ -28,5 +37,5 @@ export function useSensors(points = 60): { latest: Sensors | null; gpuHist: numb
     };
   }, [pollMs, points]);
 
-  return { latest, gpuHist };
+  return { latest, gpuHist, diskHist, netHist };
 }

@@ -45,6 +45,8 @@ export interface ProcInfo {
   threads: number;
   gpu: number;
   power: number;
+  /** CPU affinity mask (allowed logical CPUs); 0 if inaccessible. */
+  affinity: number;
   /** Dominant GPU engine for this process, e.g. "3D" / "Video Encode" / "Compute". */
   gpuEngine?: string | null;
   /** Which GPU adapter the process is using, e.g. "NVIDIA GeForce RTX 4090". */
