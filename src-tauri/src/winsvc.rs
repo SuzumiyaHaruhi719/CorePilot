@@ -103,9 +103,22 @@ fn status_label(state: SERVICE_STATUS_CURRENT_STATE) -> String {
     label.to_string()
 }
 
-/// Enumerate all Win32 services (any state). `start_type` is left as "other"
-/// because querying it per service (`QueryServiceConfig`) is far too slow for
-/// the hundreds of services a typical machine has.
+/// Map a Win32 `dwStartType` value to a short label (boot/system/auto/manual/
+/// disabled), defaulting to "other".
+fn start_type_label(t: u32) -> &'static str {
+    match t {
+        0 => "boot",
+        1 => "system",
+        2 => "auto",
+        3 => "manual",
+        4 => "disabled",
+        _ => "other",
+    }
+}
+
+/// Enumerate all Win32 services (any state). `start_type`, `description`, and
+/// `group` are read per service from `QueryServiceConfigW`/`QueryServiceConfig2W`
+/// (the start type comes free from the same config struct as the group).
 ///
 /// `pid` comes straight from the enumeration (process id of the hosting
 /// process, 0 when stopped). `description` and `group` are read per service via
@@ -187,8 +200,8 @@ pub fn list_services() -> CoreResult<Vec<ServiceItem>> {
             // PID straight from the enumeration; 0 means the service isn't running.
             let pid = entry.ServiceStatusProcess.dwProcessId;
             // Per-service description + load-order group (best-effort, "" on any failure).
-            let (description, group) = if name.is_empty() {
-                (String::new(), String::new())
+            let (description, group, start_type) = if name.is_empty() {
+                (String::new(), String::new(), "other".to_string())
             } else {
                 read_service_config(scm.0, &name)
             };
@@ -196,7 +209,7 @@ pub fn list_services() -> CoreResult<Vec<ServiceItem>> {
                 name,
                 display,
                 status: status_label(entry.ServiceStatusProcess.dwCurrentState),
-                start_type: "other".to_string(),
+                start_type,
                 pid,
                 description,
                 group,
@@ -218,8 +231,8 @@ pub fn list_services() -> CoreResult<Vec<ServiceItem>> {
 ///
 /// # Safety
 /// `scm` must be a valid SCM handle opened with at least `SC_MANAGER_CONNECT`.
-unsafe fn read_service_config(scm: SC_HANDLE, name: &str) -> (String, String) {
-    let empty = (String::new(), String::new());
+unsafe fn read_service_config(scm: SC_HANDLE, name: &str) -> (String, String, String) {
+    let empty = (String::new(), String::new(), "other".to_string());
 
     let name_w = wide(name);
     let svc = match OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_CONFIG) {
@@ -228,8 +241,8 @@ unsafe fn read_service_config(scm: SC_HANDLE, name: &str) -> (String, String) {
     };
 
     let description = read_service_description(svc.0);
-    let group = read_service_group(svc.0);
-    (description, group)
+    let (group, start_type) = read_service_group_start(svc.0);
+    (description, group, start_type)
 }
 
 /// `QueryServiceConfig2W(SERVICE_CONFIG_DESCRIPTION)` two-call read → trimmed
@@ -278,18 +291,21 @@ unsafe fn read_service_description(svc: SC_HANDLE) -> String {
     }
 }
 
-/// `QueryServiceConfigW` two-call read → load-order group (empty on any failure
-/// or when `lpLoadOrderGroup` is null/empty).
+/// `QueryServiceConfigW` two-call read → `(load-order group, start-type label)`.
+/// Group is empty when null/absent; start type maps `dwStartType`
+/// (boot/system/auto/manual/disabled), defaulting to "other" on any failure.
 ///
 /// # Safety
 /// `svc` must be a valid service handle with `SERVICE_QUERY_CONFIG` access.
-unsafe fn read_service_group(svc: SC_HANDLE) -> String {
+unsafe fn read_service_group_start(svc: SC_HANDLE) -> (String, String) {
+    let fallback = || (String::new(), "other".to_string());
+
     // First call: discover the byte count (None buffer is expected to fail).
     let mut bytes_needed: u32 = 0;
     let probe = QueryServiceConfigW(svc, None, 0, &mut bytes_needed);
     match probe {
-        Ok(()) => return String::new(),
-        Err(_) if bytes_needed == 0 => return String::new(),
+        Ok(()) => return fallback(),
+        Err(_) if bytes_needed == 0 => return fallback(),
         Err(_) => {}
     }
 
@@ -301,26 +317,20 @@ unsafe fn read_service_group(svc: SC_HANDLE) -> String {
     let cb_buf_size = (count * stride) as u32;
 
     bytes_needed = 0;
-    if QueryServiceConfigW(
-        svc,
-        Some(buffer.as_mut_ptr()),
-        cb_buf_size,
-        &mut bytes_needed,
-    )
-    .is_err()
-    {
-        return String::new();
+    if QueryServiceConfigW(svc, Some(buffer.as_mut_ptr()), cb_buf_size, &mut bytes_needed).is_err() {
+        return fallback();
     }
 
     let cfg = &*(buffer.as_ptr());
-    if cfg.lpLoadOrderGroup.is_null() {
+    let group = if cfg.lpLoadOrderGroup.is_null() {
         String::new()
     } else {
         cfg.lpLoadOrderGroup
             .to_string()
             .map(|s| s.trim().to_string())
             .unwrap_or_default()
-    }
+    };
+    (group, start_type_label(cfg.dwStartType.0).to_string())
 }
 
 /// Start, stop, or restart a service by name.
