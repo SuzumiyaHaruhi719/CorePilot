@@ -53,9 +53,18 @@ export function CoreAssignment() {
 
   const fullMask = useMemo(() => (topo ? maskFromIds(topo.logical.map((l) => l.id)) : 0), [topo]);
 
-  // Seed sensible default groups once on first run.
+  // Wait for the persisted groups store to finish its (async) hydration before
+  // seeding. Otherwise the seeder races rehydration and overwrites saved groups
+  // with the two defaults (this clobbered a custom group once).
+  const [groupsHydrated, setGroupsHydrated] = useState(() => useGroups.persist.hasHydrated());
   useEffect(() => {
-    if (!topo) return;
+    if (groupsHydrated) return;
+    return useGroups.persist.onFinishHydration(() => setGroupsHydrated(true));
+  }, [groupsHydrated]);
+
+  // Seed sensible default groups once on first run (only after hydration).
+  useEffect(() => {
+    if (!topo || !groupsHydrated) return;
     if (seeded || groups.length > 0) {
       if (!seeded) markSeeded();
       return;
@@ -72,7 +81,7 @@ export function CoreAssignment() {
     });
     addGroup({ name: "全核", hue: 274, mask: all, priority: 0x20, patterns: [], builtin: true });
     markSeeded();
-  }, [topo, seeded, groups.length, addGroup, markSeeded]);
+  }, [topo, groupsHydrated, seeded, groups.length, addGroup, markSeeded]);
 
   const selectedGroup = groups.find((g) => g.id === selectedId) ?? null;
 

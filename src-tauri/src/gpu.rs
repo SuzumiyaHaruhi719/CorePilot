@@ -241,6 +241,8 @@ pub fn gpu_oc_info() -> GpuOcInfo {
     // Locked-clocks support: presence of supported graphics clocks is the
     // proxy. A non-zero max also feeds the UI's slider range.
     info.max_graphics_clock_mhz = max_graphics_clock(&device);
+    // Core clock can be locked to a single value (see gpu_oc_apply); enabled
+    // when the hardware max clock is known.
     info.supports_locked_clocks = info.max_graphics_clock_mhz > 0;
 
     // Temp limit (thermal target). On consumer GeForce the GPU_MAX threshold is
@@ -338,57 +340,22 @@ pub fn gpu_oc_apply(settings: GpuOcSettings) -> Result<(), String> {
         }
     }
 
-    // --- Core locked clocks (clamp to supported graphics-clock range) ---
-    if settings.core_clock_min_mhz.is_some() || settings.core_clock_max_mhz.is_some() {
+    // --- Core clock lock ---
+    // A [min,max] RANGE-lock pins the GPU LOW on GeForce (observed: stuck at
+    // 255 MHz under load). Instead we LOCK TO A SINGLE VALUE = the requested
+    // clock, forcing the card to run at exactly that frequency — a real cap.
+    // (No idle downclock; a true offset needs NVAPI.) Memory locking is not
+    // applied. `gpu_oc_reset` clears the lock.
+    if let Some(target) = settings.core_clock_max_mhz.or(settings.core_clock_min_mhz) {
         requested += 1;
-        // Determine supported range from the top memory clock's graphics clocks.
-        let (lo_bound, hi_bound) = supported_graphics_range(&device);
-        // Default a missing side to the other side so a single value still locks.
-        let raw_min = settings
-            .core_clock_min_mhz
-            .or(settings.core_clock_max_mhz)
-            .unwrap_or(lo_bound);
-        let raw_max = settings
-            .core_clock_max_mhz
-            .or(settings.core_clock_min_mhz)
-            .unwrap_or(hi_bound);
-        let mut min_mhz = clamp_u32(raw_min, lo_bound, hi_bound);
-        let mut max_mhz = clamp_u32(raw_max, lo_bound, hi_bound);
-        if min_mhz > max_mhz {
-            std::mem::swap(&mut min_mhz, &mut max_mhz);
-        }
+        let ceiling = device.max_clock_info(Clock::Graphics).unwrap_or(target);
+        let value = clamp_u32(target, 300, ceiling);
         let setting = GpuLockedClocksSetting::Numeric {
-            min_clock_mhz: min_mhz,
-            max_clock_mhz: max_mhz,
+            min_clock_mhz: value,
+            max_clock_mhz: value,
         };
         if let Err(e) = device.set_gpu_locked_clocks(setting) {
-            failures.push(format!("core locked clocks: {e}"));
-        }
-    }
-
-    // --- Memory locked clocks ---
-    if settings.mem_clock_min_mhz.is_some() || settings.mem_clock_max_mhz.is_some() {
-        requested += 1;
-        let supported = device.supported_memory_clocks().unwrap_or_default();
-        let lo_bound = supported.iter().copied().min().unwrap_or(0);
-        let hi_bound = supported.iter().copied().max().unwrap_or(u32::MAX);
-        let raw_min = settings
-            .mem_clock_min_mhz
-            .or(settings.mem_clock_max_mhz)
-            .unwrap_or(lo_bound);
-        let raw_max = settings
-            .mem_clock_max_mhz
-            .or(settings.mem_clock_min_mhz)
-            .unwrap_or(hi_bound);
-        let mut min_mhz = clamp_u32(raw_min, lo_bound, hi_bound);
-        let mut max_mhz = clamp_u32(raw_max, lo_bound, hi_bound);
-        if min_mhz > max_mhz {
-            std::mem::swap(&mut min_mhz, &mut max_mhz);
-        }
-        // NVML 0.12: memory locked clocks take (min, max) MHz directly (unlike
-        // GPU locked clocks, which take a GpuLockedClocksSetting enum).
-        if let Err(e) = device.set_mem_locked_clocks(min_mhz, max_mhz) {
-            failures.push(format!("memory locked clocks: {e}"));
+            failures.push(format!("core clock lock: {e}"));
         }
     }
 
@@ -513,28 +480,6 @@ pub fn gpu_oc_reset() -> Result<(), String> {
     }
 
     finish(requested, failures)
-}
-
-/// Supported graphics-clock `(min, max)` MHz at the top memory clock. Falls
-/// back to `(0, u32::MAX)` (i.e. no clamping) when the query is unsupported.
-fn supported_graphics_range(device: &Device) -> (u32, u32) {
-    // Fallback upper bound = the max boost clock (reliable on Ada).
-    let fallback_hi = device.max_clock_info(Clock::Graphics).unwrap_or(u32::MAX);
-    let mem_clocks = match device.supported_memory_clocks() {
-        Ok(v) => v,
-        Err(_) => return (0, fallback_hi),
-    };
-    let Some(&top_mem) = mem_clocks.iter().max() else {
-        return (0, fallback_hi);
-    };
-    match device.supported_graphics_clocks(top_mem) {
-        Ok(gc) => {
-            let lo = gc.iter().copied().min().unwrap_or(0);
-            let hi = gc.iter().copied().max().unwrap_or(fallback_hi);
-            (lo, hi)
-        }
-        Err(_) => (0, fallback_hi),
-    }
 }
 
 /// Collapse per-control outcomes into a single command result: `Ok` if nothing
