@@ -59,6 +59,16 @@
   html {
     color-scheme: dark;
   }
+  /* Glow intensity multiplier driven by the Settings tab (data-glow on <html>). */
+  :root {
+    --glow-o: 1;
+  }
+  html[data-glow="soft"] {
+    --glow-o: 0.45;
+  }
+  html[data-glow="intense"] {
+    --glow-o: 1.75;
+  }
   body {
     background: var(--color-base);
     color: var(--color-ink);
@@ -96,9 +106,12 @@
 }
 
 @layer utilities {
-  /* Solid panel surfaces (acrylic disabled for now) */
+  /* Solid panel surfaces (acrylic disabled for now) — soft depth, not flat */
   .glass {
     background: var(--color-surface);
+    box-shadow:
+      0 1px 2px oklch(0% 0 0 / 0.22),
+      0 14px 34px -18px oklch(0% 0 0 / 0.6);
   }
   .glass-2 {
     background: var(--color-surface2);
@@ -111,18 +124,18 @@
   .glow {
     --glow: var(--color-accent);
     box-shadow:
-      0 0 0 1px color-mix(in oklch, var(--glow) 40%, transparent),
-      0 0 16px color-mix(in oklch, var(--glow) 32%, transparent),
-      0 0 40px color-mix(in oklch, var(--glow) 14%, transparent);
+      0 0 0 1px color-mix(in oklch, var(--glow) calc(40% * var(--glow-o, 1)), transparent),
+      0 0 18px color-mix(in oklch, var(--glow) calc(34% * var(--glow-o, 1)), transparent),
+      0 0 48px color-mix(in oklch, var(--glow) calc(16% * var(--glow-o, 1)), transparent);
   }
   .glow-sm {
     --glow: var(--color-accent);
     box-shadow:
-      0 0 10px color-mix(in oklch, var(--glow) 28%, transparent),
-      0 0 1px color-mix(in oklch, var(--glow) 48%, transparent);
+      0 0 10px color-mix(in oklch, var(--glow) calc(30% * var(--glow-o, 1)), transparent),
+      0 0 1px color-mix(in oklch, var(--glow) calc(50% * var(--glow-o, 1)), transparent);
   }
   .glow-text {
-    text-shadow: 0 0 12px color-mix(in oklch, currentColor 50%, transparent);
+    text-shadow: 0 0 10px color-mix(in oklch, currentColor calc(36% * var(--glow-o, 1)), transparent);
   }
 
   .grad-accent {

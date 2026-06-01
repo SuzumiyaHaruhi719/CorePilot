@@ -15,6 +15,10 @@ dist-ssr
 # rust build
 src-tauri/target/
 
+# .NET sensor sidecar build output (the published exe in binaries/ is tracked)
+src-tauri/sensord/bin/
+src-tauri/sensord/obj/
+
 # screenshots / scratch
 .shots/
 

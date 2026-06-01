@@ -6,11 +6,17 @@
 //! opened once and re-collected on each call; the first call may read zero for
 //! rate-based counters (PDH needs two samples) — that is expected.
 //!
-//! Fields that require a hardware sensor driver (power/temperature) are always
-//! left `None`. Any data source that fails to initialize or read is left `None`
-//! and never fabricated.
+//! Fields that require a hardware sensor driver (CPU/GPU power and temperature)
+//! are supplied by the `sensord` sidecar (LibreHardwareMonitor), spawned once on
+//! the first `sample()` and read on a background thread. If the sidecar is
+//! missing or fails to start, those four fields stay `None`. Any data source
+//! that fails to initialize or read is left `None` and never fabricated.
 
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
+use std::os::windows::process::CommandExt;
+use std::process::{Command, Stdio};
+use std::sync::Once;
 use std::time::Instant;
 
 use once_cell::sync::Lazy;
@@ -32,6 +38,12 @@ use windows::Win32::System::Performance::{
 const PDH_SUCCESS: u32 = 0;
 /// `DXGI_ADAPTER_FLAG_SOFTWARE` raw bit, used to skip the Microsoft Basic Render adapter.
 const DXGI_SOFTWARE_FLAG: u32 = DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32;
+
+/// `CREATE_NO_WINDOW` process-creation flag: run the sidecar without a console window.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// File name of the bundled hardware-sensor sidecar (Tauri strips the target
+/// triple from `externalBin`, placing it next to the main executable).
+const SIDECAR_EXE: &str = "sensord.exe";
 
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +73,123 @@ struct PdhQuery {
     disk_time: PDH_HCOUNTER,
     gpu_util: PDH_HCOUNTER,      // wildcard array: \GPU Engine(*)\Utilization Percentage
     gpu_mem: Option<PDH_HCOUNTER>, // wildcard array: \GPU Adapter Memory(*)\Dedicated Usage
+}
+
+/// Latest power/temperature readings produced by the `sensord` sidecar.
+///
+/// The sidecar (LibreHardwareMonitor) is the only source of these four values;
+/// everything stays `None` until/unless a reader thread parses a line for it.
+/// Unlike `Sampler`, this state is plain `Send + Sync` data so the background
+/// reader thread can update it directly behind its own mutex.
+#[derive(Default, Clone, Copy)]
+struct SidecarReadings {
+    cpu_power: Option<f32>,
+    gpu_power: Option<f32>,
+    cpu_temp: Option<f32>,
+    gpu_temp: Option<f32>,
+}
+
+/// Shared, thread-safe store for the most recent sidecar readings.
+static SIDECAR: Lazy<Mutex<SidecarReadings>> = Lazy::new(|| Mutex::new(SidecarReadings::default()));
+/// Guards the one-time sidecar spawn so we never launch more than one process.
+static SIDECAR_SPAWN: Once = Once::new();
+
+/// Spawn the `sensord` sidecar exactly once and read its line-delimited JSON on
+/// a background thread, updating [`SIDECAR`] with each parsed sample.
+///
+/// Resolves the sidecar next to the current executable (where Tauri places
+/// `externalBin`). If the file is missing, spawning fails, or stdout can't be
+/// captured, this returns quietly and the four fields simply stay `None` — the
+/// app keeps running with power/temperature unavailable. The reader thread never
+/// panics: parse failures are ignored and EOF/errors end the thread cleanly.
+fn ensure_sidecar() {
+    SIDECAR_SPAWN.call_once(|| {
+        // Resolve `<dir of current exe>/sensord.exe`.
+        let exe_path = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let Some(dir) = exe_path.parent() else {
+            return;
+        };
+        let sidecar = dir.join(SIDECAR_EXE);
+        if !sidecar.exists() {
+            // Graceful: no sidecar bundled/built — leave readings as None.
+            return;
+        }
+
+        let child = Command::new(&sidecar)
+            .stdout(Stdio::piped())
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+
+        let mut child = match child {
+            Ok(c) => c,
+            Err(_) => return, // spawn failed (e.g. blocked) — stay graceful.
+        };
+
+        let Some(stdout) = child.stdout.take() else {
+            // Without stdout we can't read anything; let the child run/exit on
+            // its own and keep readings None.
+            return;
+        };
+
+        // Detached reader thread: owns the child handle so it isn't dropped (a
+        // dropped Child does not kill the process, but keeping it lets the OS
+        // reap it and ties the lifetime to this thread).
+        std::thread::Builder::new()
+            .name("sensord-reader".into())
+            .spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    let Ok(line) = line else {
+                        break; // read error / pipe closed.
+                    };
+                    if let Some(readings) = parse_sidecar_line(&line) {
+                        *SIDECAR.lock() = readings;
+                    }
+                }
+                // stdout closed → sidecar exited. Reap it; ignore the result.
+                let _ = child.wait();
+            })
+            .ok();
+    });
+}
+
+/// Parse one compact JSON line from the sidecar into [`SidecarReadings`].
+///
+/// Expected shape (any field may be `null`):
+/// `{"cpuPower":<num|null>,"cpuTemp":<num|null>,"gpuPower":<num|null>,"gpuTemp":<num|null>}`
+/// Returns `None` if the line isn't valid JSON; unknown/missing fields become `None`.
+fn parse_sidecar_line(line: &str) -> Option<SidecarReadings> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+
+    // Accept JSON numbers; reject NaN/inf and non-finite via f64 -> f32.
+    let field = |key: &str| -> Option<f32> {
+        let v = json.get(key)?;
+        if v.is_null() {
+            return None;
+        }
+        let n = v.as_f64()?;
+        if n.is_finite() {
+            Some(n as f32)
+        } else {
+            None
+        }
+    };
+
+    Some(SidecarReadings {
+        cpu_power: field("cpuPower"),
+        gpu_power: field("gpuPower"),
+        cpu_temp: field("cpuTemp"),
+        gpu_temp: field("gpuTemp"),
+    })
 }
 
 /// Persistent sampler state.
@@ -251,6 +380,10 @@ fn query_dxgi() -> (Option<String>, Option<u64>) {
 /// Sample current telemetry. Maintains its own persistent state; safe to call
 /// repeatedly. Any field whose source is unavailable is left `None`.
 pub fn sample() -> SensorSample {
+    // Launch the hardware-sensor sidecar on first call (no-op thereafter). If it
+    // is missing or fails to start, power/temperature simply stay `None`.
+    ensure_sidecar();
+
     let mut s = SAMPLER.lock();
     let mut out = SensorSample::default();
 
@@ -326,12 +459,16 @@ pub fn sample() -> SensorSample {
         }
     }
 
-    // Power and temperature require a hardware sensor driver
-    // (LibreHardwareMonitor/MSR); intentionally None.
-    out.cpu_power = None;
-    out.gpu_power = None;
-    out.cpu_temp = None;
-    out.gpu_temp = None;
+    // Power and temperature come from the `sensord` sidecar (LibreHardwareMonitor
+    // reading MSRs / hardware sensors). These remain `None` until the sidecar has
+    // emitted a sample, or stay `None` permanently if it is unavailable.
+    {
+        let readings = *SIDECAR.lock();
+        out.cpu_power = readings.cpu_power;
+        out.gpu_power = readings.gpu_power;
+        out.cpu_temp = readings.cpu_temp;
+        out.gpu_temp = readings.gpu_temp;
+    }
 
     out
 }

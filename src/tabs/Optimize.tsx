@@ -2,8 +2,10 @@ import { AnimatePresence, motion } from "motion/react";
 import { Check, Globe, Loader2, MemoryStick, Power, RefreshCw, Trash2, Wand2, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useState, type CSSProperties } from "react";
+import { ClickRipple } from "../components/ui/Ripple";
 import { Segmented } from "../components/ui/Segmented";
 import { TabHeader } from "../components/ui/TabHeader";
+import { springSmooth } from "../lib/motion";
 import { cn } from "../lib/cn";
 import { formatBytes } from "../lib/format";
 import { api, type MemDetail } from "../lib/ipc";
@@ -45,6 +47,7 @@ function ActionCard({ icon: Icon, title, desc, hue, onRun }: ActionCardProps) {
       onClick={run}
       whileHover={{ y: -3 }}
       whileTap={{ scale: 0.98 }}
+      transition={springSmooth}
       className="glass hairline group relative flex flex-col items-start gap-3 overflow-hidden rounded-2xl p-4 text-left"
     >
       <span
@@ -69,6 +72,7 @@ function ActionCard({ icon: Icon, title, desc, hue, onRun }: ActionCardProps) {
           </motion.div>
         )}
       </AnimatePresence>
+      <ClickRipple />
     </motion.button>
   );
 }
@@ -232,8 +236,9 @@ export function Optimize() {
         {/* Hero one-click */}
         <motion.button
           onClick={runAll}
-          whileHover={{ scale: 1.01 }}
+          whileHover={{ y: -2, scale: 1.005 }}
           whileTap={{ scale: 0.99 }}
+          transition={springSmooth}
           className="relative flex w-full items-center gap-4 overflow-hidden rounded-2xl grad-accent p-4 text-left text-white glow"
         >
           <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-white/15">
@@ -255,6 +260,7 @@ export function Optimize() {
               )}
             </AnimatePresence>
           </div>
+          <ClickRipple />
         </motion.button>
 
         {/* Action grid */}

@@ -25,6 +25,7 @@ function App() {
   const tab = useUi((s) => s.tab);
   const accent = useSettings((s) => s.accent);
   const acrylic = useSettings((s) => s.acrylic);
+  const glow = useSettings((s) => s.glow);
   const reduceMotion = useSettings((s) => s.reduceMotion);
   const [overview, setOverview] = useState<Overview | null>(null);
   useAffinityEnforcer(overview ? 2 ** overview.logicalCpus - 1 : 0);
@@ -43,6 +44,10 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.acrylic = String(acrylic);
   }, [acrylic]);
+
+  useEffect(() => {
+    document.documentElement.dataset.glow = glow;
+  }, [glow]);
 
   // Suppress the WebView's default right-click menu (keep it only for text fields).
   useEffect(() => {
@@ -74,10 +79,10 @@ function App() {
             <AnimatePresence mode="wait">
               <motion.div
                 key={tab}
-                initial={{ opacity: 0, y: 10, scale: 0.994 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -6, scale: 0.994 }}
-                transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                transition={{ duration: 0.2, ease: [0.33, 1, 0.68, 1] }}
                 className="flex h-full min-h-0 flex-col"
               >
                 <Active />

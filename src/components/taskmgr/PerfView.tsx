@@ -7,7 +7,7 @@ import { cn } from "../../lib/cn";
 import { formatBytes } from "../../lib/format";
 import { api, type CpuTopology, type Overview } from "../../lib/ipc";
 import { useSettings, type PerfCard } from "../../store/settings";
-import { CoreHeatmap } from "../charts/CoreHeatmap";
+import { CoreGraphs } from "../charts/CoreGraphs";
 import { Sparkline } from "../charts/Sparkline";
 import { AnimatedNumber } from "../ui/AnimatedNumber";
 
@@ -249,7 +249,7 @@ export function PerfView() {
               ({overview ? `${overview.logicalCpus} 线程` : "—"})
             </span>
           </div>
-          <CoreHeatmap perCore={latest?.perCore ?? []} topo={topo} />
+          <CoreGraphs perCore={latest?.perCore ?? []} topo={topo} />
         </Card>
       )}
     </div>
