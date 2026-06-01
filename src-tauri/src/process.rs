@@ -21,7 +21,8 @@ use windows::Win32::Security::{
 use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN;
 use windows::Win32::System::Threading::{
     GetProcessAffinityMask, GetProcessHandleCount, GetProcessTimes, IsWow64Process2, OpenProcess,
-    OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess,
+    OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_TERMINATE,
+    TerminateProcess,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
@@ -63,6 +64,11 @@ pub struct ProcInfo {
     /// Chrome") — the name Windows Task Manager shows. `None` for binaries
     /// without version info (most system processes).
     pub description: Option<String>,
+    /// Whether this process's CPU affinity can actually be changed (we can
+    /// `OpenProcess` with `PROCESS_SET_INFORMATION`). Protected/system
+    /// processes (System, Registry, Secure System, some AV) are not settable;
+    /// the core-assignment view hides those.
+    pub settable: bool,
 }
 
 /// PDH success return code (`ERROR_SUCCESS`).
@@ -495,6 +501,7 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
                 gpu_engine,
                 gpu_adapter,
                 description: description_for(process.exe()),
+                settable: settable_for(id),
             }
         })
         .collect();
@@ -502,6 +509,7 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
     // Drop cached user/platform for PIDs that no longer exist so the cache
     // tracks the live process set instead of growing unbounded.
     DETAIL_CACHE.lock().retain(|pid, _| live_pids.contains(pid));
+    SETTABLE_CACHE.lock().retain(|pid, _| live_pids.contains(pid));
 
     out
 }
@@ -551,6 +559,29 @@ impl Default for ProcDetails {
 /// and reuse them on every refresh. Pruned in [`list`] to the live PID set.
 static DETAIL_CACHE: Lazy<Mutex<HashMap<u32, (Option<String>, Option<String>)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Cache of pid → affinity-settable. Stable for a process's lifetime, so we
+/// probe `OpenProcess(PROCESS_SET_INFORMATION)` once per pid. Pruned in [`list`].
+static SETTABLE_CACHE: Lazy<Mutex<HashMap<u32, bool>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Whether `pid`'s affinity can be set (cached). True when we can open the
+/// process with `PROCESS_SET_INFORMATION`.
+fn settable_for(pid: u32) -> bool {
+    if let Some(&v) = SETTABLE_CACHE.lock().get(&pid) {
+        return v;
+    }
+    let ok = unsafe {
+        match OpenProcess(PROCESS_SET_INFORMATION, false.into(), pid) {
+            Ok(h) => {
+                let _ = CloseHandle(h);
+                true
+            }
+            Err(_) => false,
+        }
+    };
+    SETTABLE_CACHE.lock().insert(pid, ok);
+    ok
+}
 
 /// Cache of exe-path → friendly FileDescription (e.g. "Google Chrome"), the name
 /// Windows Task Manager shows. Keyed by full image path and resolved once per

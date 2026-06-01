@@ -1,4 +1,4 @@
-import { Download, Plus, Power, Upload } from "lucide-react";
+import { Download, ListTree, Plus, Power, Upload } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { cn } from "../../lib/cn";
 import { maskToCpuList } from "../../lib/format";
@@ -50,6 +50,22 @@ export function GroupRail({
       </div>
 
       <div className="min-h-0 flex-1 space-y-1.5 overflow-auto px-2.5 pb-2">
+        <button
+          onClick={() => select(null)}
+          className={cn(
+            "no-drag flex w-full items-center justify-between rounded-xl border p-2.5 text-left transition-colors",
+            selectedId === null
+              ? "border-accent/40 bg-accent/10 glow-sm"
+              : "border-line bg-surface2 hover:bg-surface3",
+          )}
+        >
+          <div className="flex items-center gap-2">
+            <ListTree size={14} className={selectedId === null ? "text-accent-bright" : "text-dim"} />
+            <span className="text-[13px] font-medium text-ink">全部进程</span>
+          </div>
+          <span className="nums text-[11px] text-muted">{processes.length}</span>
+        </button>
+        <div className="px-1 pt-1 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-dim">分组</div>
         <AnimatePresence initial={false}>
           {groups.map((group) => {
           const active = activeCount(group, processes);

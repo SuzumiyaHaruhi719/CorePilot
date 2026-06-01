@@ -61,6 +61,8 @@ export interface ProcInfo {
   gpuAdapter?: string | null;
   /** Friendly file description (e.g. "Google Chrome") — the name Task Manager shows. */
   description?: string | null;
+  /** Whether the process's CPU affinity can be set (false for protected/system processes). */
+  settable?: boolean;
 }
 
 export interface Metrics {

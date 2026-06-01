@@ -1,4 +1,4 @@
-import { CircleMinus, Copy, Cpu, Plus, Search, SlidersHorizontal, X, Zap } from "lucide-react";
+import { CircleMinus, Copy, Cpu, ListTree, Plus, Search, SlidersHorizontal, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { CoreGrid } from "../components/cores/CoreGrid";
 import { GroupRail } from "../components/cores/GroupRail";
@@ -40,10 +40,22 @@ export function CoreAssignment() {
   const [editMask, setEditMask] = useState(0);
   const [status, setStatus] = useState("");
   const [menu, setMenu] = useState<MenuState | null>(null);
+  const [targetGroupId, setTargetGroupId] = useState<string>("");
 
   useEffect(() => {
     api.getTopology().then(setTopo).catch(() => undefined);
   }, []);
+
+  // Clear the multi-select when switching between 全部进程 and a group view.
+  useEffect(() => {
+    setSelectedPids(new Set());
+  }, [selectedId]);
+
+  // Keep the "add to group" target valid / defaulted to the first group.
+  useEffect(() => {
+    if (groups.length === 0) setTargetGroupId("");
+    else if (!groups.some((g) => g.id === targetGroupId)) setTargetGroupId(groups[0].id);
+  }, [groups, targetGroupId]);
 
   const fullMask = useMemo(() => (topo ? maskFromIds(topo.logical.map((l) => l.id)) : 0), [topo]);
 
@@ -71,8 +83,12 @@ export function CoreAssignment() {
   const selectedGroup = groups.find((g) => g.id === selectedId) ?? null;
 
   const visible = useMemo(() => {
+    // 全部进程 view shows every *adjustable* process (protected/system
+    // processes whose affinity can't be set are hidden); a group view shows
+    // only its members.
+    const source = selectedGroup ? membersOf(selectedGroup) : processes.filter((p) => p.settable);
     const q = search.trim().toLowerCase();
-    const filtered = q ? processes.filter((p) => p.name.toLowerCase().includes(q)) : processes;
+    const filtered = q ? source.filter((p) => p.name.toLowerCase().includes(q)) : source;
     const sorted = [...filtered].sort((a, b) => {
       let r = 0;
       switch (sortKey) {
@@ -98,7 +114,7 @@ export function CoreAssignment() {
       return sortDir === "asc" ? r : -r;
     });
     return sorted;
-  }, [processes, search, sortKey, sortDir]);
+  }, [processes, search, sortKey, sortDir, selectedGroup]);
 
   function handleSort(key: SortKey) {
     if (key === sortKey) {
@@ -129,14 +145,15 @@ export function CoreAssignment() {
     e.preventDefault();
     const group = groups.find((g) => g.patterns.includes(proc.name.toLowerCase()));
     const items: MenuState["items"] = [];
-    if (selectedGroup) {
+    const addTarget = selectedGroup ?? groups.find((g) => g.id === targetGroupId) ?? null;
+    if (addTarget) {
       items.push({
-        label: `添加到「${selectedGroup.name}」`,
+        label: `添加到「${addTarget.name}」`,
         icon: Plus,
         onClick: () => {
-          assignProcess(selectedGroup.id, proc.name);
-          if (optimizationEnabled) void applyToProcess(selectedGroup, proc).catch(() => undefined);
-          setStatus(`已添加 ${proc.name} 到「${selectedGroup.name}」`);
+          assignProcess(addTarget.id, proc.name);
+          if (optimizationEnabled) void applyToProcess(addTarget, proc).catch(() => undefined);
+          setStatus(`已添加 ${proc.name} 到「${addTarget.name}」`);
         },
       });
     }
@@ -193,17 +210,18 @@ export function CoreAssignment() {
   }
 
   async function assignSelected() {
-    if (!selectedGroup) {
-      setStatus("请先在左侧选择一个分组");
+    const target = groups.find((g) => g.id === targetGroupId) ?? null;
+    if (!target) {
+      setStatus("请先创建一个分组");
       return;
     }
     const chosen = processes.filter((p) => selectedPids.has(p.pid));
     let failed = 0;
     for (const proc of chosen) {
-      assignProcess(selectedGroup.id, proc.name);
+      assignProcess(target.id, proc.name);
       if (optimizationEnabled) {
         try {
-          await applyToProcess(selectedGroup, proc);
+          await applyToProcess(target, proc);
         } catch {
           failed += 1;
         }
@@ -211,9 +229,25 @@ export function CoreAssignment() {
     }
     setSelectedPids(new Set());
     setStatus(
-      `已添加 ${chosen.length} 个进程到「${selectedGroup.name}」` +
+      `已添加 ${chosen.length} 个进程到「${target.name}」` +
         (failed ? ` · ${failed} 个受保护进程应用失败` : ""),
     );
+  }
+
+  /** Remove the selected member processes from the current group (group view). */
+  async function removeSelected() {
+    if (!selectedGroup) return;
+    const chosen = membersOf(selectedGroup).filter((p) => selectedPids.has(p.pid));
+    for (const proc of chosen) {
+      removeProcess(proc.name);
+      try {
+        await api.setAffinity(proc.pid, fullMask);
+      } catch {
+        /* protected */
+      }
+    }
+    setSelectedPids(new Set());
+    setStatus(`已从「${selectedGroup.name}」移出 ${chosen.length} 个进程`);
   }
 
   function openCoreModal() {
@@ -317,6 +351,7 @@ export function CoreAssignment() {
                 <span className="nums text-[11.5px] text-dim">
                   {selectedGroup.mask === 0 ? "全部核心" : `CPU ${maskToCpuList(selectedGroup.mask)}`}
                 </span>
+                <span className="text-[11.5px] text-dim">· {visible.length} 个进程</span>
                 {!selectedGroup.builtin && (
                   <Button variant="danger" onClick={() => removeGroup(selectedGroup.id)}>
                     删除分组
@@ -324,7 +359,10 @@ export function CoreAssignment() {
                 )}
               </>
             ) : (
-              <span className="text-[12.5px] text-dim">从左侧选择或创建一个分组以分配核心</span>
+              <span className="flex items-center gap-2 text-[13px] font-medium text-ink">
+                <ListTree size={15} className="text-accent" /> 全部进程
+                <span className="text-[11.5px] font-normal text-dim">{visible.length} 个进程</span>
+              </span>
             )}
 
             <div className="ml-auto flex items-center gap-2">
@@ -337,13 +375,34 @@ export function CoreAssignment() {
                   className="w-48 rounded-lg border border-line bg-surface2 py-1.5 pl-8 pr-3 text-[12.5px] text-ink outline-none transition-colors focus:border-accent/50"
                 />
               </div>
-              <Button
-                variant="primary"
-                onClick={assignSelected}
-                disabled={selectedPids.size === 0 || !selectedGroup}
-              >
-                <Plus size={14} /> 添加到分组{selectedPids.size > 0 ? ` (${selectedPids.size})` : ""}
-              </Button>
+              {selectedGroup ? (
+                <Button variant="danger" onClick={removeSelected} disabled={selectedPids.size === 0}>
+                  <CircleMinus size={14} /> 移出分组{selectedPids.size > 0 ? ` (${selectedPids.size})` : ""}
+                </Button>
+              ) : (
+                <>
+                  <select
+                    value={targetGroupId}
+                    onChange={(e) => setTargetGroupId(e.target.value)}
+                    className="no-drag rounded-lg border border-line bg-surface2 px-2 py-1.5 text-[12.5px] text-ink outline-none focus:border-accent/50"
+                    title="添加到哪个分组"
+                  >
+                    {groups.length === 0 && <option value="">无分组</option>}
+                    {groups.map((g) => (
+                      <option key={g.id} value={g.id}>
+                        {g.name}
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    variant="primary"
+                    onClick={assignSelected}
+                    disabled={selectedPids.size === 0 || groups.length === 0}
+                  >
+                    <Plus size={14} /> 添加到分组{selectedPids.size > 0 ? ` (${selectedPids.size})` : ""}
+                  </Button>
+                </>
+              )}
             </div>
           </div>
 
