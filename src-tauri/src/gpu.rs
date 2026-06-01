@@ -134,9 +134,16 @@ fn init_device() -> Result<(Nvml, Device<'static>), String> {
     Ok((nvml, device))
 }
 
-/// Highest supported graphics clock (MHz) at the top supported memory clock.
-/// Returns 0 when the query is unsupported or yields nothing.
+/// Highest attainable graphics clock (MHz). Prefers `max_clock_info`, which is
+/// reliable on all NVIDIA GPUs including Ada (RTX 40-series) where the
+/// `supported_graphics_clocks` enumeration returns `NotSupported`. Falls back to
+/// the enumeration for older parts. Returns 0 only if both are unavailable.
 fn max_graphics_clock(device: &Device) -> u32 {
+    if let Ok(m) = device.max_clock_info(Clock::Graphics) {
+        if m > 0 {
+            return m;
+        }
+    }
     let mem_clocks = match device.supported_memory_clocks() {
         Ok(v) => v,
         Err(_) => return 0,
@@ -398,20 +405,22 @@ pub fn gpu_oc_reset() -> Result<(), String> {
 /// Supported graphics-clock `(min, max)` MHz at the top memory clock. Falls
 /// back to `(0, u32::MAX)` (i.e. no clamping) when the query is unsupported.
 fn supported_graphics_range(device: &Device) -> (u32, u32) {
+    // Fallback upper bound = the max boost clock (reliable on Ada).
+    let fallback_hi = device.max_clock_info(Clock::Graphics).unwrap_or(u32::MAX);
     let mem_clocks = match device.supported_memory_clocks() {
         Ok(v) => v,
-        Err(_) => return (0, u32::MAX),
+        Err(_) => return (0, fallback_hi),
     };
     let Some(&top_mem) = mem_clocks.iter().max() else {
-        return (0, u32::MAX);
+        return (0, fallback_hi);
     };
     match device.supported_graphics_clocks(top_mem) {
         Ok(gc) => {
             let lo = gc.iter().copied().min().unwrap_or(0);
-            let hi = gc.iter().copied().max().unwrap_or(u32::MAX);
+            let hi = gc.iter().copied().max().unwrap_or(fallback_hi);
             (lo, hi)
         }
-        Err(_) => (0, u32::MAX),
+        Err(_) => (0, fallback_hi),
     }
 }
 

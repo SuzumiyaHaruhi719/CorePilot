@@ -86,7 +86,7 @@ function App() {
 
         <div className="flex min-h-0 flex-1">
           <NavRail />
-          <main className="relative min-h-0 flex-1 overflow-hidden">
+          <main className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
             <AnimatePresence mode="wait">
               <motion.div
                 key={tab}
@@ -94,7 +94,7 @@ function App() {
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -6 }}
                 transition={{ duration: 0.2, ease: [0.33, 1, 0.68, 1] }}
-                className="flex h-full min-h-0 flex-col"
+                className="flex h-full min-h-0 min-w-0 flex-col"
               >
                 <Active />
               </motion.div>

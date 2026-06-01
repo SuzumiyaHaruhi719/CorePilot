@@ -53,7 +53,7 @@ interface TileProps {
 
 function StatTile({ icon: Icon, label, value, sub, hue }: TileProps) {
   return (
-    <div className="glass hairline flex items-center gap-3 rounded-xl p-3">
+    <div className="glass hairline flex min-w-0 items-center gap-3 rounded-xl p-3">
       <span
         className="grid h-9 w-9 shrink-0 place-items-center rounded-lg"
         style={
@@ -289,7 +289,12 @@ export function GpuTune() {
               iconClass="text-warn"
               title="功率上限"
               supported={!!info?.supportsPowerLimit}
-              right={<Toggle checked={powerOn} onChange={setPowerOn} />}
+              right={
+                <label className="flex items-center gap-2 text-[11.5px] text-muted">
+                  启用
+                  <Toggle checked={powerOn} onChange={setPowerOn} />
+                </label>
+              }
             >
               <Slider
                 label="目标功率（提高可获得更持久的 Boost）"
@@ -308,10 +313,10 @@ export function GpuTune() {
               title="锁定核心频率上限"
               supported={!!info && info.supportsLockedClocks && info.maxGraphicsClockMhz > 0}
               right={
-                <Toggle
-                  checked={coreOn}
-                  onChange={setCoreOn}
-                />
+                <label className="flex items-center gap-2 text-[11.5px] text-muted">
+                  启用
+                  <Toggle checked={coreOn} onChange={setCoreOn} />
+                </label>
               }
             >
               <Slider
