@@ -171,6 +171,7 @@ export const api = {
   getOverview: () => invoke<Overview>("get_overview"),
   getTopology: () => invoke<CpuTopology>("get_topology"),
   listProcesses: () => invoke<ProcInfo[]>("list_processes"),
+  gpuEngines: () => invoke<Record<string, number>>("gpu_engine_loads"),
   getMetrics: () => invoke<Metrics>("get_metrics"),
   setAffinity: (pid: number, mask: number) => invoke<void>("set_affinity", { pid, mask }),
   getProcessAffinity: (pid: number) =>

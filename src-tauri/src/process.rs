@@ -346,6 +346,89 @@ fn gpu_map() -> GpuSnapshot {
     GpuSnapshot { util, attribution }
 }
 
+/// Whole-GPU per-engine utilization query, kept separate from [`GPU_QUERY`] so
+/// the two PDH rate baselines don't interfere (this one is polled by the
+/// Performance view independently of the process list).
+struct GpuEngineQuery {
+    query: PDH_HQUERY,
+    util: PDH_HCOUNTER,
+}
+// SAFETY: handles are only ever touched behind GPU_ENGINE_QUERY's mutex.
+unsafe impl Send for GpuEngineQuery {}
+
+static GPU_ENGINE_QUERY: Lazy<Mutex<Option<GpuEngineQuery>>> =
+    Lazy::new(|| Mutex::new(open_gpu_engine_query()));
+
+fn open_gpu_engine_query() -> Option<GpuEngineQuery> {
+    unsafe {
+        let mut query = PDH_HQUERY::default();
+        if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != PDH_SUCCESS {
+            return None;
+        }
+        let path: Vec<u16> = r"\GPU Engine(*)\Utilization Percentage"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut util = PDH_HCOUNTER::default();
+        if PdhAddEnglishCounterW(query, PCWSTR(path.as_ptr()), 0, &mut util) != PDH_SUCCESS {
+            return None;
+        }
+        let _ = PdhCollectQueryData(query);
+        Some(GpuEngineQuery { query, util })
+    }
+}
+
+/// Whole-GPU per-engine utilization (percent), summed across every PDH instance
+/// and clamped to 0..100 — e.g. `{"3D": 87.0, "Copy": 1.0, "Video Encode": 0.0}`.
+/// Mirrors the Windows Task Manager GPU engine graphs. Empty on the priming
+/// sample or when PDH is unavailable.
+#[tauri::command]
+pub fn gpu_engine_loads() -> HashMap<String, f64> {
+    let mut totals: HashMap<String, f64> = HashMap::new();
+    let guard = GPU_ENGINE_QUERY.lock();
+    let Some(q) = guard.as_ref() else {
+        return totals;
+    };
+    unsafe {
+        if PdhCollectQueryData(q.query) != PDH_SUCCESS {
+            return totals;
+        }
+        let mut size: u32 = 0;
+        let mut count: u32 = 0;
+        let rc = PdhGetFormattedCounterArrayW(q.util, PDH_FMT_DOUBLE, &mut size, &mut count, None);
+        if rc != PDH_MORE_DATA || size == 0 {
+            return totals;
+        }
+        let mut bytes = vec![0u8; size as usize];
+        let items_ptr = bytes.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
+        if PdhGetFormattedCounterArrayW(q.util, PDH_FMT_DOUBLE, &mut size, &mut count, Some(items_ptr))
+            != PDH_SUCCESS
+        {
+            return totals;
+        }
+        let items = std::slice::from_raw_parts(items_ptr, count as usize);
+        for item in items {
+            if item.FmtValue.CStatus != PDH_SUCCESS || item.szName.is_null() {
+                continue;
+            }
+            let value = item.FmtValue.Anonymous.doubleValue;
+            if !value.is_finite() || value <= 0.0 {
+                continue;
+            }
+            let Ok(name) = item.szName.to_string() else {
+                continue;
+            };
+            if let Some(engtype) = parse_engtype(&name) {
+                *totals.entry(engine_label(engtype)).or_insert(0.0) += value;
+            }
+        }
+    }
+    for v in totals.values_mut() {
+        *v = v.clamp(0.0, 100.0);
+    }
+    totals
+}
+
 /// One Toolhelp pass: thread count per owning PID.
 pub fn thread_counts() -> CoreResult<HashMap<u32, u32>> {
     let mut map = HashMap::new();

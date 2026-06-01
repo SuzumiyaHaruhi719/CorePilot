@@ -31,6 +31,12 @@ fn main() {
             }
         }
         "gpu-reset" => print_result(gpu::gpu_oc_reset()),
+        "gpu-engines" => {
+            // PDH rate counters need two samples; prime, wait, then read.
+            let _ = process::gpu_engine_loads();
+            std::thread::sleep(Duration::from_millis(600));
+            print_json(&process::gpu_engine_loads());
+        }
         "topology" => print_json(&topology::detect()),
         "sensors" => print_json(&sensors::sample()),
         "memory" => match optimize::memory_detail() {

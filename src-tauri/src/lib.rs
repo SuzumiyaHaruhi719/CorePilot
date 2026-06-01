@@ -26,6 +26,7 @@ pub fn run() {
             commands::get_topology,
             commands::get_overview,
             commands::list_processes,
+            process::gpu_engine_loads,
             commands::get_metrics,
             commands::set_affinity,
             commands::get_process_affinity,

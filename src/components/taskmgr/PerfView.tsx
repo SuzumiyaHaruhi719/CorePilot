@@ -8,6 +8,7 @@ import { formatBytes } from "../../lib/format";
 import { api, type CpuTopology, type Overview } from "../../lib/ipc";
 import { useSettings, type PerfCard } from "../../store/settings";
 import { CoreGraphs } from "../charts/CoreGraphs";
+import { GpuDetail } from "./GpuDetail";
 import { Sparkline } from "../charts/Sparkline";
 import { AnimatedNumber } from "../ui/AnimatedNumber";
 
@@ -269,6 +270,8 @@ export function PerfView() {
           <CoreGraphs perCore={latest?.perCore ?? []} topo={topo} />
         </Card>
       )}
+
+      {perfCards.gpu && <GpuDetail />}
     </div>
   );
 }
