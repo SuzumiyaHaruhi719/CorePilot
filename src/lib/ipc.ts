@@ -130,6 +130,12 @@ export interface GpuOcInfo {
   supportsLockedClocks: boolean;
   supportsFanControl: boolean;
   supportsTempLimit: boolean;
+  /** NVAPI clock-offset overclocking available (Afterburner-style +/- MHz). */
+  supportsClockOffset: boolean;
+  coreOffsetMinMhz: number;
+  coreOffsetMaxMhz: number;
+  memOffsetMinMhz: number;
+  memOffsetMaxMhz: number;
 }
 
 export interface GpuOcSettings {
@@ -140,6 +146,10 @@ export interface GpuOcSettings {
   memClockMaxMhz?: number;
   fanSpeedPct?: number;
   tempLimitC?: number;
+  /** Core clock offset in MHz (NVAPI). */
+  coreOffsetMhz?: number;
+  /** Memory clock offset in MHz (NVAPI). */
+  memOffsetMhz?: number;
 }
 
 export interface ServiceItem {

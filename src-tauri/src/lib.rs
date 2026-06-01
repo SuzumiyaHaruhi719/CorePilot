@@ -2,6 +2,7 @@ pub mod affinity;
 pub mod commands;
 pub mod error;
 pub mod gpu;
+pub mod nvapi_oc;
 pub mod optimize;
 pub mod process;
 pub mod sensors;

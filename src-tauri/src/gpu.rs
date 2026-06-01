@@ -17,7 +17,6 @@
 //! passed to the driver.
 
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor, TemperatureThreshold};
-use nvml_wrapper::enums::device::GpuLockedClocksSetting;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::{Device, Nvml};
 use once_cell::sync::Lazy;
@@ -102,6 +101,14 @@ pub struct GpuOcInfo {
     pub supports_fan_control: bool,
     /// Whether setting the temperature limit (thermal target) is supported.
     pub supports_temp_limit: bool,
+    /// Whether NVAPI clock-offset overclocking is available (Afterburner-style).
+    pub supports_clock_offset: bool,
+    /// Core clock offset bounds (MHz).
+    pub core_offset_min_mhz: i32,
+    pub core_offset_max_mhz: i32,
+    /// Memory clock offset bounds (MHz).
+    pub mem_offset_min_mhz: i32,
+    pub mem_offset_max_mhz: i32,
 }
 
 /// Requested tuning changes. Every field is optional; `None` means "leave as-is".
@@ -120,8 +127,12 @@ pub struct GpuOcSettings {
     pub mem_clock_max_mhz: Option<u32>,
     /// Fan speed as a percentage, 0..=100 (applied to every fan).
     pub fan_speed_pct: Option<u32>,
-    /// Temperature limit (thermal target, GPU_MAX threshold), °C.
+    /// Temperature limit (thermal target), °C.
     pub temp_limit_c: Option<u32>,
+    /// Core clock OFFSET in MHz (NVAPI, Afterburner-style; +/- shifts the curve).
+    pub core_offset_mhz: Option<i32>,
+    /// Memory clock OFFSET in MHz (NVAPI).
+    pub mem_offset_mhz: Option<i32>,
 }
 
 /// Lowest temp limit we let the UI request, °C (sane floor).
@@ -241,9 +252,15 @@ pub fn gpu_oc_info() -> GpuOcInfo {
     // Locked-clocks support: presence of supported graphics clocks is the
     // proxy. A non-zero max also feeds the UI's slider range.
     info.max_graphics_clock_mhz = max_graphics_clock(&device);
-    // Core clock can be locked to a single value (see gpu_oc_apply); enabled
-    // when the hardware max clock is known.
-    info.supports_locked_clocks = info.max_graphics_clock_mhz > 0;
+    // Core-clock locking (NVML) is replaced by NVAPI clock OFFSETS — the lock
+    // crippled GeForce to its minimum; offsets are the real Afterburner control.
+    info.supports_locked_clocks = false;
+    info.supports_clock_offset = crate::nvapi_oc::available();
+    let (c_lo, c_hi, m_lo, m_hi) = crate::nvapi_oc::ranges();
+    info.core_offset_min_mhz = c_lo;
+    info.core_offset_max_mhz = c_hi;
+    info.mem_offset_min_mhz = m_lo;
+    info.mem_offset_max_mhz = m_hi;
 
     // Temp limit (thermal target). On consumer GeForce the GPU_MAX threshold is
     // NOT settable via NVML, but the ACOUSTIC_CURR threshold IS — it's the
@@ -340,22 +357,20 @@ pub fn gpu_oc_apply(settings: GpuOcSettings) -> Result<(), String> {
         }
     }
 
-    // --- Core clock lock ---
-    // A [min,max] RANGE-lock pins the GPU LOW on GeForce (observed: stuck at
-    // 255 MHz under load). Instead we LOCK TO A SINGLE VALUE = the requested
-    // clock, forcing the card to run at exactly that frequency — a real cap.
-    // (No idle downclock; a true offset needs NVAPI.) Memory locking is not
-    // applied. `gpu_oc_reset` clears the lock.
-    if let Some(target) = settings.core_clock_max_mhz.or(settings.core_clock_min_mhz) {
+    // --- Core / memory clock OFFSET (NVAPI, Afterburner-style) ---
+    // Shifts the voltage-frequency curve by +/- MHz: raises (or lowers) the
+    // boost ceiling while keeping dynamic boost and idle downclock — unlike the
+    // NVML lock, which pinned GeForce to its minimum under load.
+    if let Some(off) = settings.core_offset_mhz {
         requested += 1;
-        let ceiling = device.max_clock_info(Clock::Graphics).unwrap_or(target);
-        let value = clamp_u32(target, 300, ceiling);
-        let setting = GpuLockedClocksSetting::Numeric {
-            min_clock_mhz: value,
-            max_clock_mhz: value,
-        };
-        if let Err(e) = device.set_gpu_locked_clocks(setting) {
-            failures.push(format!("core clock lock: {e}"));
+        if let Err(e) = crate::nvapi_oc::set_core_offset(off) {
+            failures.push(format!("core offset: {e}"));
+        }
+    }
+    if let Some(off) = settings.mem_offset_mhz {
+        requested += 1;
+        if let Err(e) = crate::nvapi_oc::set_mem_offset(off) {
+            failures.push(format!("mem offset: {e}"));
         }
     }
 
@@ -410,7 +425,17 @@ pub fn gpu_oc_reset() -> Result<(), String> {
     let mut requested = 0usize;
     let mut failures: Vec<String> = Vec::new();
 
-    // --- Reset core locked clocks ---
+    // --- Reset NVAPI clock offsets (core + memory) to 0 ---
+    if crate::nvapi_oc::available() {
+        requested += 1;
+        let core_off = crate::nvapi_oc::set_core_offset(0);
+        let _ = crate::nvapi_oc::set_mem_offset(0);
+        if let Err(e) = core_off {
+            failures.push(format!("reset clock offset: {e}"));
+        }
+    }
+
+    // --- Reset core locked clocks (clears any lock left by older builds) ---
     requested += 1;
     if let Err(e) = device.reset_gpu_locked_clocks() {
         failures.push(format!("reset core clocks: {e}"));

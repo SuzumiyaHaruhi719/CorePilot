@@ -35,8 +35,6 @@ function getErrorMessage(e: unknown): string {
   return "操作失败";
 }
 
-const CORE_MIN_FLOOR = 210;
-
 function tempHue(t: number): number {
   if (t >= 83) return 22;
   if (t >= 72) return 55;
@@ -114,8 +112,10 @@ export function GpuTune() {
 
   const [powerOn, setPowerOn] = useState(true);
   const [powerW, setPowerW] = useState(300);
-  const [coreOn, setCoreOn] = useState(false);
-  const [coreMax, setCoreMax] = useState(2800);
+  const [coreOffOn, setCoreOffOn] = useState(false);
+  const [coreOffset, setCoreOffset] = useState(0);
+  const [memOffOn, setMemOffOn] = useState(false);
+  const [memOffset, setMemOffset] = useState(0);
   const [fanAuto, setFanAuto] = useState(true);
   const [fanPct, setFanPct] = useState(50);
   const [tempOn, setTempOn] = useState(false);
@@ -126,10 +126,8 @@ export function GpuTune() {
   function draftToSettings(): GpuOcSettings {
     const s: GpuOcSettings = {};
     if (powerOn) s.powerLimitW = powerW;
-    if (coreOn) {
-      s.coreClockMinMhz = CORE_MIN_FLOOR;
-      s.coreClockMaxMhz = coreMax;
-    }
+    if (coreOffOn) s.coreOffsetMhz = coreOffset;
+    if (memOffOn) s.memOffsetMhz = memOffset;
     if (!fanAuto) s.fanSpeedPct = fanPct;
     if (tempOn) s.tempLimitC = tempLimit;
     return s;
@@ -139,8 +137,10 @@ export function GpuTune() {
     setPowerOn(s.powerLimitW != null);
     if (s.powerLimitW != null) setPowerW(Math.round(s.powerLimitW));
     else if (fallback) setPowerW(Math.round(fallback.powerLimitW));
-    setCoreOn(s.coreClockMaxMhz != null);
-    if (s.coreClockMaxMhz != null) setCoreMax(s.coreClockMaxMhz);
+    setCoreOffOn(s.coreOffsetMhz != null);
+    if (s.coreOffsetMhz != null) setCoreOffset(s.coreOffsetMhz);
+    setMemOffOn(s.memOffsetMhz != null);
+    if (s.memOffsetMhz != null) setMemOffset(s.memOffsetMhz);
     setFanAuto(s.fanSpeedPct == null);
     if (s.fanSpeedPct != null) setFanPct(s.fanSpeedPct);
     setTempOn(s.tempLimitC != null);
@@ -171,7 +171,6 @@ export function GpuTune() {
     if (!info || !info.available || seeded.current) return;
     seeded.current = true;
     setPowerW(Math.round(info.powerLimitW));
-    setCoreMax(info.maxGraphicsClockMhz > 0 ? info.maxGraphicsClockMhz : 2800);
     setFanPct(info.fanSpeedPct > 0 ? info.fanSpeedPct : 50);
     if (info.tempLimitC > 0) setTempLimit(info.tempLimitC);
     const active = profiles.find((p) => p.id === activeId);
@@ -203,8 +202,10 @@ export function GpuTune() {
       setInfo(fresh);
       setPowerOn(true);
       setPowerW(Math.round(fresh.powerLimitW));
-      setCoreOn(false);
-      setCoreMax(fresh.maxGraphicsClockMhz > 0 ? fresh.maxGraphicsClockMhz : 2800);
+      setCoreOffOn(false);
+      setCoreOffset(0);
+      setMemOffOn(false);
+      setMemOffset(0);
       setFanAuto(true);
       setTempOn(false);
       if (fresh.tempLimitC > 0) setTempLimit(fresh.tempLimitC);
@@ -235,7 +236,7 @@ export function GpuTune() {
       <TabHeader
         icon={Rocket}
         title="GPU 超频"
-        subtitle="NVIDIA 显卡实时调优 — 功率 / 核心频率 / 风扇，配置可保存自动应用"
+        subtitle="NVIDIA 实时调优 — 功率 / 频率偏移(NVAPI) / 温度 / 风扇，配置可保存自动应用"
       />
 
       {info && !info.available ? (
@@ -319,24 +320,48 @@ export function GpuTune() {
             <ControlCard
               icon={Cpu}
               iconClass="text-accent"
-              title="锁定核心频率上限"
-              supported={!!info && info.supportsLockedClocks && info.maxGraphicsClockMhz > 0}
+              title="核心频率偏移"
+              supported={!!info?.supportsClockOffset}
               right={
                 <label className="flex items-center gap-2 text-[11.5px] text-muted">
                   启用
-                  <Toggle checked={coreOn} onChange={setCoreOn} />
+                  <Toggle checked={coreOffOn} onChange={setCoreOffOn} />
                 </label>
               }
             >
               <Slider
-                label="核心频率（在固件支持范围内锁定上限）"
-                value={coreMax}
-                min={300}
-                max={info && info.maxGraphicsClockMhz > 0 ? info.maxGraphicsClockMhz : 3000}
-                step={15}
+                label="核心频率偏移（Afterburner 式 +/- MHz，提升 Boost 上限）"
+                value={coreOffset}
+                min={info ? info.coreOffsetMinMhz : -500}
+                max={info ? info.coreOffsetMaxMhz : 1000}
+                step={5}
                 unit="MHz"
-                disabled={!coreOn || !info?.supportsLockedClocks || !info || info.maxGraphicsClockMhz === 0}
-                onChange={setCoreMax}
+                disabled={!coreOffOn || !info?.supportsClockOffset}
+                onChange={setCoreOffset}
+              />
+            </ControlCard>
+
+            <ControlCard
+              icon={MemoryStick}
+              iconClass="text-cyan"
+              title="显存频率偏移"
+              supported={!!info?.supportsClockOffset}
+              right={
+                <label className="flex items-center gap-2 text-[11.5px] text-muted">
+                  启用
+                  <Toggle checked={memOffOn} onChange={setMemOffOn} />
+                </label>
+              }
+            >
+              <Slider
+                label="显存频率偏移（+/- MHz）"
+                value={memOffset}
+                min={info ? info.memOffsetMinMhz : -2000}
+                max={info ? info.memOffsetMaxMhz : 3000}
+                step={10}
+                unit="MHz"
+                disabled={!memOffOn || !info?.supportsClockOffset}
+                onChange={setMemOffset}
               />
             </ControlCard>
 
@@ -454,7 +479,10 @@ export function GpuTune() {
                           <div className="nums text-[10px] text-dim">
                             {[
                               p.settings.powerLimitW != null && `${Math.round(p.settings.powerLimitW)}W`,
-                              p.settings.coreClockMaxMhz != null && `${p.settings.coreClockMaxMhz}MHz`,
+                              p.settings.coreOffsetMhz != null &&
+                                `核心${(p.settings.coreOffsetMhz ?? 0) >= 0 ? "+" : ""}${p.settings.coreOffsetMhz}MHz`,
+                              p.settings.memOffsetMhz != null &&
+                                `显存${(p.settings.memOffsetMhz ?? 0) >= 0 ? "+" : ""}${p.settings.memOffsetMhz}MHz`,
                               p.settings.fanSpeedPct != null && `风扇${p.settings.fanSpeedPct}%`,
                               p.settings.tempLimitC != null && `${p.settings.tempLimitC}°C`,
                             ]
@@ -485,7 +513,7 @@ export function GpuTune() {
           <div className="flex items-start gap-2 text-[11px] leading-relaxed text-dim">
             <AlertTriangle size={13} className="mt-0.5 shrink-0 text-warn/70" />
             <p>
-              调优通过 NVIDIA NVML 实现：功率上限、核心频率锁定与风扇转速均会被钳制在显卡固件允许的安全范围内，<span className="text-muted">不会超压、无法损坏硬件，且可随时「恢复默认」</span>。提示：NVML 的频率锁定是在固件支持区间内固定上/下限，并非 MSI Afterburner 那种 +MHz 偏移超频（后者需 NVAPI 私有接口，风险更高）。
+              功率上限 / 温度目标 / 风扇通过 NVIDIA <span className="text-muted">NVML</span>（钳制在固件安全范围，不会超压损坏）；核心 / 显存<span className="text-muted">频率偏移</span>通过 <span className="text-muted">NVAPI</span> 实现，即 MSI Afterburner 式 +/- MHz 真实超频，会提升 Boost 上限。<span className="text-warn/90">偏移过高可能花屏或崩溃 —— 请小幅递增测试稳定性，随时「恢复默认」清零。</span>
             </p>
           </div>
         </div>
