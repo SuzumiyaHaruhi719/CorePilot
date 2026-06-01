@@ -83,10 +83,11 @@ export function CoreAssignment() {
   const selectedGroup = groups.find((g) => g.id === selectedId) ?? null;
 
   const visible = useMemo(() => {
-    // 全部进程 view shows every *adjustable* process (protected/system
-    // processes whose affinity can't be set are hidden); a group view shows
-    // only its members.
-    const source = selectedGroup ? membersOf(selectedGroup) : processes.filter((p) => p.settable);
+    // Never show non-adjustable system processes anywhere in core-assignment:
+    // the 全部进程 view lists all adjustable processes, and a group view shows
+    // only its members — both filtered to processes whose affinity can be set.
+    const base = selectedGroup ? membersOf(selectedGroup) : processes;
+    const source = base.filter((p) => p.settable);
     const q = search.trim().toLowerCase();
     const filtered = q ? source.filter((p) => p.name.toLowerCase().includes(q)) : source;
     const sorted = [...filtered].sort((a, b) => {
