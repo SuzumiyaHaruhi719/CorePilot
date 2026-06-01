@@ -1,5 +1,5 @@
 import { CircleMinus, Copy, Cpu, ListTree, Plus, Search, SlidersHorizontal, X, Zap } from "lucide-react";
-import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { CoreGrid } from "../components/cores/CoreGrid";
 import { GroupRail } from "../components/cores/GroupRail";
 import { ProcessTable, type SortKey } from "../components/cores/ProcessTable";
@@ -40,7 +40,7 @@ export function CoreAssignment() {
   const [editMask, setEditMask] = useState(0);
   const [status, setStatus] = useState("");
   const [menu, setMenu] = useState<MenuState | null>(null);
-  const [targetGroupId, setTargetGroupId] = useState<string>("");
+  const addBtnRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     api.getTopology().then(setTopo).catch(() => undefined);
@@ -50,12 +50,6 @@ export function CoreAssignment() {
   useEffect(() => {
     setSelectedPids(new Set());
   }, [selectedId]);
-
-  // Keep the "add to group" target valid / defaulted to the first group.
-  useEffect(() => {
-    if (groups.length === 0) setTargetGroupId("");
-    else if (!groups.some((g) => g.id === targetGroupId)) setTargetGroupId(groups[0].id);
-  }, [groups, targetGroupId]);
 
   const fullMask = useMemo(() => (topo ? maskFromIds(topo.logical.map((l) => l.id)) : 0), [topo]);
 
@@ -146,17 +140,19 @@ export function CoreAssignment() {
     e.preventDefault();
     const group = groups.find((g) => g.patterns.includes(proc.name.toLowerCase()));
     const items: MenuState["items"] = [];
-    const addTarget = selectedGroup ?? groups.find((g) => g.id === targetGroupId) ?? null;
-    if (addTarget) {
-      items.push({
-        label: `添加到「${addTarget.name}」`,
-        icon: Plus,
-        onClick: () => {
-          assignProcess(addTarget.id, proc.name);
-          if (optimizationEnabled) void applyToProcess(addTarget, proc).catch(() => undefined);
-          setStatus(`已添加 ${proc.name} 到「${addTarget.name}」`);
-        },
-      });
+    if (!selectedGroup) {
+      // 全部进程: explicit per-group add choices (no silent default group).
+      for (const g of groups) {
+        items.push({
+          label: `添加到「${g.name}」`,
+          icon: Plus,
+          onClick: () => {
+            assignProcess(g.id, proc.name);
+            if (optimizationEnabled) void applyToProcess(g, proc).catch(() => undefined);
+            setStatus(`已添加 ${proc.name} 到「${g.name}」`);
+          },
+        });
+      }
     }
     if (group) {
       items.push({
@@ -210,12 +206,9 @@ export function CoreAssignment() {
     return processes.filter((p) => names.has(p.name.toLowerCase()));
   }
 
-  async function assignSelected() {
-    const target = groups.find((g) => g.id === targetGroupId) ?? null;
-    if (!target) {
-      setStatus("请先创建一个分组");
-      return;
-    }
+  async function assignSelectedTo(groupId: string) {
+    const target = groups.find((g) => g.id === groupId) ?? null;
+    if (!target) return;
     const chosen = processes.filter((p) => selectedPids.has(p.pid));
     let failed = 0;
     for (const proc of chosen) {
@@ -233,6 +226,24 @@ export function CoreAssignment() {
       `已添加 ${chosen.length} 个进程到「${target.name}」` +
         (failed ? ` · ${failed} 个受保护进程应用失败` : ""),
     );
+  }
+
+  // Open a menu under the "添加到分组" button so the user picks the target group.
+  function openAddMenu() {
+    if (groups.length === 0) {
+      setStatus("请先在左侧创建一个分组");
+      return;
+    }
+    const r = addBtnRef.current?.getBoundingClientRect();
+    setMenu({
+      x: r ? Math.round(r.left) : 320,
+      y: r ? Math.round(r.bottom + 6) : 120,
+      items: groups.map((g) => ({
+        label: `添加到「${g.name}」`,
+        icon: Plus,
+        onClick: () => void assignSelectedTo(g.id),
+      })),
+    });
   }
 
   /** Remove the selected member processes from the current group (group view). */
@@ -381,28 +392,15 @@ export function CoreAssignment() {
                   <CircleMinus size={14} /> 移出分组{selectedPids.size > 0 ? ` (${selectedPids.size})` : ""}
                 </Button>
               ) : (
-                <>
-                  <select
-                    value={targetGroupId}
-                    onChange={(e) => setTargetGroupId(e.target.value)}
-                    className="no-drag rounded-lg border border-line bg-surface2 px-2 py-1.5 text-[12.5px] text-ink outline-none focus:border-accent/50"
-                    title="添加到哪个分组"
-                  >
-                    {groups.length === 0 && <option value="">无分组</option>}
-                    {groups.map((g) => (
-                      <option key={g.id} value={g.id}>
-                        {g.name}
-                      </option>
-                    ))}
-                  </select>
+                <div ref={addBtnRef}>
                   <Button
                     variant="primary"
-                    onClick={assignSelected}
+                    onClick={openAddMenu}
                     disabled={selectedPids.size === 0 || groups.length === 0}
                   >
-                    <Plus size={14} /> 添加到分组{selectedPids.size > 0 ? ` (${selectedPids.size})` : ""}
+                    <Plus size={14} /> 添加到分组{selectedPids.size > 0 ? ` (${selectedPids.size})` : ""} ▾
                   </Button>
-                </>
+                </div>
               )}
             </div>
           </div>
