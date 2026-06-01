@@ -1,5 +1,5 @@
 import { Download, Plus, Power, Upload } from "lucide-react";
-import { motion } from "motion/react";
+import { AnimatePresence, motion } from "motion/react";
 import { cn } from "../../lib/cn";
 import { maskToCpuList } from "../../lib/format";
 import { hoverPop } from "../../lib/motion";
@@ -50,13 +50,17 @@ export function GroupRail({
       </div>
 
       <div className="min-h-0 flex-1 space-y-1.5 overflow-auto px-2.5 pb-2">
-        {groups.map((group) => {
+        <AnimatePresence initial={false}>
+          {groups.map((group) => {
           const active = activeCount(group, processes);
           const selected = group.id === selectedId;
           return (
             <motion.button
               key={group.id}
               layout
+              initial={{ opacity: 0, scale: 0.8 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.8 }}
               onClick={() => select(group.id)}
               whileHover={{ scale: 1.02, y: -2 }}
               whileTap={{ scale: 0.985 }}
@@ -84,7 +88,8 @@ export function GroupRail({
               <ClickRipple />
             </motion.button>
           );
-        })}
+          })}
+        </AnimatePresence>
         {groups.length === 0 && (
           <div className="px-2 py-8 text-center text-[12px] leading-relaxed text-dim">
             还没有分组

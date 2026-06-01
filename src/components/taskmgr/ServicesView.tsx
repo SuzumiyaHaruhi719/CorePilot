@@ -1,4 +1,4 @@
-import { Play, RotateCw, Search, Square } from "lucide-react";
+import { ArrowDown, ArrowUp, Play, RotateCw, Search, Square } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { cn } from "../../lib/cn";
 import { api, type ServiceItem } from "../../lib/ipc";
@@ -18,11 +18,45 @@ const STATUS_LABEL: Record<string, string> = {
   other: "其他",
 };
 
+const STATUS_RANK: Record<string, number> = { running: 0, paused: 1, stopped: 2, other: 3 };
+
+type SKey = "display" | "status";
+
+function SortHead({
+  label,
+  active,
+  dir,
+  onClick,
+  align = "left",
+}: {
+  label: string;
+  active: boolean;
+  dir: "asc" | "desc";
+  onClick: () => void;
+  align?: "left" | "right";
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "no-drag flex items-center gap-1 text-[11.5px] font-medium transition-colors hover:text-ink",
+        align === "right" ? "justify-end" : "justify-start",
+        active ? "text-accent" : "text-muted",
+      )}
+    >
+      {label}
+      {active && (dir === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+    </button>
+  );
+}
+
 export function ServicesView() {
   const [services, setServices] = useState<ServiceItem[]>([]);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [sortKey, setSortKey] = useState<SKey>("display");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   async function load() {
     try {
@@ -36,12 +70,25 @@ export function ServicesView() {
     void load();
   }, []);
 
+  function sort(k: SKey) {
+    if (k === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else {
+      setSortKey(k);
+      setSortDir("asc");
+    }
+  }
+
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return q
+    const filtered = q
       ? services.filter((s) => s.display.toLowerCase().includes(q) || s.name.toLowerCase().includes(q))
       : services;
-  }, [services, search]);
+    return [...filtered].sort((a, b) => {
+      const byName = (a.display || a.name).localeCompare(b.display || b.name);
+      const r = sortKey === "status" ? (STATUS_RANK[a.status] ?? 9) - (STATUS_RANK[b.status] ?? 9) || byName : byName;
+      return sortDir === "asc" ? r : -r;
+    });
+  }, [services, search, sortKey, sortDir]);
 
   async function control(svc: ServiceItem, action: "start" | "stop" | "restart") {
     setBusy(svc.name);
@@ -82,9 +129,9 @@ export function ServicesView() {
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/50">
         <div className={cn("grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2 text-[11.5px] font-medium text-muted", COLS)}>
-          <span>服务</span>
-          <span>状态</span>
-          <span className="text-right">操作</span>
+          <SortHead label="服务" active={sortKey === "display"} dir={sortDir} onClick={() => sort("display")} />
+          <SortHead label="状态" active={sortKey === "status"} dir={sortDir} onClick={() => sort("status")} />
+          <span className="text-right text-[11.5px] font-medium text-muted">操作</span>
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
           {visible.map((svc) => (

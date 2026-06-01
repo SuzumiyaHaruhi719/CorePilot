@@ -51,8 +51,8 @@ export function TmProcessTable({
   detailed,
 }: TmProcessTableProps) {
   const cols = detailed
-    ? "grid-cols-[minmax(0,1fr)_64px_52px_92px_96px_40px]"
-    : "grid-cols-[minmax(0,1fr)_52px_92px_96px_40px]";
+    ? "grid-cols-[minmax(0,1fr)_56px_44px_78px_46px_minmax(96px,0.9fr)_84px_36px]"
+    : "grid-cols-[minmax(0,1fr)_48px_84px_50px_92px_40px]";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/50">
@@ -61,6 +61,8 @@ export function TmProcessTable({
         {detailed && <span className="text-right text-[11.5px] font-medium text-muted">PID</span>}
         <Head k="threads" label="线程" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <Head k="cpu" label="CPU" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+        <Head k="gpu" label="GPU" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+        {detailed && <span className="text-[11.5px] font-medium text-muted">GPU 引擎</span>}
         <Head k="mem" label="内存" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <span />
       </div>
@@ -86,6 +88,17 @@ export function TmProcessTable({
               </span>
               <span className="nums w-[38px] text-right text-ink">{p.cpu.toFixed(1)}</span>
             </div>
+            <span
+              className="nums text-right text-dim"
+              title={p.gpu > 0.05 ? `${p.gpuAdapter ?? "GPU"} · ${p.gpuEngine ?? ""}`.trim() : undefined}
+            >
+              {p.gpu > 0.05 ? p.gpu.toFixed(1) : "—"}
+            </span>
+            {detailed && (
+              <span className="truncate text-[11.5px] text-muted" title={p.gpuAdapter ?? undefined}>
+                {p.gpu > 0.05 ? (p.gpuEngine ?? "—") : "—"}
+              </span>
+            )}
             <span className="nums text-right text-muted">{formatBytes(p.mem, 0)}</span>
             <button
               onClick={() => onEndTask(p)}

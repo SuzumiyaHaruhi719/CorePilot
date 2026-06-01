@@ -17,11 +17,12 @@ export function Toggle({ checked, onChange }: ToggleProps) {
       )}
     >
       <motion.span
-        layout
-        transition={{ type: "spring", stiffness: 520, damping: 32 }}
+        initial={false}
+        animate={{ x: checked ? 20 : 0 }}
+        transition={{ type: "spring", stiffness: 500, damping: 34 }}
         className={cn(
-          "absolute top-1/2 h-[18px] w-[18px] -translate-y-1/2 rounded-full",
-          checked ? "right-[3px] bg-accent-bright" : "left-[3px] bg-dim",
+          "absolute left-[3px] top-[3px] h-[18px] w-[18px] rounded-full",
+          checked ? "bg-accent-bright" : "bg-dim",
         )}
       />
     </button>
