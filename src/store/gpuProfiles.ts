@@ -1,6 +1,7 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 import type { GpuOcSettings } from "../lib/ipc";
+import { tauriStorage } from "../lib/persist";
 
 export interface GpuProfile {
   id: string;
@@ -47,6 +48,6 @@ export const useGpuProfiles = create<GpuProfileState>()(
       setActive: (activeId) => set({ activeId }),
       setApplyOnStartup: (applyOnStartup) => set({ applyOnStartup }),
     }),
-    { name: "corepilot-gpu-profiles", version: 1 },
+    { name: "corepilot-gpu-profiles", version: 1, storage: createJSONStorage(() => tauriStorage) },
   ),
 );

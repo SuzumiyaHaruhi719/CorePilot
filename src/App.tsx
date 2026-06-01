@@ -37,12 +37,20 @@ function App() {
     api.getOverview().then(setOverview).catch(() => undefined);
   }, []);
 
-  // Auto-apply the active GPU overclock profile on launch, if enabled.
+  // Auto-apply the active GPU overclock profile on launch, if enabled. Storage
+  // is async (tauri-plugin-store), so wait for hydration before reading state.
   useEffect(() => {
-    const { applyOnStartup, activeId, profiles } = useGpuProfiles.getState();
-    if (!applyOnStartup || !activeId) return;
-    const active = profiles.find((p) => p.id === activeId);
-    if (active) api.gpuOcApply(active.settings).catch(() => undefined);
+    const applyActive = () => {
+      const { applyOnStartup, activeId, profiles } = useGpuProfiles.getState();
+      if (!applyOnStartup || !activeId) return;
+      const active = profiles.find((p) => p.id === activeId);
+      if (active) api.gpuOcApply(active.settings).catch(() => undefined);
+    };
+    if (useGpuProfiles.persist.hasHydrated()) {
+      applyActive();
+      return;
+    }
+    return useGpuProfiles.persist.onFinishHydration(applyActive);
   }, []);
 
   useEffect(() => {

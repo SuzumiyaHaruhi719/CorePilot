@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
+import { tauriStorage } from "../lib/persist";
 
 /**
  * A process group / affinity rule. Persisted ("memory") and matched against
@@ -85,7 +86,7 @@ export const useGroups = create<GroupsState>()(
       markSeeded: () => set({ seeded: true }),
       importGroups: (groups) => set({ groups, selectedId: null }),
     }),
-    { name: "corepilot-groups", version: 1 },
+    { name: "corepilot-groups", version: 1, storage: createJSONStorage(() => tauriStorage) },
   ),
 );
 

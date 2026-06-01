@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
+import { tauriStorage } from "../lib/persist";
 
 export type AccentName = "violet" | "cyan" | "teal" | "amber" | "rose";
 
@@ -45,6 +46,6 @@ export const useSettings = create<SettingsState>()(
       togglePerfCard: (card) =>
         set((s) => ({ perfCards: { ...s.perfCards, [card]: !s.perfCards[card] } })),
     }),
-    { name: "corepilot-settings", version: 1 },
+    { name: "corepilot-settings", version: 1, storage: createJSONStorage(() => tauriStorage) },
   ),
 );
