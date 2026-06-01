@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use corepilot_lib::{gpu, optimize, process, sensors, topology, winsvc};
+use corepilot_lib::{affinity, gpu, optimize, process, sensors, topology, winsvc};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -51,6 +51,16 @@ fn main() {
         "purge-standby" => print_result(optimize::purge_standby().map_err(|e| e.to_string())),
         "flush-dns" => print_result(optimize::flush_dns().map_err(|e| e.to_string())),
         "clean-temp" => print_json(&optimize::clean_temp()),
+        "set-affinity" => {
+            let pid = args.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let mask = args.get(3).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            print_result(affinity::set_affinity(pid, mask).map_err(|e| e.to_string()));
+        }
+        "set-priority" => {
+            let pid = args.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let class = args.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0x20);
+            print_result(affinity::set_priority(pid, class).map_err(|e| e.to_string()));
+        }
         "services" => match winsvc::list_services() {
             Ok(mut v) => {
                 if let Some(f) = args.get(2) {
