@@ -150,6 +150,44 @@
     -webkit-app-region: no-drag;
     app-region: no-drag;
   }
+
+  /* Premium range slider (GPU tuning) — filled track + glowing knob. */
+  .cp-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 6px;
+    border-radius: 999px;
+    background: linear-gradient(
+      to right,
+      var(--color-accent) var(--pct, 0%),
+      var(--color-surface3) var(--pct, 0%)
+    );
+    outline: none;
+    cursor: pointer;
+  }
+  .cp-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 999px;
+    background: var(--color-accent-bright);
+    border: 2px solid var(--color-base);
+    box-shadow:
+      0 0 0 1px color-mix(in oklch, var(--color-accent) 80%, transparent),
+      0 0 12px color-mix(in oklch, var(--color-accent) calc(55% * var(--glow-o, 1)), transparent);
+    transition: transform 0.14s var(--ease-out-quint);
+  }
+  .cp-slider:hover::-webkit-slider-thumb {
+    transform: scale(1.18);
+  }
+  .cp-slider:active::-webkit-slider-thumb {
+    transform: scale(1.06);
+  }
+  .cp-slider:disabled {
+    cursor: not-allowed;
+  }
 }
 
 @keyframes pulse-glow {

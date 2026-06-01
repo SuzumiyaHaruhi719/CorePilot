@@ -1,0 +1,67 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="tile" x1="512" y1="72" x2="512" y2="952" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#181426"/>
+      <stop offset="1" stop-color="#09080F"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(512 452) rotate(90) scale(440)">
+      <stop stop-color="#7C5CFF" stop-opacity="0.55"/>
+      <stop offset="0.55" stop-color="#7C5CFF" stop-opacity="0.13"/>
+      <stop offset="1" stop-color="#7C5CFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="dieStroke" x1="298" y1="298" x2="726" y2="726" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B6A1FF"/>
+      <stop offset="1" stop-color="#5B3CE0"/>
+    </linearGradient>
+    <linearGradient id="dieFill" x1="512" y1="298" x2="512" y2="726" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1C1733"/>
+      <stop offset="1" stop-color="#100D1C"/>
+    </linearGradient>
+    <linearGradient id="pin" x1="512" y1="244" x2="512" y2="324" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9079FF"/>
+      <stop offset="1" stop-color="#4733B8"/>
+    </linearGradient>
+    <linearGradient id="core" x1="512" y1="372" x2="512" y2="652" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A88BFF"/>
+      <stop offset="0.5" stop-color="#5E8BF5"/>
+      <stop offset="1" stop-color="#2FD6C6"/>
+    </linearGradient>
+    <filter id="coreGlow" x="-70%" y="-70%" width="240%" height="240%">
+      <feGaussianBlur stdDeviation="28" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="tileClip"><rect x="72" y="72" width="880" height="880" rx="212"/></clipPath>
+  </defs>
+
+  <rect x="72" y="72" width="880" height="880" rx="212" fill="url(#tile)"/>
+  <g clip-path="url(#tileClip)">
+    <rect x="72" y="72" width="880" height="880" fill="url(#halo)"/>
+    <rect x="72" y="72" width="880" height="300" fill="#FFFFFF" opacity="0.035"/>
+  </g>
+
+  <g fill="url(#pin)">
+    <rect x="338" y="252" width="48" height="78" rx="16"/>
+    <rect x="488" y="252" width="48" height="78" rx="16"/>
+    <rect x="638" y="252" width="48" height="78" rx="16"/>
+    <rect x="338" y="694" width="48" height="78" rx="16"/>
+    <rect x="488" y="694" width="48" height="78" rx="16"/>
+    <rect x="638" y="694" width="48" height="78" rx="16"/>
+    <rect x="252" y="338" width="78" height="48" rx="16"/>
+    <rect x="252" y="488" width="78" height="48" rx="16"/>
+    <rect x="252" y="638" width="78" height="48" rx="16"/>
+    <rect x="694" y="338" width="78" height="48" rx="16"/>
+    <rect x="694" y="488" width="78" height="48" rx="16"/>
+    <rect x="694" y="638" width="78" height="48" rx="16"/>
+  </g>
+
+  <rect x="298" y="298" width="428" height="428" rx="92" fill="url(#dieFill)" stroke="url(#dieStroke)" stroke-width="10"/>
+
+  <g filter="url(#coreGlow)">
+    <rect x="372" y="372" width="280" height="280" rx="68" fill="url(#core)"/>
+  </g>
+
+  <g stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M438 556 L512 476 L586 556" stroke="#FFFFFF" stroke-width="38"/>
+    <path d="M438 614 L512 534 L586 614" stroke="#FFFFFF" stroke-width="38" opacity="0.42"/>
+  </g>
+</svg>

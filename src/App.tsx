@@ -8,15 +8,18 @@ import { ACCENT_HUE, useSettings } from "./store/settings";
 import { useAffinityEnforcer } from "./hooks/useAffinityEnforcer";
 import { useUi, type TabId } from "./store/ui";
 import { CoreAssignment } from "./tabs/CoreAssignment";
+import { GpuTune } from "./tabs/GpuTune";
 import { Monitor } from "./tabs/Monitor";
 import { Optimize } from "./tabs/Optimize";
 import { Settings } from "./tabs/Settings";
 import { TaskManager } from "./tabs/TaskManager";
+import { useGpuProfiles } from "./store/gpuProfiles";
 
 const TABS: Record<TabId, () => ReactElement> = {
   cores: CoreAssignment,
   taskmgr: TaskManager,
   monitor: Monitor,
+  gpu: GpuTune,
   optimize: Optimize,
   settings: Settings,
 };
@@ -32,6 +35,14 @@ function App() {
 
   useEffect(() => {
     api.getOverview().then(setOverview).catch(() => undefined);
+  }, []);
+
+  // Auto-apply the active GPU overclock profile on launch, if enabled.
+  useEffect(() => {
+    const { applyOnStartup, activeId, profiles } = useGpuProfiles.getState();
+    if (!applyOnStartup || !activeId) return;
+    const active = profiles.find((p) => p.id === activeId);
+    if (active) api.gpuOcApply(active.settings).catch(() => undefined);
   }, []);
 
   useEffect(() => {

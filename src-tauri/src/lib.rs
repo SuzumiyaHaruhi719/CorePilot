@@ -1,6 +1,7 @@
 mod affinity;
 mod commands;
 mod error;
+mod gpu;
 mod optimize;
 mod process;
 mod sensors;
@@ -42,6 +43,9 @@ pub fn run() {
             commands::control_service,
             commands::list_startup,
             commands::set_startup_enabled,
+            gpu::gpu_oc_info,
+            gpu::gpu_oc_apply,
+            gpu::gpu_oc_reset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

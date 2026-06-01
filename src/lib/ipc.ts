@@ -101,6 +101,38 @@ export interface Sensors {
   gpuTemp: number | null;
 }
 
+export interface GpuOcInfo {
+  available: boolean;
+  name: string;
+  driverVersion: string;
+  graphicsClock: number;
+  memClock: number;
+  smClock: number;
+  temperature: number;
+  powerUsageW: number;
+  powerLimitW: number;
+  powerLimitMinW: number;
+  powerLimitMaxW: number;
+  fanSpeedPct: number;
+  utilizationGpu: number;
+  utilizationMem: number;
+  memUsedBytes: number;
+  memTotalBytes: number;
+  maxGraphicsClockMhz: number;
+  supportsPowerLimit: boolean;
+  supportsLockedClocks: boolean;
+  supportsFanControl: boolean;
+}
+
+export interface GpuOcSettings {
+  powerLimitW?: number;
+  coreClockMinMhz?: number;
+  coreClockMaxMhz?: number;
+  memClockMinMhz?: number;
+  memClockMaxMhz?: number;
+  fanSpeedPct?: number;
+}
+
 export interface ServiceItem {
   name: string;
   display: string;
@@ -153,4 +185,7 @@ export const api = {
   listStartup: () => invoke<StartupItem[]>("list_startup"),
   setStartupEnabled: (name: string, location: string, enabled: boolean) =>
     invoke<void>("set_startup_enabled", { name, location, enabled }),
+  gpuOcInfo: () => invoke<GpuOcInfo>("gpu_oc_info"),
+  gpuOcApply: (settings: GpuOcSettings) => invoke<void>("gpu_oc_apply", { settings }),
+  gpuOcReset: () => invoke<void>("gpu_oc_reset"),
 };
