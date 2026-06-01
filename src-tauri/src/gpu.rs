@@ -16,10 +16,12 @@
 //! NVML-reported constraints before calling, so out-of-range values are never
 //! passed to the driver.
 
-use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
+use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor, TemperatureThreshold};
 use nvml_wrapper::enums::device::GpuLockedClocksSetting;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::{Device, Nvml};
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 /// Convert milliwatts (NVML's power unit) to watts.
@@ -85,12 +87,21 @@ pub struct GpuOcInfo {
     pub mem_total_bytes: u64,
     /// Highest supported graphics clock (MHz) at the top memory clock; 0 if unknown.
     pub max_graphics_clock_mhz: u32,
+    /// Current thermal target (GPU_MAX threshold), °C — the temperature the card
+    /// throttles to hold. This is the "temp limit" knob.
+    pub temp_limit_c: u32,
+    /// Minimum settable temp limit, °C.
+    pub temp_limit_min_c: u32,
+    /// Maximum settable temp limit, °C (firmware slowdown ceiling).
+    pub temp_limit_max_c: u32,
     /// Whether reading/setting the power-management limit is supported.
     pub supports_power_limit: bool,
     /// Whether locked GPU core clocks are supported.
     pub supports_locked_clocks: bool,
     /// Whether manual fan control is supported.
     pub supports_fan_control: bool,
+    /// Whether setting the temperature limit (thermal target) is supported.
+    pub supports_temp_limit: bool,
 }
 
 /// Requested tuning changes. Every field is optional; `None` means "leave as-is".
@@ -109,7 +120,17 @@ pub struct GpuOcSettings {
     pub mem_clock_max_mhz: Option<u32>,
     /// Fan speed as a percentage, 0..=100 (applied to every fan).
     pub fan_speed_pct: Option<u32>,
+    /// Temperature limit (thermal target, GPU_MAX threshold), °C.
+    pub temp_limit_c: Option<u32>,
 }
+
+/// Lowest temp limit we let the UI request, °C (sane floor).
+const TEMP_LIMIT_FLOOR: u32 = 50;
+
+/// Factory thermal target captured on first read, restored by reset.
+static DEFAULT_TEMP_LIMIT: Lazy<Mutex<Option<u32>>> = Lazy::new(|| Mutex::new(None));
+/// Cached one-time probe: is the GPU_MAX threshold settable on this GPU?
+static TEMP_LIMIT_SETTABLE: Lazy<Mutex<Option<bool>>> = Lazy::new(|| Mutex::new(None));
 
 /// `true` for `NvmlError::NotSupported`, used to distinguish "capability
 /// absent" from a genuine failure when probing `supports_*` flags.
@@ -222,6 +243,39 @@ pub fn gpu_oc_info() -> GpuOcInfo {
     info.max_graphics_clock_mhz = max_graphics_clock(&device);
     info.supports_locked_clocks = info.max_graphics_clock_mhz > 0;
 
+    // Temp limit (thermal target = GPU_MAX threshold). Read current, capture the
+    // factory default once, and probe set-ability a single time with a no-op set
+    // (writing the current value back), caching the result so we don't write on
+    // every poll.
+    if let Ok(cur) = device.temperature_threshold(TemperatureThreshold::GpuMax) {
+        info.temp_limit_c = cur;
+        info.temp_limit_min_c = TEMP_LIMIT_FLOOR;
+        let slowdown = device
+            .temperature_threshold(TemperatureThreshold::Slowdown)
+            .unwrap_or(95);
+        info.temp_limit_max_c = slowdown.clamp(cur, 98);
+        {
+            let mut def = DEFAULT_TEMP_LIMIT.lock();
+            if def.is_none() {
+                *def = Some(cur);
+            }
+        }
+        let settable = {
+            let mut cache = TEMP_LIMIT_SETTABLE.lock();
+            match *cache {
+                Some(v) => v,
+                None => {
+                    let ok = device
+                        .set_temperature_threshold(TemperatureThreshold::GpuMax, cur as i32)
+                        .is_ok();
+                    *cache = Some(ok);
+                    ok
+                }
+            }
+        };
+        info.supports_temp_limit = settable;
+    }
+
     info
 }
 
@@ -330,6 +384,19 @@ pub fn gpu_oc_apply(settings: GpuOcSettings) -> Result<(), String> {
         }
     }
 
+    // --- Temperature limit (thermal target = GPU_MAX threshold) ---
+    if let Some(target_c) = settings.temp_limit_c {
+        requested += 1;
+        let ceiling = device
+            .temperature_threshold(TemperatureThreshold::Slowdown)
+            .unwrap_or(95)
+            .min(98);
+        let clamped = clamp_u32(target_c, TEMP_LIMIT_FLOOR, ceiling);
+        if let Err(e) = device.set_temperature_threshold(TemperatureThreshold::GpuMax, clamped as i32) {
+            failures.push(format!("temp limit: {e}"));
+        }
+    }
+
     finish(requested, failures)
 }
 
@@ -396,6 +463,18 @@ pub fn gpu_oc_reset() -> Result<(), String> {
         Err(e) => {
             requested += 1;
             failures.push(format!("reset fans: num_fans failed: {e}"));
+        }
+    }
+
+    // --- Restore factory thermal target ---
+    if let Some(default_c) = *DEFAULT_TEMP_LIMIT.lock() {
+        match device.set_temperature_threshold(TemperatureThreshold::GpuMax, default_c as i32) {
+            Ok(()) => requested += 1,
+            Err(NvmlError::NotSupported) => {}
+            Err(e) => {
+                requested += 1;
+                failures.push(format!("reset temp limit: {e}"));
+            }
         }
     }
 

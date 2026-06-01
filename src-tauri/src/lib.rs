@@ -1,14 +1,14 @@
-mod affinity;
-mod commands;
-mod error;
-mod gpu;
-mod optimize;
-mod process;
-mod sensors;
-mod state;
-mod sysmon;
-mod topology;
-mod winsvc;
+pub mod affinity;
+pub mod commands;
+pub mod error;
+pub mod gpu;
+pub mod optimize;
+pub mod process;
+pub mod sensors;
+pub mod state;
+pub mod sysmon;
+pub mod topology;
+pub mod winsvc;
 
 use state::AppState;
 

@@ -121,9 +121,13 @@ export interface GpuOcInfo {
   memUsedBytes: number;
   memTotalBytes: number;
   maxGraphicsClockMhz: number;
+  tempLimitC: number;
+  tempLimitMinC: number;
+  tempLimitMaxC: number;
   supportsPowerLimit: boolean;
   supportsLockedClocks: boolean;
   supportsFanControl: boolean;
+  supportsTempLimit: boolean;
 }
 
 export interface GpuOcSettings {
@@ -133,6 +137,7 @@ export interface GpuOcSettings {
   memClockMinMhz?: number;
   memClockMaxMhz?: number;
   fanSpeedPct?: number;
+  tempLimitC?: number;
 }
 
 export interface ServiceItem {

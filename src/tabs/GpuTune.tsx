@@ -118,6 +118,8 @@ export function GpuTune() {
   const [coreMax, setCoreMax] = useState(2800);
   const [fanAuto, setFanAuto] = useState(true);
   const [fanPct, setFanPct] = useState(50);
+  const [tempOn, setTempOn] = useState(false);
+  const [tempLimit, setTempLimit] = useState(83);
 
   const seeded = useRef(false);
 
@@ -129,6 +131,7 @@ export function GpuTune() {
       s.coreClockMaxMhz = coreMax;
     }
     if (!fanAuto) s.fanSpeedPct = fanPct;
+    if (tempOn) s.tempLimitC = tempLimit;
     return s;
   }
 
@@ -140,6 +143,9 @@ export function GpuTune() {
     if (s.coreClockMaxMhz != null) setCoreMax(s.coreClockMaxMhz);
     setFanAuto(s.fanSpeedPct == null);
     if (s.fanSpeedPct != null) setFanPct(s.fanSpeedPct);
+    setTempOn(s.tempLimitC != null);
+    if (s.tempLimitC != null) setTempLimit(s.tempLimitC);
+    else if (fallback && fallback.tempLimitC > 0) setTempLimit(fallback.tempLimitC);
   }
 
   // Live readout polling.
@@ -167,6 +173,7 @@ export function GpuTune() {
     setPowerW(Math.round(info.powerLimitW));
     setCoreMax(info.maxGraphicsClockMhz > 0 ? info.maxGraphicsClockMhz : 2800);
     setFanPct(info.fanSpeedPct > 0 ? info.fanSpeedPct : 50);
+    if (info.tempLimitC > 0) setTempLimit(info.tempLimitC);
     const active = profiles.find((p) => p.id === activeId);
     if (active) loadDraft(active.settings, info);
   }, [info, profiles, activeId]);
@@ -199,6 +206,8 @@ export function GpuTune() {
       setCoreOn(false);
       setCoreMax(fresh.maxGraphicsClockMhz > 0 ? fresh.maxGraphicsClockMhz : 2800);
       setFanAuto(true);
+      setTempOn(false);
+      if (fresh.tempLimitC > 0) setTempLimit(fresh.tempLimitC);
       setStatus("已恢复出厂默认");
     } catch (e: unknown) {
       setStatus(getErrorMessage(e));
@@ -332,6 +341,29 @@ export function GpuTune() {
             </ControlCard>
 
             <ControlCard
+              icon={Thermometer}
+              iconClass="text-warn"
+              title="温度上限"
+              supported={!!info?.supportsTempLimit}
+              right={
+                <label className="flex items-center gap-2 text-[11.5px] text-muted">
+                  启用
+                  <Toggle checked={tempOn} onChange={setTempOn} />
+                </label>
+              }
+            >
+              <Slider
+                label="目标温度（达到后自动降频维持，越低越凉、性能略降）"
+                value={tempLimit}
+                min={info && info.tempLimitMinC > 0 ? info.tempLimitMinC : 50}
+                max={info && info.tempLimitMaxC > 0 ? info.tempLimitMaxC : 90}
+                unit="°C"
+                disabled={!tempOn || !info?.supportsTempLimit}
+                onChange={setTempLimit}
+              />
+            </ControlCard>
+
+            <ControlCard
               icon={Fan}
               iconClass="text-cyan"
               title="风扇转速"
@@ -424,6 +456,7 @@ export function GpuTune() {
                               p.settings.powerLimitW != null && `${Math.round(p.settings.powerLimitW)}W`,
                               p.settings.coreClockMaxMhz != null && `${p.settings.coreClockMaxMhz}MHz`,
                               p.settings.fanSpeedPct != null && `风扇${p.settings.fanSpeedPct}%`,
+                              p.settings.tempLimitC != null && `${p.settings.tempLimitC}°C`,
                             ]
                               .filter(Boolean)
                               .join(" · ") || "默认"}
