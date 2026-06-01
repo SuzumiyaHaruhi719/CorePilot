@@ -47,6 +47,14 @@ export interface ProcInfo {
   power: number;
   /** CPU affinity mask (allowed logical CPUs); 0 if inaccessible. */
   affinity: number;
+  /** Process owner account (e.g. "SYSTEM", "Thomas"). */
+  user?: string | null;
+  /** Open handle count. */
+  handles?: number;
+  /** Total CPU time in seconds (kernel + user). */
+  cpuTime?: number;
+  /** "64位" | "32位". */
+  platform?: string | null;
   /** Dominant GPU engine for this process, e.g. "3D" / "Video Encode" / "Compute". */
   gpuEngine?: string | null;
   /** Which GPU adapter the process is using, e.g. "NVIDIA GeForce RTX 4090". */

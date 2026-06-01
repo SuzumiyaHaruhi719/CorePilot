@@ -6,6 +6,7 @@ import { Button } from "../ui/Button";
 import { ContextMenu, type MenuState } from "../ui/ContextMenu";
 import { Modal } from "../ui/Modal";
 import type { SortKey } from "../cores/ProcessTable";
+import { DetailsTable } from "./DetailsTable";
 import { TmProcessTable } from "./TmProcessTable";
 
 interface ProcessViewProps {
@@ -116,15 +117,25 @@ export function ProcessView({ detailed }: ProcessViewProps) {
         {status && <span className="ml-auto text-[11.5px] text-accent">{status}</span>}
       </div>
 
-      <TmProcessTable
-        processes={visible}
-        sortKey={sortKey}
-        sortDir={sortDir}
-        onSort={handleSort}
-        onEndTask={setPendingKill}
-        onRowContextMenu={openRowMenu}
-        detailed={detailed}
-      />
+      {detailed ? (
+        <DetailsTable
+          processes={visible}
+          sortKey={sortKey}
+          sortDir={sortDir}
+          onSort={handleSort}
+          onEndTask={setPendingKill}
+          onRowContextMenu={openRowMenu}
+        />
+      ) : (
+        <TmProcessTable
+          processes={visible}
+          sortKey={sortKey}
+          sortDir={sortDir}
+          onSort={handleSort}
+          onEndTask={setPendingKill}
+          onRowContextMenu={openRowMenu}
+        />
+      )}
 
       <Modal
         open={!!pendingKill}

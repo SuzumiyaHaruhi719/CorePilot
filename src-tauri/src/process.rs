@@ -6,12 +6,16 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::HashMap;
 use sysinfo::{ProcessesToUpdate, System};
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::CloseHandle;
+use windows::core::{PCWSTR, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+use windows::Win32::Security::{
+    GetTokenInformation, LookupAccountSidW, TokenUser, PSID, SID_NAME_USE, TOKEN_QUERY, TOKEN_USER,
+};
+use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN;
 use windows::Win32::System::Threading::{
-    GetProcessAffinityMask, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
-    TerminateProcess,
+    GetProcessAffinityMask, GetProcessHandleCount, GetProcessTimes, IsWow64Process2, OpenProcess,
+    OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
@@ -33,6 +37,16 @@ pub struct ProcInfo {
     pub power: f32,
     /// Process CPU affinity mask (allowed logical CPUs); 0 when inaccessible.
     pub affinity: u64,
+    /// Process owner account name (e.g. "SYSTEM", "Thomas", "LOCAL SERVICE"),
+    /// or `None` when the token/SID can't be resolved. Serialized as `userName`.
+    #[serde(rename = "userName")]
+    pub user: Option<String>,
+    /// Open handle count for this process; 0 when inaccessible.
+    pub handles: u32,
+    /// Total CPU time (kernel + user) consumed by this process, in seconds.
+    pub cpu_time: u64,
+    /// Process architecture: "64位" or "32位"; `None` when undeterminable.
+    pub platform: Option<String>,
     /// Dominant GPU engine label for this process (e.g. "3D", "Compute"), or
     /// `None` when GPU usage is negligible / unattributable.
     pub gpu_engine: Option<String>,
@@ -350,7 +364,10 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
     // Per-process GPU utilization + engine/adapter attribution, collected once
     // for this snapshot.
     let gpu = gpu_map();
-    sys.processes()
+    // PIDs seen this refresh, used afterwards to prune the detail cache.
+    let mut live_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let out: Vec<ProcInfo> = sys
+        .processes()
         .iter()
         .map(|(pid, process)| {
             let id = pid.as_u32();
@@ -365,6 +382,10 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
             // requires a kernel/MSR sensor driver. Weighted blend of this
             // process's normalized CPU% and GPU%.
             let power = (cpu * 0.6 + gpu_pct * 0.4).min(100.0);
+            // One OpenProcess per process for affinity + handles + cpu_time +
+            // cached user/platform.
+            let details = process_details(id);
+            live_pids.insert(id);
             ProcInfo {
                 pid: id,
                 name: process.name().to_string_lossy().to_string(),
@@ -373,12 +394,22 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
                 threads: threads.get(&id).copied().unwrap_or(0),
                 gpu: gpu_pct,
                 power,
-                affinity: process_affinity(id),
+                affinity: details.affinity,
+                user: details.user,
+                handles: details.handles,
+                cpu_time: details.cpu_time,
+                platform: details.platform,
                 gpu_engine,
                 gpu_adapter,
             }
         })
-        .collect()
+        .collect();
+
+    // Drop cached user/platform for PIDs that no longer exist so the cache
+    // tracks the live process set instead of growing unbounded.
+    DETAIL_CACHE.lock().retain(|pid, _| live_pids.contains(pid));
+
+    out
 }
 
 /// Terminate a process (End task).
@@ -392,21 +423,211 @@ pub fn kill(pid: u32) -> CoreResult<()> {
     Ok(())
 }
 
-/// Read a process's CPU affinity mask (allowed logical CPUs). Returns 0 when the
-/// process can't be opened (protected/system) — never panics.
-fn process_affinity(pid: u32) -> u64 {
+/// Per-process detail bundle resolved from a single `OpenProcess` handle.
+/// All fields default to zero/`None` when the process can't be opened
+/// (protected/system) so callers degrade gracefully.
+struct ProcDetails {
+    /// CPU affinity mask (allowed logical CPUs); 0 when inaccessible.
+    affinity: u64,
+    /// Open handle count; 0 when inaccessible.
+    handles: u32,
+    /// Total CPU time (kernel + user) in seconds.
+    cpu_time: u64,
+    /// Process owner account name; `None` when unresolved.
+    user: Option<String>,
+    /// "64位" / "32位"; `None` when undeterminable.
+    platform: Option<String>,
+}
+
+impl Default for ProcDetails {
+    fn default() -> Self {
+        ProcDetails {
+            affinity: 0,
+            handles: 0,
+            cpu_time: 0,
+            user: None,
+            platform: None,
+        }
+    }
+}
+
+/// Cache for the *static* per-PID details (user, platform) keyed by pid:
+/// `(user, platform)`. These never change for the lifetime of a process, so we
+/// resolve them once (the SID lookup + WoW64 probe are comparatively expensive)
+/// and reuse them on every refresh. Pruned in [`list`] to the live PID set.
+static DETAIL_CACHE: Lazy<Mutex<HashMap<u32, (Option<String>, Option<String>)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Combine a kernel+user [`FILETIME`] pair into total CPU seconds. Each FILETIME
+/// is a 64-bit count of 100-ns ticks split across high/low words; summed and
+/// divided by 10_000_000 to yield whole seconds.
+fn cpu_seconds(kernel: FILETIME, user: FILETIME) -> u64 {
+    let to_ticks =
+        |ft: FILETIME| ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
+    (to_ticks(kernel) + to_ticks(user)) / 10_000_000
+}
+
+/// Resolve the owning account name for an open process handle via its token
+/// user SID. Two-call `GetTokenInformation` then `LookupAccountSidW`. Returns
+/// just the account name (e.g. "Thomas" / "SYSTEM"); `None` on any failure.
+/// Never panics; no `unwrap` on FFI.
+fn resolve_user(handle: HANDLE) -> Option<String> {
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(handle, TOKEN_QUERY, &mut token).is_err() {
+            return None;
+        }
+
+        // First call sizes the TOKEN_USER buffer (expected to fail with the
+        // required length written back).
+        let mut len: u32 = 0;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+        if len == 0 {
+            let _ = CloseHandle(token);
+            return None;
+        }
+
+        let mut buf = vec![0u8; len as usize];
+        let ok = GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
+            len,
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        if !ok {
+            return None;
+        }
+
+        let token_user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let sid = PSID(token_user.User.Sid.0);
+        if sid.0.is_null() {
+            return None;
+        }
+
+        // First LookupAccountSidW sizes the name + domain buffers.
+        let mut name_len: u32 = 0;
+        let mut domain_len: u32 = 0;
+        let mut sid_use = SID_NAME_USE::default();
+        let _ = LookupAccountSidW(
+            PCWSTR::null(),
+            sid,
+            None,
+            &mut name_len,
+            None,
+            &mut domain_len,
+            &mut sid_use,
+        );
+        if name_len == 0 {
+            return None;
+        }
+
+        let mut name = vec![0u16; name_len as usize];
+        let mut domain = vec![0u16; domain_len.max(1) as usize];
+        if LookupAccountSidW(
+            PCWSTR::null(),
+            sid,
+            Some(PWSTR(name.as_mut_ptr())),
+            &mut name_len,
+            Some(PWSTR(domain.as_mut_ptr())),
+            &mut domain_len,
+            &mut sid_use,
+        )
+        .is_err()
+        {
+            return None;
+        }
+
+        let end = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+        let account = String::from_utf16_lossy(&name[..end]);
+        if account.is_empty() {
+            None
+        } else {
+            Some(account)
+        }
+    }
+}
+
+/// Determine process architecture ("64位"/"32位") for an open handle. Uses
+/// `IsWow64Process2`: a non-`UNKNOWN` *process* machine means the process is
+/// running under WoW64 (32-bit on 64-bit Windows). `None` on failure.
+fn resolve_platform(handle: HANDLE) -> Option<String> {
+    unsafe {
+        let mut process_machine = IMAGE_FILE_MACHINE_UNKNOWN;
+        let mut native_machine = IMAGE_FILE_MACHINE_UNKNOWN;
+        if IsWow64Process2(handle, &mut process_machine, Some(&mut native_machine)).is_err() {
+            return None;
+        }
+        if process_machine != IMAGE_FILE_MACHINE_UNKNOWN {
+            Some("32位".to_string())
+        } else {
+            Some("64位".to_string())
+        }
+    }
+}
+
+/// Open a process once and gather affinity + handle count + CPU time, plus the
+/// statically-cached owner and architecture. Returns all-default values when the
+/// process can't be opened (protected/system). Never panics; no `unwrap` on FFI.
+fn process_details(pid: u32) -> ProcDetails {
     unsafe {
         let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false.into(), pid) else {
-            return 0;
+            return ProcDetails::default();
         };
+
+        // Affinity (cheap; recomputed each refresh as it can change).
         let mut proc_mask: usize = 0;
         let mut sys_mask: usize = 0;
-        let ok = GetProcessAffinityMask(handle, &mut proc_mask, &mut sys_mask).is_ok();
-        let _ = CloseHandle(handle);
-        if ok {
+        let affinity = if GetProcessAffinityMask(handle, &mut proc_mask, &mut sys_mask).is_ok() {
             proc_mask as u64
         } else {
             0
+        };
+
+        // Open handle count.
+        let mut count: u32 = 0;
+        let handles = if GetProcessHandleCount(handle, &mut count).is_ok() {
+            count
+        } else {
+            0
+        };
+
+        // Total CPU time (kernel + user) in seconds.
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user_time = FILETIME::default();
+        let cpu_time =
+            if GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user_time)
+                .is_ok()
+            {
+                cpu_seconds(kernel, user_time)
+            } else {
+                0
+            };
+
+        // Static fields (owner + architecture): resolve once per PID, then cache.
+        let (user, platform) = {
+            let mut cache = DETAIL_CACHE.lock();
+            if let Some(cached) = cache.get(&pid) {
+                cached.clone()
+            } else {
+                let resolved = (resolve_user(handle), resolve_platform(handle));
+                cache.insert(pid, resolved.clone());
+                resolved
+            }
+        };
+
+        let _ = CloseHandle(handle);
+
+        ProcDetails {
+            affinity,
+            handles,
+            cpu_time,
+            user,
+            platform,
         }
     }
 }

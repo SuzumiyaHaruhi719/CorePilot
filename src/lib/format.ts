@@ -10,6 +10,15 @@ export function formatPct(value: number, digits = 1): string {
   return `${value.toFixed(digits)}%`;
 }
 
+/** Seconds → "H:MM:SS" (process CPU time). */
+export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0:00:00";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
 /** Format a logical-CPU mask into a compact list like "0-7, 16, 18". */
 export function maskToCpuList(mask: number): string {
   const ids: number[] = [];
