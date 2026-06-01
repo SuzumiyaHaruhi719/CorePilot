@@ -98,6 +98,9 @@ export interface ServiceItem {
   display: string;
   status: string;
   startType: string;
+  pid?: number;
+  description?: string;
+  group?: string;
 }
 
 export interface StartupItem {

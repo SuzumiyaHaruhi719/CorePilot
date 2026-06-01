@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { cn } from "../../lib/cn";
 import { api, type ServiceItem } from "../../lib/ipc";
 
-const COLS = "grid-cols-[minmax(0,1fr)_84px_132px]";
+const COLS = "grid-cols-[minmax(110px,0.9fr)_52px_minmax(0,1.5fr)_70px_minmax(0,0.7fr)_108px]";
 
 const STATUS_STYLE: Record<string, string> = {
   running: "text-ok",
@@ -129,8 +129,11 @@ export function ServicesView() {
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/50">
         <div className={cn("grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2 text-[11.5px] font-medium text-muted", COLS)}>
-          <SortHead label="服务" active={sortKey === "display"} dir={sortDir} onClick={() => sort("display")} />
+          <SortHead label="服务名" active={sortKey === "display"} dir={sortDir} onClick={() => sort("display")} />
+          <span className="text-[11.5px] font-medium text-muted">PID</span>
+          <span className="text-[11.5px] font-medium text-muted">描述</span>
           <SortHead label="状态" active={sortKey === "status"} dir={sortDir} onClick={() => sort("status")} />
+          <span className="text-[11.5px] font-medium text-muted">组</span>
           <span className="text-right text-[11.5px] font-medium text-muted">操作</span>
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
@@ -139,14 +142,18 @@ export function ServicesView() {
               key={svc.name}
               className={cn("grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] hover:bg-surface2/50", COLS)}
             >
-              <div className="min-w-0">
-                <div className="truncate text-ink" title={svc.display}>
-                  {svc.display || svc.name}
-                </div>
-                <div className="truncate text-[10.5px] text-dim">{svc.name}</div>
-              </div>
+              <span className="truncate text-ink" title={svc.display || svc.name}>
+                {svc.name}
+              </span>
+              <span className="nums text-dim">{svc.pid ? svc.pid : "—"}</span>
+              <span className="truncate text-[11.5px] text-muted" title={svc.description || svc.display}>
+                {svc.description || svc.display || "—"}
+              </span>
               <span className={cn("text-[12px]", STATUS_STYLE[svc.status] ?? "text-dim")}>
                 {STATUS_LABEL[svc.status] ?? svc.status}
+              </span>
+              <span className="truncate text-[11px] text-dim" title={svc.group}>
+                {svc.group || "—"}
               </span>
               <div className="flex items-center justify-end gap-1.5">
                 {svc.status === "running" ? (

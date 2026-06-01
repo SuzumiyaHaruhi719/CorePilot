@@ -23,8 +23,10 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::Services::{
     CloseServiceHandle, ControlService, EnumServicesStatusExW, OpenSCManagerW, OpenServiceW,
-    QueryServiceStatus, StartServiceW, ENUM_SERVICE_STATUS_PROCESSW, SC_ENUM_PROCESS_INFO,
-    SC_HANDLE, SC_MANAGER_ENUMERATE_SERVICE, SERVICE_CONTROL_STOP, SERVICE_PAUSED,
+    QueryServiceConfig2W, QueryServiceConfigW, QueryServiceStatus, StartServiceW,
+    ENUM_SERVICE_STATUS_PROCESSW, QUERY_SERVICE_CONFIGW, SC_ENUM_PROCESS_INFO, SC_HANDLE,
+    SC_MANAGER_CONNECT, SC_MANAGER_ENUMERATE_SERVICE, SERVICE_CONFIG_DESCRIPTION,
+    SERVICE_CONTROL_STOP, SERVICE_DESCRIPTIONW, SERVICE_PAUSED, SERVICE_QUERY_CONFIG,
     SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START, SERVICE_STATE_ALL, SERVICE_STATUS,
     SERVICE_STATUS_CURRENT_STATE, SERVICE_STOP, SERVICE_STOPPED, SERVICE_WIN32,
 };
@@ -40,6 +42,12 @@ pub struct ServiceItem {
     pub display: String,
     pub status: String,
     pub start_type: String,
+    /// PID of the hosting process, or 0 when the service is not running.
+    pub pid: u32,
+    /// Service description (may be empty if unreadable or unset).
+    pub description: String,
+    /// Load-order group (may be empty if unreadable or unset).
+    pub group: String,
 }
 
 #[derive(Serialize)]
@@ -98,10 +106,21 @@ fn status_label(state: SERVICE_STATUS_CURRENT_STATE) -> String {
 /// Enumerate all Win32 services (any state). `start_type` is left as "other"
 /// because querying it per service (`QueryServiceConfig`) is far too slow for
 /// the hundreds of services a typical machine has.
+///
+/// `pid` comes straight from the enumeration (process id of the hosting
+/// process, 0 when stopped). `description` and `group` are read per service via
+/// `QueryServiceConfig2W`/`QueryServiceConfigW`; this list loads on demand so
+/// the extra per-service queries are acceptable. Any per-service failure leaves
+/// those two fields empty and never aborts the list.
 pub fn list_services() -> CoreResult<Vec<ServiceItem>> {
     unsafe {
-        // Open the SCM with just enough rights to enumerate.
-        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ENUMERATE_SERVICE)?;
+        // Connect + enumerate rights: enough to enumerate and to open each
+        // service for SERVICE_QUERY_CONFIG below.
+        let scm = OpenSCManagerW(
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SC_MANAGER_ENUMERATE_SERVICE | SC_MANAGER_CONNECT,
+        )?;
         let scm = ScHandle(scm);
 
         // First call: discover the required byte count.
@@ -165,17 +184,142 @@ pub fn list_services() -> CoreResult<Vec<ServiceItem>> {
             } else {
                 entry.lpDisplayName.to_string().unwrap_or_else(|_| name.clone())
             };
+            // PID straight from the enumeration; 0 means the service isn't running.
+            let pid = entry.ServiceStatusProcess.dwProcessId;
+            // Per-service description + load-order group (best-effort, "" on any failure).
+            let (description, group) = if name.is_empty() {
+                (String::new(), String::new())
+            } else {
+                read_service_config(scm.0, &name)
+            };
             items.push(ServiceItem {
                 name,
                 display,
                 status: status_label(entry.ServiceStatusProcess.dwCurrentState),
                 start_type: "other".to_string(),
+                pid,
+                description,
+                group,
             });
         }
 
         // Sort by display name (case-insensitive) for a stable UI ordering.
         items.sort_by(|a, b| a.display.to_lowercase().cmp(&b.display.to_lowercase()));
         Ok(items)
+    }
+}
+
+/// Open one service (read-only) and return `(description, group)`.
+///
+/// Best-effort throughout: a failed open or query yields empty strings rather
+/// than aborting. Both reads use the documented size-then-fill (two-call)
+/// pattern; backing buffers are allocated as the destination struct type so the
+/// embedded `PWSTR` pointers are correctly aligned.
+///
+/// # Safety
+/// `scm` must be a valid SCM handle opened with at least `SC_MANAGER_CONNECT`.
+unsafe fn read_service_config(scm: SC_HANDLE, name: &str) -> (String, String) {
+    let empty = (String::new(), String::new());
+
+    let name_w = wide(name);
+    let svc = match OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_CONFIG) {
+        Ok(h) => ScHandle(h),
+        Err(_) => return empty,
+    };
+
+    let description = read_service_description(svc.0);
+    let group = read_service_group(svc.0);
+    (description, group)
+}
+
+/// `QueryServiceConfig2W(SERVICE_CONFIG_DESCRIPTION)` two-call read → trimmed
+/// description (empty on any failure or when `lpDescription` is null).
+///
+/// # Safety
+/// `svc` must be a valid service handle with `SERVICE_QUERY_CONFIG` access.
+unsafe fn read_service_description(svc: SC_HANDLE) -> String {
+    // First call: discover the byte count (None buffer is expected to fail).
+    let mut bytes_needed: u32 = 0;
+    let probe = QueryServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, None, &mut bytes_needed);
+    match probe {
+        Ok(()) => return String::new(), // succeeded with no buffer → nothing to read
+        Err(_) if bytes_needed == 0 => return String::new(),
+        Err(_) => {}
+    }
+
+    // Back the byte buffer with the destination struct type for correct
+    // alignment of the trailing string data the API appends.
+    let stride = std::mem::size_of::<SERVICE_DESCRIPTIONW>();
+    let count = (bytes_needed as usize).div_ceil(stride).max(1);
+    let mut buffer: Vec<SERVICE_DESCRIPTIONW> = Vec::with_capacity(count);
+    let byte_len = count * stride;
+    let byte_slice = std::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u8, byte_len);
+
+    bytes_needed = 0;
+    if QueryServiceConfig2W(
+        svc,
+        SERVICE_CONFIG_DESCRIPTION,
+        Some(byte_slice),
+        &mut bytes_needed,
+    )
+    .is_err()
+    {
+        return String::new();
+    }
+
+    let desc = &*(buffer.as_ptr());
+    if desc.lpDescription.is_null() {
+        String::new()
+    } else {
+        desc.lpDescription
+            .to_string()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    }
+}
+
+/// `QueryServiceConfigW` two-call read → load-order group (empty on any failure
+/// or when `lpLoadOrderGroup` is null/empty).
+///
+/// # Safety
+/// `svc` must be a valid service handle with `SERVICE_QUERY_CONFIG` access.
+unsafe fn read_service_group(svc: SC_HANDLE) -> String {
+    // First call: discover the byte count (None buffer is expected to fail).
+    let mut bytes_needed: u32 = 0;
+    let probe = QueryServiceConfigW(svc, None, 0, &mut bytes_needed);
+    match probe {
+        Ok(()) => return String::new(),
+        Err(_) if bytes_needed == 0 => return String::new(),
+        Err(_) => {}
+    }
+
+    // Allocate as the struct type (correct alignment for embedded PWSTRs); the
+    // API derives capacity from `cbbufsize` in bytes.
+    let stride = std::mem::size_of::<QUERY_SERVICE_CONFIGW>();
+    let count = (bytes_needed as usize).div_ceil(stride).max(1);
+    let mut buffer: Vec<QUERY_SERVICE_CONFIGW> = Vec::with_capacity(count);
+    let cb_buf_size = (count * stride) as u32;
+
+    bytes_needed = 0;
+    if QueryServiceConfigW(
+        svc,
+        Some(buffer.as_mut_ptr()),
+        cb_buf_size,
+        &mut bytes_needed,
+    )
+    .is_err()
+    {
+        return String::new();
+    }
+
+    let cfg = &*(buffer.as_ptr());
+    if cfg.lpLoadOrderGroup.is_null() {
+        String::new()
+    } else {
+        cfg.lpLoadOrderGroup
+            .to_string()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
     }
 }
 
