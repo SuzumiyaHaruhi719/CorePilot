@@ -33,10 +33,14 @@ export function ContextMenu({ state, onClose }: ContextMenuProps) {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
-    window.addEventListener("click", close);
+    // Defer the click-to-close listener by a tick so the very click that opens
+    // the menu (e.g. a left-click on a trigger button) doesn't immediately
+    // close it. Right-click menus are unaffected (they fire `contextmenu`).
+    const timer = window.setTimeout(() => window.addEventListener("click", close), 0);
     window.addEventListener("resize", close);
     window.addEventListener("keydown", onKey);
     return () => {
+      window.clearTimeout(timer);
       window.removeEventListener("click", close);
       window.removeEventListener("resize", close);
       window.removeEventListener("keydown", onKey);
