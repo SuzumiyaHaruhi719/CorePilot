@@ -5,10 +5,16 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::ffi::c_void;
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
 use sysinfo::{ProcessesToUpdate, System};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+use windows::Win32::Storage::FileSystem::{
+    GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+};
 use windows::Win32::Security::{
     GetTokenInformation, LookupAccountSidW, TokenUser, PSID, SID_NAME_USE, TOKEN_QUERY, TOKEN_USER,
 };
@@ -53,6 +59,10 @@ pub struct ProcInfo {
     /// Human name of the GPU adapter this process is primarily using (e.g.
     /// "NVIDIA GeForce RTX 4090"), or `None` when unknown.
     pub gpu_adapter: Option<String>,
+    /// Friendly file description from the exe's version resource (e.g. "Google
+    /// Chrome") — the name Windows Task Manager shows. `None` for binaries
+    /// without version info (most system processes).
+    pub description: Option<String>,
 }
 
 /// PDH success return code (`ERROR_SUCCESS`).
@@ -401,6 +411,7 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
                 platform: details.platform,
                 gpu_engine,
                 gpu_adapter,
+                description: description_for(process.exe()),
             }
         })
         .collect();
@@ -457,6 +468,101 @@ impl Default for ProcDetails {
 /// and reuse them on every refresh. Pruned in [`list`] to the live PID set.
 static DETAIL_CACHE: Lazy<Mutex<HashMap<u32, (Option<String>, Option<String>)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Cache of exe-path → friendly FileDescription (e.g. "Google Chrome"), the name
+/// Windows Task Manager shows. Keyed by full image path and resolved once per
+/// distinct executable (the version-resource read is comparatively expensive).
+/// `None` means the binary has no version info / description (common for system
+/// processes). Bounded by the set of distinct executables on the machine.
+static DESC_CACHE: Lazy<Mutex<HashMap<String, Option<String>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Friendly description for a process image, cached by path. `None` when the
+/// path is empty (inaccessible) or the binary carries no FileDescription.
+fn description_for(path: Option<&Path>) -> Option<String> {
+    let path = path?;
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    let key = path.to_string_lossy().to_string();
+    if let Some(cached) = DESC_CACHE.lock().get(&key) {
+        return cached.clone();
+    }
+    let desc = exe_description(path);
+    DESC_CACHE.lock().insert(key, desc.clone());
+    desc
+}
+
+/// Read the `FileDescription` string from an executable's version resource.
+/// Returns `None` when the file has no version info / no description. Never
+/// panics; written defensively with no `unwrap`.
+fn exe_description(path: &Path) -> Option<String> {
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let size = GetFileVersionInfoSizeW(PCWSTR(wide.as_ptr()), None);
+        if size == 0 {
+            return None;
+        }
+        let mut data = vec![0u8; size as usize];
+        GetFileVersionInfoW(PCWSTR(wide.as_ptr()), Some(0), size, data.as_mut_ptr() as *mut c_void)
+            .ok()?;
+
+        // Resolve the (language, codepage) translation; fall back to US-English.
+        let mut trans_ptr: *mut c_void = std::ptr::null_mut();
+        let mut trans_len: u32 = 0;
+        let trans_q: Vec<u16> = r"\VarFileInfo\Translation"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let (lang, cp) = if VerQueryValueW(
+            data.as_ptr() as *const c_void,
+            PCWSTR(trans_q.as_ptr()),
+            &mut trans_ptr,
+            &mut trans_len,
+        )
+        .as_bool()
+            && !trans_ptr.is_null()
+            && trans_len >= 4
+        {
+            let lang = *(trans_ptr as *const u16);
+            let cp = *((trans_ptr as *const u16).add(1));
+            (lang, cp)
+        } else {
+            (0x0409u16, 0x04B0u16)
+        };
+
+        let sub = format!("\\StringFileInfo\\{lang:04x}{cp:04x}\\FileDescription");
+        let sub_w: Vec<u16> = sub.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut val_ptr: *mut c_void = std::ptr::null_mut();
+        let mut val_len: u32 = 0;
+        if !VerQueryValueW(
+            data.as_ptr() as *const c_void,
+            PCWSTR(sub_w.as_ptr()),
+            &mut val_ptr,
+            &mut val_len,
+        )
+        .as_bool()
+            || val_ptr.is_null()
+            || val_len == 0
+        {
+            return None;
+        }
+        let chars = std::slice::from_raw_parts(val_ptr as *const u16, val_len as usize);
+        let text = String::from_utf16_lossy(chars)
+            .trim_end_matches('\0')
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+}
 
 /// Combine a kernel+user [`FILETIME`] pair into total CPU seconds. Each FILETIME
 /// is a 64-bit count of 100-ns ticks split across high/low words; summed and

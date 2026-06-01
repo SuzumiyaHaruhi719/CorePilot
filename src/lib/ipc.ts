@@ -59,6 +59,8 @@ export interface ProcInfo {
   gpuEngine?: string | null;
   /** Which GPU adapter the process is using, e.g. "NVIDIA GeForce RTX 4090". */
   gpuAdapter?: string | null;
+  /** Friendly file description (e.g. "Google Chrome") — the name Task Manager shows. */
+  description?: string | null;
 }
 
 export interface Metrics {

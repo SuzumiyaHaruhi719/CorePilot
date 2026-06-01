@@ -24,6 +24,9 @@ src-tauri/sensord/obj/
 
 # branding render intermediates (keep .svg sources + final .gif/.png)
 branding/frames/
+branding/shots/
+branding/.shot.png
+branding/.crop.png
 
 # Editor directories and files
 .vscode/*

@@ -74,9 +74,16 @@ export function TmProcessTable({
             onContextMenu={(e) => onRowContextMenu?.(e, p)}
             className={cn("group grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] hover:bg-surface2/50", cols)}
           >
-            <span className="truncate text-ink" title={p.name}>
-              {p.name}
-            </span>
+            <div className="flex min-w-0 flex-col">
+              <span className="truncate text-ink" title={p.description ?? p.name}>
+                {p.description ?? p.name}
+              </span>
+              {p.description && (
+                <span className="truncate text-[10.5px] leading-tight text-dim" title={p.name}>
+                  {p.name}
+                </span>
+              )}
+            </div>
             {detailed && <span className="nums text-right text-dim">{p.pid}</span>}
             <span className="nums text-right text-muted">{p.threads || "—"}</span>
             <div className="flex items-center justify-end gap-1.5">
