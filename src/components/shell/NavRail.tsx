@@ -2,7 +2,7 @@ import { Cpu, Gauge, ListTree, Settings as SettingsIcon, Zap } from "lucide-reac
 import type { LucideIcon } from "lucide-react";
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
-import { springSmooth } from "../../lib/motion";
+import { hoverPop } from "../../lib/motion";
 import { useUi, type TabId } from "../../store/ui";
 import { ClickRipple } from "../ui/Ripple";
 
@@ -43,9 +43,9 @@ export function NavRail() {
               />
             )}
             <motion.span
-              whileHover={{ scale: 1.12, y: -2 }}
+              whileHover={{ scale: 1.14, y: -2 }}
               whileTap={{ scale: 0.9 }}
-              transition={springSmooth}
+              transition={hoverPop}
               className={cn(
                 "relative z-10 transition-colors",
                 active ? "text-accent-bright glow-text" : "text-dim",

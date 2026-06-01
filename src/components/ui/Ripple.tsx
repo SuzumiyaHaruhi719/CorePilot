@@ -22,7 +22,7 @@ export function ClickRipple() {
     if (!parent) return;
     const handler = (e: PointerEvent) => {
       const rect = parent.getBoundingClientRect();
-      const size = Math.max(rect.width, rect.height) * 1.5;
+      const size = Math.max(rect.width, rect.height);
       const id = performance.now();
       setItems((prev) => [
         ...prev,
@@ -40,17 +40,16 @@ export function ClickRipple() {
         {items.map((r) => (
           <motion.span
             key={r.id}
-            initial={{ opacity: 0.55, scale: 0 }}
-            animate={{ opacity: 0, scale: 1 }}
+            initial={{ opacity: 0.42, scale: 0 }}
+            animate={{ opacity: 0, scale: 2.4 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.62, ease: "easeOut" }}
+            transition={{ duration: 0.6, ease: "easeOut" }}
             style={{
               left: r.x,
               top: r.y,
               width: r.size,
               height: r.size,
-              background:
-                "radial-gradient(circle, color-mix(in oklch, var(--color-accent) 60%, transparent) 0%, transparent 68%)",
+              background: "radial-gradient(circle, rgba(255,255,255,0.4), rgba(255,255,255,0) 70%)",
             }}
             className="absolute rounded-full"
           />

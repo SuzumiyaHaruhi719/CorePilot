@@ -6,6 +6,9 @@ export const springSoft: Transition = { type: "spring", stiffness: 180, damping:
 export const springSnappy: Transition = { type: "spring", stiffness: 420, damping: 30 };
 export const easeOut = [0.22, 1, 0.36, 1] as const;
 
+/** Hover/press tween matching the reference monitor: cubic-bezier(.22,1,.36,1), ~.18s. */
+export const hoverPop: Transition = { type: "tween", duration: 0.18, ease: easeOut };
+
 /** Staggered list/grid entrance. */
 export const staggerParent: Variants = {
   hidden: {},

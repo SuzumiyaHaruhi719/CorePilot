@@ -2,7 +2,7 @@ import { Download, Plus, Power, Upload } from "lucide-react";
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
 import { maskToCpuList } from "../../lib/format";
-import { springSmooth } from "../../lib/motion";
+import { hoverPop } from "../../lib/motion";
 import type { ProcInfo } from "../../lib/ipc";
 import { useGroups, type GroupRule } from "../../store/groups";
 import { ClickRipple } from "../ui/Ripple";
@@ -58,9 +58,9 @@ export function GroupRail({
               key={group.id}
               layout
               onClick={() => select(group.id)}
-              whileHover={{ y: -2 }}
+              whileHover={{ scale: 1.02, y: -2 }}
               whileTap={{ scale: 0.985 }}
-              transition={springSmooth}
+              transition={hoverPop}
               className={cn(
                 "relative w-full rounded-xl border p-2.5 text-left transition-colors",
                 selected ? "border-accent/40 bg-accent/10 glow-sm" : "border-line bg-surface2 hover:bg-surface3",

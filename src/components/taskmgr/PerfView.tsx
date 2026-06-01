@@ -223,18 +223,29 @@ export function PerfView() {
           <Card>
             <CardHead
               icon={<Zap size={15} className="text-warn" />}
-              label="功耗"
-              value={sensors?.cpuPower != null ? `${sensors.cpuPower.toFixed(0)}W` : "—"}
+              label="总功耗"
+              value={
+                sensors?.cpuPower != null || sensors?.gpuPower != null ? (
+                  <AnimatedNumber
+                    value={(sensors?.cpuPower ?? 0) + (sensors?.gpuPower ?? 0)}
+                    digits={0}
+                    suffix="W"
+                  />
+                ) : (
+                  "—"
+                )
+              }
               color="var(--color-warn)"
             />
-            <div className="mt-3 grid grid-cols-3 gap-2">
-              <Stat label="CPU" value={sensors?.cpuPower != null ? `${sensors.cpuPower.toFixed(0)} W` : "—"} />
-              <Stat label="GPU" value={sensors?.gpuPower != null ? `${sensors.gpuPower.toFixed(0)} W` : "—"} />
-              <Stat label="CPU 温度" value={sensors?.cpuTemp != null ? `${sensors.cpuTemp.toFixed(0)}°C` : "—"} />
+            <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <Stat label="CPU 功耗" value={sensors?.cpuPower != null ? `${sensors.cpuPower.toFixed(0)} W` : "—"} />
+              <Stat label="GPU 功耗" value={sensors?.gpuPower != null ? `${sensors.gpuPower.toFixed(0)} W` : "—"} />
+              <Stat label="CPU 温度" value={sensors?.cpuTemp != null ? `${sensors.cpuTemp.toFixed(0)} °C` : "—"} />
+              <Stat label="GPU 温度" value={sensors?.gpuTemp != null ? `${sensors.gpuTemp.toFixed(0)} °C` : "—"} />
             </div>
-            {sensors?.cpuPower == null && (
+            {sensors?.cpuPower == null && sensors?.gpuPower == null && (
               <p className="mt-3 text-[11px] leading-relaxed text-dim">
-                功耗 / 温度需要硬件传感器驱动支持（计划在后续版本中通过可选传感器组件提供）。
+                功耗 / 温度需要传感器组件；若显示 “—”，请确认 sensord 已随程序部署。
               </p>
             )}
           </Card>

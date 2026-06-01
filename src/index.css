@@ -162,11 +162,5 @@
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.001ms !important;
-    transition-duration: 0.001ms !important;
-  }
-}
+/* Motion is controlled in-app via the 减弱动画 setting (MotionConfig), not the
+   OS prefers-reduced-motion media query — so animations always play by default. */

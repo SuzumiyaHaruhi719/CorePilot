@@ -1,7 +1,7 @@
 import { motion } from "motion/react";
 import type { ReactNode } from "react";
 import { cn } from "../../lib/cn";
-import { springSmooth } from "../../lib/motion";
+import { hoverPop } from "../../lib/motion";
 import { ClickRipple } from "./Ripple";
 
 type Variant = "primary" | "ghost" | "danger" | "subtle";
@@ -29,9 +29,9 @@ export function Button({ children, onClick, variant = "ghost", disabled, classNa
       title={title}
       disabled={disabled}
       onClick={onClick}
-      whileHover={disabled ? undefined : { y: -2 }}
-      whileTap={disabled ? undefined : { scale: 0.96, y: 0 }}
-      transition={springSmooth}
+      whileHover={disabled ? undefined : { scale: 1.04, y: -1 }}
+      whileTap={disabled ? undefined : { scale: 0.97, y: 0 }}
+      transition={hoverPop}
       className={cn(
         "no-drag relative inline-flex items-center justify-center gap-1.5 overflow-hidden rounded-lg px-3 py-1.5 text-[12.5px] font-medium transition-[background-color,border-color,color,filter,box-shadow] duration-200",
         VARIANTS[variant],

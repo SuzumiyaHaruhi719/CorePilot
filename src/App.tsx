@@ -64,7 +64,7 @@ function App() {
   const Active = TABS[tab];
 
   return (
-    <MotionConfig reducedMotion={reduceMotion ? "always" : "user"}>
+    <MotionConfig reducedMotion={reduceMotion ? "always" : "never"}>
       <div className="relative flex h-screen w-screen flex-col overflow-hidden text-ink">
         <div aria-hidden className="pointer-events-none absolute inset-0 -z-10 overflow-hidden">
           <div className="absolute -left-40 -top-40 h-[480px] w-[480px] rounded-full bg-accent/20 blur-[120px]" />
