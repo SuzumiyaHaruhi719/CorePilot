@@ -47,6 +47,10 @@ fn main() {
             Ok(v) => println!("{v}"),
             Err(e) => fail(&e.to_string()),
         },
+        "free-ws" => print_result(optimize::free_working_sets().map_err(|e| e.to_string())),
+        "purge-standby" => print_result(optimize::purge_standby().map_err(|e| e.to_string())),
+        "flush-dns" => print_result(optimize::flush_dns().map_err(|e| e.to_string())),
+        "clean-temp" => print_json(&optimize::clean_temp()),
         "services" => match winsvc::list_services() {
             Ok(mut v) => {
                 if let Some(f) = args.get(2) {
