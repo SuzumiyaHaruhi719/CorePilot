@@ -63,7 +63,7 @@ export function GroupRail({
             <ListTree size={14} className={selectedId === null ? "text-accent-bright" : "text-dim"} />
             <span className="text-[13px] font-medium text-ink">全部进程</span>
           </div>
-          <span className="nums text-[11px] text-muted">{processes.length}</span>
+          <span className="nums text-[11px] text-muted">{processes.filter((p) => p.settable).length}</span>
         </button>
         <div className="px-1 pt-1 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-dim">分组</div>
         <AnimatePresence initial={false}>
