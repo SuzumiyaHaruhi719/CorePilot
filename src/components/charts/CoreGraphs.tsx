@@ -43,7 +43,7 @@ export function CoreGraphs({ perCore, topo }: CoreGraphsProps) {
       isVcache: false,
       l3Bytes: 0,
       logicalCpus: Array.from({ length: n }, (_, i) => i),
-      mask: 0,
+      mask: 0n,
       kind: "standard",
       label: "全部核心",
     },

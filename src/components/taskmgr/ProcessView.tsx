@@ -1,7 +1,8 @@
-import { ChevronsUp, Copy, Search, X } from "lucide-react";
+import { ChevronsUp, Copy, MonitorPlay, Search, X } from "lucide-react";
 import { useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useProcesses } from "../../hooks/useProcesses";
 import { PRIORITY, api, type ProcInfo } from "../../lib/ipc";
+import { useOsdTargets } from "../../store/osd";
 import { Button } from "../ui/Button";
 import { ContextMenu, type MenuState } from "../ui/ContextMenu";
 import { Modal } from "../ui/Modal";
@@ -21,6 +22,7 @@ export function ProcessView({ detailed }: ProcessViewProps) {
   const [pendingKill, setPendingKill] = useState<ProcInfo | null>(null);
   const [status, setStatus] = useState("");
   const [menu, setMenu] = useState<MenuState | null>(null);
+  const addOsdTarget = useOsdTargets((s) => s.addTarget);
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -82,6 +84,14 @@ export function ProcessView({ detailed }: ProcessViewProps) {
         {
           label: "设为低优先级",
           onClick: () => void api.setPriority(proc.pid, PRIORITY.belowNormal).catch(() => undefined),
+        },
+        {
+          label: "添加游戏内覆盖",
+          icon: MonitorPlay,
+          onClick: () => {
+            addOsdTarget(proc.name);
+            setStatus(`已将 ${proc.name} 加入游戏内覆盖名单`);
+          },
         },
         { label: "复制名称", icon: Copy, onClick: () => void navigator.clipboard.writeText(proc.name) },
         { label: "复制 PID", icon: Copy, onClick: () => void navigator.clipboard.writeText(String(proc.pid)) },

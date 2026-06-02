@@ -88,6 +88,16 @@ export function Settings() {
             />
           </SettingRow>
 
+          <SettingRow
+            title="关闭后保留到托盘"
+            desc="关闭窗口时收起到系统托盘，后台继续运行（亲和性 / 超频 / OSD）；右键托盘图标可退出"
+          >
+            <Toggle
+              checked={settings.closeToTray}
+              onChange={(value) => settings.update({ closeToTray: value })}
+            />
+          </SettingRow>
+
           <SettingRow title="语言 / Language">
             <Segmented
               id="lang"

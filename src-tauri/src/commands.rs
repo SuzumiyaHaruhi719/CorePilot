@@ -1,4 +1,6 @@
-//! Tauri command surface (IPC). Masks are u64 (≤32 LPs fit in a JS number).
+//! Tauri command surface (IPC). Affinity masks are u64 on this side but cross
+//! the boundary as decimal strings (a JS number only holds integers < 2^53, too
+//! few bits for a 64-logical-CPU mask); see `serde_u64`.
 
 use crate::affinity;
 use crate::error::CoreResult;
@@ -26,7 +28,11 @@ pub struct Overview {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AffinityInfo {
+    // Affinity masks are serialized as decimal strings so bits ≥ 53 survive the
+    // JS-number (f64) frontend boundary; see `serde_u64`.
+    #[serde(with = "crate::serde_u64::str")]
     pub proc_mask: u64,
+    #[serde(with = "crate::serde_u64::str")]
     pub sys_mask: u64,
 }
 
@@ -68,8 +74,14 @@ pub fn get_metrics(state: State<AppState>) -> Metrics {
     sysmon::sample(&mut sys)
 }
 
+/// Pin a process to a logical-CPU mask. The mask arrives as a decimal string
+/// (it can exceed 2^53, which a JS number can't represent exactly); parse it to
+/// a `u64` before delegating to the affinity setter.
 #[tauri::command]
-pub fn set_affinity(pid: u32, mask: u64) -> CoreResult<()> {
+pub fn set_affinity(pid: u32, mask: String) -> CoreResult<()> {
+    let mask: u64 = mask
+        .parse()
+        .map_err(|_| crate::error::CoreError::from(format!("invalid affinity mask: {mask}")))?;
     affinity::set_affinity(pid, mask)
 }
 

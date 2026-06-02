@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type TabId = "cores" | "taskmgr" | "monitor" | "gpu" | "optimize" | "settings";
+export type TabId = "cores" | "taskmgr" | "monitor" | "osd" | "gpu" | "optimize" | "settings";
 
 interface UiState {
   tab: TabId;

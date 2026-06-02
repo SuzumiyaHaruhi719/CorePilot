@@ -43,6 +43,9 @@ pub struct ProcInfo {
     pub gpu: f32,
     pub power: f32,
     /// Process CPU affinity mask (allowed logical CPUs); 0 when inaccessible.
+    /// Serialized as a decimal string so bits ≥ 53 survive the JS-number (f64)
+    /// frontend boundary; see `serde_u64`.
+    #[serde(with = "crate::serde_u64::str")]
     pub affinity: u64,
     /// Process owner account name (e.g. "SYSTEM", "Thomas", "LOCAL SERVICE"),
     /// or `None` when the token/SID can't be resolved. Serialized as `userName`.

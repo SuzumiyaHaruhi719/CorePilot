@@ -1,17 +1,22 @@
 pub mod affinity;
 pub mod commands;
 pub mod error;
+pub mod fps;
 pub mod gpu;
 pub mod nvapi_oc;
 pub mod optimize;
+pub mod osd;
 pub mod process;
 pub mod sensors;
+pub mod serde_u64;
 pub mod state;
 pub mod sysmon;
 pub mod topology;
+pub mod tray;
 pub mod winsvc;
 
 use state::AppState;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -22,7 +27,32 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppState::new())
+        .manage(tray::TrayPrefs::default())
+        .setup(|app| {
+            // A tray failure must never crash startup; log and continue. The
+            // close handler below only hides to the tray when the tray exists,
+            // so a missing tray degrades to a normal (exit-on-close) window.
+            if let Err(err) = tray::build_tray(app.handle()) {
+                tracing::warn!("failed to build system tray: {err}");
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // "Close to tray": hide the main window instead of exiting, so the
+            // affinity enforcer, GPU auto-OC and OSD keep running in the
+            // background. Honoured only when the user has the setting enabled.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main"
+                    && window.state::<tray::TrayPrefs>().close_to_tray()
+                    && window.app_handle().tray_by_id("corepilot-tray").is_some()
+                {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_topology,
             commands::get_overview,
@@ -48,6 +78,10 @@ pub fn run() {
             gpu::gpu_oc_info,
             gpu::gpu_oc_apply,
             gpu::gpu_oc_reset,
+            osd::osd_set_visible,
+            fps::osd_fps,
+            fps::foreground_process,
+            tray::set_close_to_tray,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

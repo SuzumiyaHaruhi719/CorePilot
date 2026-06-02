@@ -1,28 +1,30 @@
 import type { CpuTopology } from "./ipc";
 
-/** Mask helpers — use float math to stay correct for bits >= 31. */
+/** Mask helpers — masks are `bigint` so every one of the 64 possible logical-CPU
+ *  bits is exact (a JS `number` only holds integers < 2^53, losing bits ≥ 53 on
+ *  HEDT parts with > 53 logical CPUs). */
 
-export function idsFromMask(mask: number): number[] {
+export function idsFromMask(mask: bigint): number[] {
   const ids: number[] = [];
-  for (let i = 0; i < 64; i++) {
-    if (Math.floor(mask / 2 ** i) % 2 === 1) ids.push(i);
+  for (let i = 0n; i < 64n; i++) {
+    if ((mask >> i) & 1n) ids.push(Number(i));
   }
   return ids;
 }
 
-export function maskFromIds(ids: number[]): number {
-  return ids.reduce((mask, id) => mask + 2 ** id, 0);
+export function maskFromIds(ids: number[]): bigint {
+  return ids.reduce((mask, id) => mask | (1n << BigInt(id)), 0n);
 }
 
-export function maskHas(mask: number, id: number): boolean {
-  return Math.floor(mask / 2 ** id) % 2 === 1;
+export function maskHas(mask: bigint, id: number): boolean {
+  return ((mask >> BigInt(id)) & 1n) === 1n;
 }
 
-export function toggleBit(mask: number, id: number): number {
-  return maskHas(mask, id) ? mask - 2 ** id : mask + 2 ** id;
+export function toggleBit(mask: bigint, id: number): bigint {
+  return mask ^ (1n << BigInt(id));
 }
 
-export function popcount(mask: number): number {
+export function popcount(mask: bigint): number {
   return idsFromMask(mask).length;
 }
 
@@ -81,7 +83,7 @@ export function clusterTone(kind: string): ClusterTone {
  *  which cluster — trusting the backend's per-cluster `kind` so it's correct on
  *  AMD V-Cache, Intel P/E, and homogeneous CPUs alike. */
 export function classifyCcd(
-  mask: number,
+  mask: bigint,
   topo: CpuTopology | null,
 ): { count: number; kind: CcdKind; ccdId: number | null } {
   const ids = idsFromMask(mask);

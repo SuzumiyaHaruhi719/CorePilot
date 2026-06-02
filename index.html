@@ -4,9 +4,29 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CorePilot</title>
+    <!-- Paint the dark base color immediately so there is no white flash before
+         the JS bundle + index.css load and React mounts (esp. on dev startup). -->
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        height: 100%;
+        background: #0a0b0f;
+      }
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        color: #4f5663;
+        font: 500 13px system-ui, sans-serif;
+        letter-spacing: 0.08em;
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div id="boot">COREPILOT</div></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

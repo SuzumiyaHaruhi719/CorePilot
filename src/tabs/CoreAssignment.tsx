@@ -1,5 +1,5 @@
 import { CircleMinus, Copy, Cpu, ListTree, Plus, Search, SlidersHorizontal, X, Zap } from "lucide-react";
-import { motion } from "motion/react";
+import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { CoreGrid } from "../components/cores/CoreGrid";
 import { GroupRail } from "../components/cores/GroupRail";
@@ -12,10 +12,9 @@ import { TabHeader } from "../components/ui/TabHeader";
 import { useProcesses } from "../hooks/useProcesses";
 import { groupColor } from "../lib/colors";
 import { maskFromIds, popcount } from "../lib/cpu";
-import { easeOut } from "../lib/motion";
 import { maskToCpuList } from "../lib/format";
 import { api, type CpuTopology, type ProcInfo } from "../lib/ipc";
-import { groupForProcess, useGroups, type GroupRule } from "../store/groups";
+import { groupForProcess, maskToBigInt, useGroups, type GroupRule } from "../store/groups";
 import { useUi } from "../store/ui";
 
 /**
@@ -54,7 +53,7 @@ export function CoreAssignment() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [selectedPids, setSelectedPids] = useState<Set<number>>(new Set());
   const [coreModalOpen, setCoreModalOpen] = useState(false);
-  const [editMask, setEditMask] = useState(0);
+  const [editMask, setEditMask] = useState<bigint>(0n);
   const [status, setStatus] = useState("");
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [colorAnchor, setColorAnchor] = useState<ColorAnchor | null>(null);
@@ -71,7 +70,7 @@ export function CoreAssignment() {
     setColorAnchor(null);
   }, [selectedId]);
 
-  const fullMask = useMemo(() => (topo ? maskFromIds(topo.logical.map((l) => l.id)) : 0), [topo]);
+  const fullMask = useMemo(() => (topo ? maskFromIds(topo.logical.map((l) => l.id)) : 0n), [topo]);
 
   // Wait for the persisted groups store to finish its (async) hydration before
   // seeding. Otherwise the seeder races rehydration and overwrites saved groups
@@ -257,7 +256,7 @@ export function CoreAssignment() {
   }
 
   async function applyToProcess(group: GroupRule, proc: ProcInfo) {
-    const mask = group.mask === 0 ? fullMask : group.mask;
+    const mask = group.mask === 0n ? fullMask : group.mask;
     await api.setAffinity(proc.pid, mask);
     if (group.priority !== 0x20) {
       try {
@@ -290,7 +289,7 @@ export function CoreAssignment() {
       if (arr) arr.push(p);
       else running.set(n, [p]);
     }
-    const effectiveMask = group.mask === 0 ? fullMask : group.mask;
+    const effectiveMask = group.mask === 0n ? fullMask : group.mask;
     const rows: ProcInfo[] = [];
     for (const pattern of group.patterns) {
       const live = running.get(pattern);
@@ -391,7 +390,7 @@ export function CoreAssignment() {
     if (optimizationEnabled) {
       for (const proc of membersOf(selectedGroup)) {
         try {
-          await api.setAffinity(proc.pid, editMask === 0 ? fullMask : editMask);
+          await api.setAffinity(proc.pid, editMask === 0n ? fullMask : editMask);
         } catch {
           /* protected */
         }
@@ -417,7 +416,14 @@ export function CoreAssignment() {
   }
 
   function exportGroups() {
-    const blob = new Blob([JSON.stringify(groups, null, 2)], { type: "application/json" });
+    // `mask` is a bigint, which JSON.stringify can't emit — serialize it as a
+    // decimal string so the exported file is plain, portable JSON.
+    const json = JSON.stringify(
+      groups,
+      (_k, v) => (typeof v === "bigint" ? v.toString() : v),
+      2,
+    );
+    const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -437,7 +443,13 @@ export function CoreAssignment() {
       try {
         const data: unknown = JSON.parse(await file.text());
         if (Array.isArray(data)) {
-          importGroups(data as GroupRule[]);
+          // Exported masks are decimal strings (older files may have numbers);
+          // coerce each back to bigint to match GroupRule.mask.
+          const normalized = (data as GroupRule[]).map((g) => ({
+            ...g,
+            mask: maskToBigInt((g as { mask: unknown }).mask),
+          }));
+          importGroups(normalized);
           setStatus("已导入分组方案");
         }
       } catch {
@@ -488,7 +500,7 @@ export function CoreAssignment() {
                   <SlidersHorizontal size={14} /> 选择核心
                 </Button>
                 <span className="nums text-[11.5px] text-dim">
-                  {selectedGroup.mask === 0 ? "全部核心" : `CPU ${maskToCpuList(selectedGroup.mask)}`}
+                  {selectedGroup.mask === 0n ? "全部核心" : `CPU ${maskToCpuList(selectedGroup.mask)}`}
                 </span>
                 <span className="text-[11.5px] text-dim">· {visible.length} 个进程</span>
                 {!selectedGroup.builtin && (
@@ -534,28 +546,33 @@ export function CoreAssignment() {
 
           {status && <div className="text-[11.5px] text-accent">{status}</div>}
 
-          {/* Keyed on the selected group so the list animates in when switching
-              groups (not on the ~1.5s data poll, which keeps the same key). */}
-          <motion.div
-            key={selectedId ?? "__all__"}
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.22, ease: easeOut }}
-            className="flex min-h-0 flex-1 flex-col"
-          >
-            <ProcessTable
-              processes={visible}
-              sortKey={sortKey}
-              sortDir={sortDir}
-              onSort={handleSort}
-              selected={selectedPids}
-              onToggle={toggleSelect}
-              onToggleAll={toggleAll}
-              onRowContextMenu={openRowMenu}
-              topo={topo}
-              showGroup={!selectedGroup}
-            />
-          </motion.div>
+          {/* Keyed on the selected group so the list animates only when switching
+              groups (not on the ~1.5s data poll, which keeps the same key).
+              mode="wait" matches the main tab switch: old list eases out, then the
+              new one eases in — a moderate, comfortable pace rather than snappy. */}
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={selectedId ?? "__all__"}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.2, ease: [0.33, 1, 0.68, 1] }}
+              className="flex min-h-0 flex-1 flex-col"
+            >
+              <ProcessTable
+                processes={visible}
+                sortKey={sortKey}
+                sortDir={sortDir}
+                onSort={handleSort}
+                selected={selectedPids}
+                onToggle={toggleSelect}
+                onToggleAll={toggleAll}
+                onRowContextMenu={openRowMenu}
+                topo={topo}
+                showGroup={!selectedGroup}
+              />
+            </motion.div>
+          </AnimatePresence>
         </div>
       </div>
 

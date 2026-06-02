@@ -10,7 +10,7 @@ import { ClickRipple } from "../ui/Ripple";
 
 interface GroupRailProps {
   processes: ProcInfo[];
-  fullMask: number;
+  fullMask: bigint;
   optimizationEnabled: boolean;
   onToggleOptimization: () => void;
   onExport: () => void;
@@ -102,7 +102,7 @@ export function GroupRail({
                 </span>
               </div>
               <div className="nums mt-1 truncate text-[10.5px] text-dim">
-                CPU {group.mask === 0 ? "全部" : maskToCpuList(group.mask)}
+                CPU {group.mask === 0n ? "全部" : maskToCpuList(group.mask)}
               </div>
               <ClickRipple />
             </motion.button>

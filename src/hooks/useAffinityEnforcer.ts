@@ -9,12 +9,12 @@ import { useUi } from "../store/ui";
  * that group's cores/priority. Zero work until at least one group has patterns.
  * (A boot-time background daemon is the planned full version.)
  */
-export function useAffinityEnforcer(fullMask: number) {
+export function useAffinityEnforcer(fullMask: bigint) {
   const optimizationEnabled = useUi((s) => s.optimizationEnabled);
   const applied = useRef<Set<number>>(new Set());
 
   useEffect(() => {
-    if (!optimizationEnabled || fullMask === 0) {
+    if (!optimizationEnabled || fullMask === 0n) {
       applied.current.clear();
       return;
     }
@@ -40,7 +40,7 @@ export function useAffinityEnforcer(fullMask: number) {
         if (applied.current.has(p.pid)) continue;
         const group = groups.find((g) => g.patterns.includes(p.name.toLowerCase()));
         if (!group) continue;
-        const mask = group.mask === 0 ? fullMask : group.mask;
+        const mask = group.mask === 0n ? fullMask : group.mask;
         try {
           await api.setAffinity(p.pid, mask);
           if (group.priority !== 0x20) {

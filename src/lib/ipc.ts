@@ -26,7 +26,9 @@ export interface Ccd {
   isVcache: boolean;
   l3Bytes: number;
   logicalCpus: number[];
-  mask: number;
+  /** Affinity mask over logical CPUs. `bigint` so all 64 bits are exact; the
+   *  backend sends it as a decimal string (see `serde_u64`). */
+  mask: bigint;
   /** Cluster nature: "vcache" | "freq" | "standard" | "pcore" | "ecore". */
   kind: string;
   /** Display label, e.g. "3D V-Cache", "频率核心", "CCD", "性能核", "能效核". */
@@ -53,8 +55,9 @@ export interface ProcInfo {
   threads: number;
   gpu: number;
   power: number;
-  /** CPU affinity mask (allowed logical CPUs); 0 if inaccessible. */
-  affinity: number;
+  /** CPU affinity mask (allowed logical CPUs); 0 if inaccessible. `bigint` so
+   *  all 64 bits are exact; the backend sends it as a decimal string. */
+  affinity: bigint;
   /** Process owner account (e.g. "SYSTEM", "Thomas"). */
   user?: string | null;
   /** Open handle count. */
@@ -87,8 +90,10 @@ export interface Metrics {
 }
 
 export interface AffinityInfo {
-  procMask: number;
-  sysMask: number;
+  /** Process affinity mask. `bigint`; arrives from the backend as a decimal string. */
+  procMask: bigint;
+  /** System affinity mask. `bigint`; arrives from the backend as a decimal string. */
+  sysMask: bigint;
 }
 
 export interface MemDetail {
@@ -193,15 +198,40 @@ export const PRIORITY = {
   realtime: 0x100,
 } as const;
 
+/**
+ * Raw wire shapes: u64 affinity masks cross the IPC boundary as decimal strings
+ * (a JS number can't hold > 2^53 exactly). The `api` layer parses those strings
+ * into `bigint` so the rest of the app never sees the string form.
+ */
+type RawCcd = Omit<Ccd, "mask"> & { mask: string };
+type RawCpuTopology = Omit<CpuTopology, "ccds"> & { ccds: RawCcd[] };
+type RawProcInfo = Omit<ProcInfo, "affinity"> & { affinity: string };
+interface RawAffinityInfo {
+  procMask: string;
+  sysMask: string;
+}
+
 export const api = {
   getOverview: () => invoke<Overview>("get_overview"),
-  getTopology: () => invoke<CpuTopology>("get_topology"),
-  listProcesses: () => invoke<ProcInfo[]>("list_processes"),
+  getTopology: async (): Promise<CpuTopology> => {
+    const raw = await invoke<RawCpuTopology>("get_topology");
+    return {
+      ...raw,
+      ccds: raw.ccds.map((ccd) => ({ ...ccd, mask: BigInt(ccd.mask) })),
+    };
+  },
+  listProcesses: async (): Promise<ProcInfo[]> => {
+    const raw = await invoke<RawProcInfo[]>("list_processes");
+    return raw.map((p) => ({ ...p, affinity: BigInt(p.affinity) }));
+  },
   gpuEngines: () => invoke<Record<string, number>>("gpu_engine_loads"),
   getMetrics: () => invoke<Metrics>("get_metrics"),
-  setAffinity: (pid: number, mask: number) => invoke<void>("set_affinity", { pid, mask }),
-  getProcessAffinity: (pid: number) =>
-    invoke<AffinityInfo>("get_process_affinity", { pid }),
+  setAffinity: (pid: number, mask: bigint) =>
+    invoke<void>("set_affinity", { pid, mask: mask.toString() }),
+  getProcessAffinity: async (pid: number): Promise<AffinityInfo> => {
+    const raw = await invoke<RawAffinityInfo>("get_process_affinity", { pid });
+    return { procMask: BigInt(raw.procMask), sysMask: BigInt(raw.sysMask) };
+  },
   setPriority: (pid: number, priorityClass: number) =>
     invoke<void>("set_priority", { pid, class: priorityClass }),
   getMemoryDetail: () => invoke<MemDetail>("get_memory_detail"),
@@ -222,4 +252,8 @@ export const api = {
   gpuOcInfo: () => invoke<GpuOcInfo>("gpu_oc_info"),
   gpuOcApply: (settings: GpuOcSettings) => invoke<void>("gpu_oc_apply", { settings }),
   gpuOcReset: () => invoke<void>("gpu_oc_reset"),
+  osdSetVisible: (visible: boolean) => invoke<void>("osd_set_visible", { visible }),
+  osdFps: () => invoke<number | null>("osd_fps"),
+  foregroundProcess: () => invoke<string | null>("foreground_process"),
+  setCloseToTray: (enabled: boolean) => invoke<void>("set_close_to_tray", { enabled }),
 };

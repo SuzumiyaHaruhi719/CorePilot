@@ -25,6 +25,8 @@ interface SettingsState {
   language: Language;
   pollMs: number;
   perfCards: Record<PerfCard, boolean>;
+  /** Hide to the system tray on window close instead of quitting the app. */
+  closeToTray: boolean;
   update: (patch: Partial<Omit<SettingsState, "update" | "togglePerfCard">>) => void;
   togglePerfCard: (card: PerfCard) => void;
 }
@@ -42,6 +44,7 @@ export const useSettings = create<SettingsState>()(
       language: "zh",
       pollMs: 1500,
       perfCards: { cpu: true, mem: true, gpu: true, disk: true, net: true, power: true },
+      closeToTray: true,
       update: (patch) => set(patch),
       togglePerfCard: (card) =>
         set((s) => ({ perfCards: { ...s.perfCards, [card]: !s.perfCards[card] } })),

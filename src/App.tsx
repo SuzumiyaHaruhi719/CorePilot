@@ -6,19 +6,23 @@ import { TitleBar } from "./components/shell/TitleBar";
 import { api, type Overview } from "./lib/ipc";
 import { ACCENT_HUE, useSettings } from "./store/settings";
 import { useAffinityEnforcer } from "./hooks/useAffinityEnforcer";
+import { useOsdHotkey } from "./hooks/useOsdHotkey";
 import { useUi, type TabId } from "./store/ui";
 import { CoreAssignment } from "./tabs/CoreAssignment";
 import { GpuTune } from "./tabs/GpuTune";
 import { Monitor } from "./tabs/Monitor";
 import { Optimize } from "./tabs/Optimize";
+import { OsdConfig } from "./tabs/OsdConfig";
 import { Settings } from "./tabs/Settings";
 import { TaskManager } from "./tabs/TaskManager";
 import { useGpuProfiles } from "./store/gpuProfiles";
+import { useOsd } from "./store/osd";
 
 const TABS: Record<TabId, () => ReactElement> = {
   cores: CoreAssignment,
   taskmgr: TaskManager,
   monitor: Monitor,
+  osd: OsdConfig,
   gpu: GpuTune,
   optimize: Optimize,
   settings: Settings,
@@ -30,8 +34,10 @@ function App() {
   const acrylic = useSettings((s) => s.acrylic);
   const glow = useSettings((s) => s.glow);
   const reduceMotion = useSettings((s) => s.reduceMotion);
+  const closeToTray = useSettings((s) => s.closeToTray);
   const [overview, setOverview] = useState<Overview | null>(null);
-  useAffinityEnforcer(overview ? 2 ** overview.logicalCpus - 1 : 0);
+  useAffinityEnforcer(overview ? (1n << BigInt(overview.logicalCpus)) - 1n : 0n);
+  useOsdHotkey();
 
   useEffect(() => {
     api.getOverview().then(setOverview).catch(() => undefined);
@@ -53,6 +59,18 @@ function App() {
     return useGpuProfiles.persist.onFinishHydration(applyActive);
   }, []);
 
+  // Re-show the OSD overlay on launch if it was left enabled (store is async).
+  useEffect(() => {
+    const showIfEnabled = () => {
+      if (useOsd.getState().enabled) api.osdSetVisible(true).catch(() => undefined);
+    };
+    if (useOsd.persist.hasHydrated()) {
+      showIfEnabled();
+      return;
+    }
+    return useOsd.persist.onFinishHydration(showIfEnabled);
+  }, []);
+
   useEffect(() => {
     const hue = ACCENT_HUE[accent];
     const root = document.documentElement.style;
@@ -67,6 +85,11 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.glow = glow;
   }, [glow]);
+
+  // Mirror the "close to tray" preference to the backend window-close handler.
+  useEffect(() => {
+    api.setCloseToTray(closeToTray).catch(() => undefined);
+  }, [closeToTray]);
 
   // Suppress the WebView's default right-click menu (keep it only for text fields).
   useEffect(() => {

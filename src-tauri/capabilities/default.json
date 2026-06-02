@@ -16,6 +16,9 @@
     "core:window:allow-set-focus",
     "core:event:default",
     "opener:default",
-    "store:default"
+    "store:default",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "global-shortcut:allow-is-registered"
   ]
 }

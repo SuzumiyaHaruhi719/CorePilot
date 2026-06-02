@@ -1,0 +1,112 @@
+import { api, type GpuOcInfo, type Metrics, type Sensors } from "./ipc";
+import { formatBytes } from "./format";
+
+/**
+ * OSD (in-game overlay) metric catalog + data fetch.
+ *
+ * The overlay reuses CorePilot's existing backend commands (no extra sampler)
+ * and renders a user-chosen subset of metrics. Each metric reports whether it is
+ * `supported` on this build at all (false → shown greyed in config, e.g. FPS
+ * which needs PresentMon, or sensors the hardware doesn't expose) and a `value`
+ * formatter that returns the live string or `null` when momentarily unavailable.
+ */
+
+export interface OsdData {
+  metrics: Metrics | null;
+  sensors: Sensors | null;
+  gpu: GpuOcInfo | null;
+  fps: number | null;
+}
+
+export type OsdCategory = "fps" | "cpu" | "gpu" | "mem" | "disk" | "net";
+
+export interface OsdMetricDef {
+  key: string;
+  cat: OsdCategory;
+  /** Full label for the config panel. */
+  label: string;
+  /** Short tag shown in the overlay (kept terse for low visual noise). */
+  tag: string;
+  /** Whether this build can ever provide the metric (false → greyed in config). */
+  supported: boolean;
+  /** Live formatted value, or null when momentarily unavailable. */
+  value: (d: OsdData) => string | null;
+}
+
+const rate = (v: number | null | undefined): string | null =>
+  v == null ? null : `${formatBytes(v, v < 1024 * 1024 ? 0 : 1)}/s`;
+const pct = (v: number | null | undefined, digits = 0): string | null =>
+  v == null ? null : `${v.toFixed(digits)}%`;
+
+function memPct(d: OsdData): number | null {
+  const m = d.metrics;
+  if (!m || m.memTotal <= 0) return null;
+  return (m.memUsed / m.memTotal) * 100;
+}
+
+/** GPU util prefers NVML (gpu tab), falls back to the PDH aggregate (sensors). */
+function gpuUtil(d: OsdData): number | null {
+  if (d.gpu?.available) return d.gpu.utilizationGpu;
+  return d.sensors?.gpuPct ?? null;
+}
+
+export const OSD_METRICS: OsdMetricDef[] = [
+  // FPS — real in-game frame rate via ETW present events (PresentMon-style).
+  { key: "fps", cat: "fps", label: "FPS", tag: "FPS", supported: true, value: (d) => (d.fps == null ? null : d.fps.toFixed(0)) },
+  { key: "fps.frametime", cat: "fps", label: "帧时间 (ms)", tag: "FT", supported: false, value: () => null },
+  { key: "net.down", cat: "net", label: "下载速度", tag: "↓", supported: true, value: (d) => { const r = rate(d.sensors?.netDown); return r ? `↓${r}` : null; } },
+  { key: "net.up", cat: "net", label: "上传速度", tag: "↑", supported: true, value: (d) => { const r = rate(d.sensors?.netUp); return r ? `↑${r}` : null; } },
+
+  // CPU
+  { key: "cpu.util", cat: "cpu", label: "占用率 (%)", tag: "CPU", supported: true, value: (d) => pct(d.metrics?.cpuOverall, 0) },
+  { key: "cpu.temp", cat: "cpu", label: "温度 (°C)", tag: "CPU", supported: true, value: (d) => (d.sensors?.cpuTemp == null ? null : `${d.sensors.cpuTemp.toFixed(0)}°`) },
+  { key: "cpu.power", cat: "cpu", label: "热功耗 (W)", tag: "CPU", supported: true, value: (d) => (d.sensors?.cpuPower == null ? null : `${d.sensors.cpuPower.toFixed(0)}W`) },
+  { key: "cpu.freq", cat: "cpu", label: "频率 (MHz)", tag: "CPU", supported: false, value: () => null },
+
+  // GPU
+  { key: "gpu.util", cat: "gpu", label: "占用率 (%)", tag: "GPU", supported: true, value: (d) => pct(gpuUtil(d), 0) },
+  { key: "gpu.temp", cat: "gpu", label: "温度 (°C)", tag: "GPU", supported: true, value: (d) => { const t = d.gpu?.temperature ?? d.sensors?.gpuTemp ?? null; return t == null ? null : `${t.toFixed(0)}°`; } },
+  { key: "gpu.power", cat: "gpu", label: "热功耗 (W)", tag: "GPU", supported: true, value: (d) => { const p = d.gpu?.powerUsageW ?? d.sensors?.gpuPower ?? null; return p == null ? null : `${p.toFixed(0)}W`; } },
+  { key: "gpu.coreClock", cat: "gpu", label: "核心频率 (MHz)", tag: "GPU", supported: true, value: (d) => (d.gpu?.graphicsClock ? `${d.gpu.graphicsClock}MHz` : null) },
+  { key: "gpu.memClock", cat: "gpu", label: "显存频率 (MHz)", tag: "VRAM", supported: true, value: (d) => (d.gpu?.memClock ? `${d.gpu.memClock}MHz` : null) },
+  { key: "gpu.fan", cat: "gpu", label: "风扇转速 (%)", tag: "FAN", supported: true, value: (d) => pct(d.gpu?.fanSpeedPct, 0) },
+  { key: "gpu.vramPct", cat: "gpu", label: "显存占用 (%)", tag: "VRAM", supported: true, value: (d) => { const g = d.gpu; if (!g || g.memTotalBytes <= 0) return null; return pct((g.memUsedBytes / g.memTotalBytes) * 100, 0); } },
+  { key: "gpu.vramUsed", cat: "gpu", label: "显存占用量", tag: "VRAM", supported: true, value: (d) => (d.gpu && d.gpu.memTotalBytes > 0 ? `${formatBytes(d.gpu.memUsedBytes, 1)}` : null) },
+
+  // Memory
+  { key: "mem.util", cat: "mem", label: "占用率 (%)", tag: "RAM", supported: true, value: (d) => pct(memPct(d), 0) },
+  { key: "mem.used", cat: "mem", label: "占用量", tag: "RAM", supported: true, value: (d) => (d.metrics ? `${formatBytes(d.metrics.memUsed, 1)}` : null) },
+
+  // Disk
+  { key: "disk.util", cat: "disk", label: "活动时间 (%)", tag: "DISK", supported: true, value: (d) => pct(d.sensors?.diskPct, 0) },
+  { key: "disk.read", cat: "disk", label: "读取速度", tag: "R", supported: true, value: (d) => rate(d.sensors?.diskRead) },
+  { key: "disk.write", cat: "disk", label: "写入速度", tag: "W", supported: true, value: (d) => rate(d.sensors?.diskWrite) },
+];
+
+export const OSD_METRIC_BY_KEY: Record<string, OsdMetricDef> = Object.fromEntries(
+  OSD_METRICS.map((m) => [m.key, m]),
+);
+
+export const OSD_CATEGORIES: { id: OsdCategory; label: string }[] = [
+  { id: "fps", label: "FPS" },
+  { id: "cpu", label: "CPU" },
+  { id: "gpu", label: "GPU" },
+  { id: "mem", label: "内存" },
+  { id: "disk", label: "硬盘" },
+  { id: "net", label: "网络" },
+];
+
+/** Fixed display order for grouping in the overlay (one group per category). */
+export const OSD_CATEGORY_ORDER: OsdCategory[] = ["fps", "cpu", "gpu", "mem", "disk", "net"];
+
+/** Fetch one overlay snapshot. GPU info / FPS are only queried when a metric in
+ *  that group is on (keeps overhead low when the user shows neither). */
+export async function fetchOsdData(needGpu: boolean, needFps: boolean): Promise<OsdData> {
+  const [metrics, sensors, gpu, fps] = await Promise.all([
+    api.getMetrics().catch(() => null),
+    api.getSensors().catch(() => null),
+    needGpu ? api.gpuOcInfo().catch(() => null) : Promise.resolve(null),
+    needFps ? api.osdFps().catch(() => null) : Promise.resolve(null),
+  ]);
+  return { metrics, sensors, gpu, fps };
+}

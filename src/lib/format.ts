@@ -19,12 +19,12 @@ export function formatDuration(seconds: number): string {
   return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
-/** Format a logical-CPU mask into a compact list like "0-7, 16, 18". */
-export function maskToCpuList(mask: number): string {
+/** Format a logical-CPU mask into a compact list like "0-7, 16, 18". `mask` is a
+ *  `bigint` so every one of the 64 possible bits is exact. */
+export function maskToCpuList(mask: bigint): string {
   const ids: number[] = [];
-  for (let i = 0; i < 64; i++) {
-    // Avoid 32-bit signed `<<` overflow: use float division for bit i.
-    if (Math.floor(mask / 2 ** i) % 2 === 1) ids.push(i);
+  for (let i = 0n; i < 64n; i++) {
+    if ((mask >> i) & 1n) ids.push(Number(i));
   }
   if (ids.length === 0) return "—";
   const ranges: string[] = [];

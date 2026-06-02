@@ -33,7 +33,7 @@ export function CoreHeatmap({ perCore, topo }: CoreHeatmapProps) {
       isVcache: false,
       l3Bytes: 0,
       logicalCpus: perCore.map((_, i) => i),
-      mask: 0,
+      mask: 0n,
       kind: "standard",
       label: "全部核心",
     },

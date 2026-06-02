@@ -79,6 +79,12 @@
     user-select: none;
     cursor: default;
   }
+  /* OSD overlay window: transparent page so only the metrics plate is visible. */
+  html.osd-window,
+  html.osd-window body,
+  html.osd-window #root {
+    background: transparent !important;
+  }
   ::selection {
     background: oklch(67% 0.185 280 / 0.35);
   }

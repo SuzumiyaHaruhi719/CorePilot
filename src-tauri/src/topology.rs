@@ -38,6 +38,9 @@ pub struct Ccd {
     pub is_vcache: bool,
     pub l3_bytes: u64,
     pub logical_cpus: Vec<u32>,
+    /// Affinity mask over logical CPUs. Serialized as a decimal string so bits
+    /// ≥ 53 survive the JS-number (f64) frontend boundary; see `serde_u64`.
+    #[serde(with = "crate::serde_u64::str")]
     pub mask: u64,
     /// Cluster nature: "vcache" | "freq" | "standard" | "pcore" | "ecore".
     pub kind: String,

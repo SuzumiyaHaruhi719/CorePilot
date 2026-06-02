@@ -5,8 +5,8 @@ import type { CpuTopology } from "../../lib/ipc";
 
 interface CoreGridProps {
   topo: CpuTopology;
-  mask: number;
-  onChange: (mask: number) => void;
+  mask: bigint;
+  onChange: (mask: bigint) => void;
 }
 
 const presetClass =
@@ -70,7 +70,7 @@ export function CoreGrid({ topo, mask, onChange }: CoreGridProps) {
         <button className={presetClass} onClick={() => onChange(allMask)}>
           全选
         </button>
-        <button className={presetClass} onClick={() => onChange(0)}>
+        <button className={presetClass} onClick={() => onChange(0n)}>
           清空
         </button>
         {vcache && (

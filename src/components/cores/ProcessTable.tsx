@@ -29,7 +29,7 @@ const COLS_WITH_GROUP = "grid-cols-[28px_minmax(0,1fr)_124px_76px_88px_50px_92px
 const COLS_NO_GROUP = "grid-cols-[28px_minmax(0,1fr)_76px_88px_50px_92px_56px]";
 
 /** Hardware threads + cluster a process spans (from its affinity mask). */
-function HwThreads({ mask, topo }: { mask: number; topo: CpuTopology | null }) {
+function HwThreads({ mask, topo }: { mask: bigint; topo: CpuTopology | null }) {
   const c = classifyCcd(mask, topo);
   if (c.count === 0) return <span className="nums text-right text-dim">—</span>;
   const dot =

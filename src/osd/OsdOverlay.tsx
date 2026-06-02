@@ -1,0 +1,126 @@
+import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { cn } from "../lib/cn";
+import { api } from "../lib/ipc";
+import { fetchOsdData, type OsdData } from "../lib/osd";
+import {
+  resolveOsd,
+  useOsd,
+  useOsdTargets,
+  type OsdConfig,
+  type OsdMode,
+  type OsdTarget,
+} from "../store/osd";
+import { OsdPlate } from "./OsdPlate";
+
+/**
+ * The in-game overlay surface, rendered in a separate transparent, click-through,
+ * always-on-top Tauri window (entry: `?osd`). Deliberately lightweight: a single
+ * ~1 Hz poll of existing backend commands, minimal DOM, no animation — so it adds
+ * negligible overhead while a game runs.
+ *
+ * Per-process behaviour: each tick we ask the backend for the foreground app and
+ * resolve it against the white/blacklist (`resolveOsd`). The plate renders only
+ * when the foreground app is a target, using that game's effective config (global
+ * default + its per-game override). The window itself stays created; it simply
+ * renders nothing when the focused app isn't a target. Config is hydrated from
+ * the shared store and kept live via the `osd:cfg` / `osd:targets` events emitted
+ * by the config panel (which lives in a different webview).
+ */
+
+const EMPTY: OsdData = { metrics: null, sensors: null, gpu: null, fps: null };
+
+/** Poll interval for the foreground app + metrics (ms). */
+const TICK_MS = 1000;
+
+export function OsdOverlay() {
+  // Global default config (the master switch + the "use default" appearance).
+  const global = useOsd();
+  // Per-game rules.
+  const mode = useOsdTargets((s) => s.mode);
+  const targets = useOsdTargets((s) => s.targets);
+
+  const [data, setData] = useState<OsdData>(EMPTY);
+  const [foreground, setForeground] = useState<string | null>(null);
+
+  // Live config push from the main window's config panel (separate webview), so
+  // edits in the panel reflect on the overlay without a reload.
+  useEffect(() => {
+    const unCfg = listen<Partial<OsdConfig>>("osd:cfg", (e) => useOsd.setState(e.payload));
+    const unTargets = listen<{ mode: OsdMode; targets: OsdTarget[] }>("osd:targets", (e) =>
+      useOsdTargets.setState(e.payload),
+    );
+    return () => {
+      void unCfg.then((f) => f());
+      void unTargets.then((f) => f());
+    };
+  }, []);
+
+  // Resolve which config (if any) applies to the current foreground app.
+  const effective = resolveOsd(
+    {
+      enabled: global.enabled,
+      style: global.style,
+      scale: global.scale,
+      opacity: global.opacity,
+      position: global.position,
+      rounded: global.rounded,
+      metrics: global.metrics,
+    },
+    mode,
+    targets,
+    foreground,
+  );
+  // Master switch off → never show. Otherwise show iff a config resolved.
+  const show = global.enabled && effective !== null;
+  const cfg = effective ?? global;
+
+  const needGpu = cfg.metrics.some((k) => k.startsWith("gpu."));
+  const needFps = cfg.metrics.includes("fps");
+
+  // Single poll loop: refresh the foreground app and (only while showing) the
+  // metric snapshot. When hidden we still track the foreground app cheaply so a
+  // game gaining focus brings the overlay up on the next tick.
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      const fg = await api.foregroundProcess().catch(() => null);
+      if (!alive) return;
+      setForeground(fg);
+      if (show) {
+        const d = await fetchOsdData(needGpu, needFps);
+        if (alive) setData(d);
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), TICK_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [needGpu, needFps, show]);
+
+  if (!show) return null;
+
+  const top = cfg.position === "tl" || cfg.position === "tr";
+  const left = cfg.position === "tl" || cfg.position === "bl";
+
+  return (
+    <div
+      className={cn(
+        "fixed inset-0 flex p-1.5",
+        top ? "items-start" : "items-end",
+        left ? "justify-start" : "justify-end",
+      )}
+    >
+      <OsdPlate
+        metrics={cfg.metrics}
+        style={cfg.style}
+        scale={cfg.scale}
+        opacity={cfg.opacity}
+        rounded={cfg.rounded}
+        data={data}
+      />
+    </div>
+  );
+}
