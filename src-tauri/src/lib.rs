@@ -7,6 +7,7 @@ pub mod netfix;
 pub mod nvapi_oc;
 pub mod optimize;
 pub mod osd;
+pub mod overlay;
 pub mod process;
 pub mod sensors;
 pub mod serde_u64;
