@@ -409,6 +409,8 @@ fn is_non_game(exe: &str) -> bool {
         "ctfmon.exe",
         "lockapp.exe",
         "taskmgr.exe",
+        "snippingtool.exe",
+        "screenclippinghost.exe",
         "widgets.exe",
         "widgetservice.exe",
         "corepilot.exe",
@@ -417,16 +419,25 @@ fn is_non_game(exe: &str) -> bool {
     NOT_GAMES.contains(&exe)
 }
 
+/// Minimum present rate (frames/sec) for auto game-detection. Many non-game apps
+/// (Snipping Tool, Photos, browsers, Electron apps) submit DxgKrnl present frames
+/// too, so "has any presents" misfires. A game renders continuously at a real
+/// frame rate; a UI app only redraws occasionally. Requiring a sustained rate
+/// this high distinguishes them. Capped/menu games below this can still be added
+/// via the OSD whitelist (which force-records regardless of FPS).
+const GAME_FPS_MIN: f64 = 20.0;
+
 #[tauri::command]
 pub fn foreground_info() -> ForegroundInfo {
     match foreground_pid() {
         Some(pid) => {
             let exe = process_image_name(pid);
-            // A process counts as a game only if it presents frames (ETW) AND is
-            // not a known shell/system presenter (desktop, taskbar, settings, …).
-            // An unresolved exe is treated as non-game (conservative).
-            let is_game =
-                fps_for(pid).is_some() && exe.as_deref().map(|e| !is_non_game(e)).unwrap_or(false);
+            // A process counts as a game only if it (a) isn't a known shell/system
+            // presenter, and (b) is presenting at a sustained, game-like rate.
+            // Both guards stop UI apps that merely redraw from being misdetected as
+            // games and auto-triggering a perf report. Unresolved exe → non-game.
+            let not_shell = exe.as_deref().map(|e| !is_non_game(e)).unwrap_or(false);
+            let is_game = not_shell && fps_for(pid).is_some_and(|fps| fps >= GAME_FPS_MIN);
             ForegroundInfo { exe, pid, is_game }
         }
         None => ForegroundInfo { exe: None, pid: 0, is_game: false },
