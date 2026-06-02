@@ -10,6 +10,23 @@ crate-type = ["cdylib"]
 
 [dependencies]
 corepilot-osd-ipc = { path = "../corepilot-osd-ipc" }
-# NOTE: the real overlay (hudhook = "0.9.1", imgui = "0.12", windows 0.62, tracing)
-# is added by the implementation step. This stub keeps the workspace valid and the
-# IPC dependency wired while the foundation is verified.
+
+# In-frame overlay engine: hooks Present (DX9/11/12 + OpenGL3) with vendored
+# MinHook and renders via Dear ImGui. This is the MSI-Afterburner/RTSS-style
+# approach — we draw into the game's own back buffer, so it works in exclusive
+# fullscreen with no window of our own.
+hudhook = "0.9.1"
+# hudhook re-exports imgui, but we name the type (`imgui::Ui`) in our render loop,
+# so depend on the matching major directly.
+imgui = "0.12"
+
+# Win32 just for process/module introspection: GetCurrentProcessId (PID gate) and
+# GetModuleHandleW (graphics-API detection). Pinned to 0.62 to match hudhook and
+# the rest of the workspace so HANDLE/COM types are identical everywhere.
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+  "Win32_System_LibraryLoader",
+] }
+
+tracing = "0.1"
