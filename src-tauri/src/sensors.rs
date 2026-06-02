@@ -1,5 +1,6 @@
 //! System telemetry sampler: GPU utilization/VRAM (PDH + DXGI), disk activity
-//! and throughput (PDH PhysicalDisk), and network throughput (sysinfo).
+//! and throughput (PDH PhysicalDisk), network throughput (sysinfo), and live CPU
+//! clock (PDH `% Processor Performance` scaled by the base MHz from the registry).
 //!
 //! State is kept internally in a `Lazy<Mutex<Sampler>>` so `sample()` can be
 //! called repeatedly (~every 1.5s) without touching `AppState`. PDH queries are
@@ -28,6 +29,8 @@ use windows::core::PCWSTR;
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
 };
+use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD};
 use windows::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
     PdhGetFormattedCounterValue, PdhOpenQueryW, PDH_FMT_COUNTERVALUE,
@@ -61,6 +64,7 @@ pub struct SensorSample {
     pub gpu_power: Option<f32>,   // watts
     pub cpu_temp: Option<f32>,    // °C
     pub gpu_temp: Option<f32>,    // °C
+    pub cpu_clock: Option<f64>,   // live CPU clock, MHz (base × % perf)
 }
 
 /// A PDH query handle plus the counters opened against it. PDH handles are raw
@@ -73,6 +77,11 @@ struct PdhQuery {
     disk_time: PDH_HCOUNTER,
     gpu_util: PDH_HCOUNTER,      // wildcard array: \GPU Engine(*)\Utilization Percentage
     gpu_mem: Option<PDH_HCOUNTER>, // wildcard array: \GPU Adapter Memory(*)\Dedicated Usage
+    // Live CPU clock: `% Processor Performance` is the % of the CPU's nominal/base
+    // frequency and exceeds 100% under turbo/boost. Like the disk rate counters it
+    // is averaged over two collects, so it shares this query's per-sample cadence.
+    cpu_perf: Option<PDH_HCOUNTER>, // \Processor Information(_Total)\% Processor Performance
+    cpu_freq: Option<PDH_HCOUNTER>, // \Processor Information(_Total)\Processor Frequency (base MHz fallback)
 }
 
 /// Latest power/temperature readings produced by the `sensord` sidecar.
@@ -209,6 +218,9 @@ struct Sampler {
     gpu_name: Option<String>,
     vram_total: Option<u64>,
     dxgi_done: bool,
+    /// Cached CPU base/nominal clock (MHz); resolved once (registry, else PDH).
+    base_mhz: Option<f64>,
+    base_mhz_done: bool,
 }
 
 // SAFETY: the PDH handles inside `Sampler` are raw pointers and thus not `Send`
@@ -227,6 +239,8 @@ static SAMPLER: Lazy<Mutex<Sampler>> = Lazy::new(|| {
         gpu_name: None,
         vram_total: None,
         dxgi_done: false,
+        base_mhz: None,
+        base_mhz_done: false,
     })
 });
 
@@ -271,6 +285,12 @@ impl PdhQuery {
             // VRAM usage is optional (counter name varies by driver/OS build).
             let gpu_mem = add(r"\GPU Adapter Memory(*)\Dedicated Usage");
 
+            // CPU clock is optional too (graceful None if either counter is
+            // missing): live % of base frequency, plus the static base-MHz
+            // fallback counter used only if the registry `~MHz` read fails.
+            let cpu_perf = add(r"\Processor Information(_Total)\% Processor Performance");
+            let cpu_freq = add(r"\Processor Information(_Total)\Processor Frequency");
+
             // Prime the query so the first user-facing sample has a baseline.
             let _ = PdhCollectQueryData(query);
 
@@ -281,6 +301,8 @@ impl PdhQuery {
                 disk_time,
                 gpu_util,
                 gpu_mem,
+                cpu_perf,
+                cpu_freq,
             })
         }
     }
@@ -334,6 +356,37 @@ unsafe fn read_array(counter: PDH_HCOUNTER) -> Option<Vec<f64>> {
         }
     }
     Some(out)
+}
+
+/// Read the CPU's base/nominal clock (MHz) from the registry value `~MHz`
+/// (REG_DWORD) under `HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0`.
+///
+/// This is the same static base frequency Task Manager scales by `% Processor
+/// Performance` to show the live "Speed". Returns `None` on any failure (key or
+/// value missing, wrong type) so the caller can fall back to the PDH counter.
+/// Note: CPU 0 is read on multi-socket systems, matching Task Manager.
+fn read_base_mhz() -> Option<f64> {
+    let sub = wide(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
+    let value = wide("~MHz");
+    let mut data: u32 = 0;
+    let mut size: u32 = std::mem::size_of::<u32>() as u32;
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(sub.as_ptr()),
+            PCWSTR(value.as_ptr()),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut data as *mut u32 as *mut std::ffi::c_void),
+            Some(&mut size),
+        )
+    };
+    // RegGetValueW returns ERROR_SUCCESS on success; reject a zero/garbage value.
+    if rc == ERROR_SUCCESS && data > 0 {
+        Some(data as f64)
+    } else {
+        None
+    }
 }
 
 /// Query DXGI once for the primary adapter's description and dedicated VRAM.
@@ -433,7 +486,12 @@ pub fn sample() -> SensorSample {
     }
     s.last_instant = Some(now);
 
-    // --- PDH counters (disk + GPU) ---
+    // --- PDH counters (disk + GPU + CPU clock) ---
+    // CPU-clock pieces read inside the (immutable) `s.pdh` borrow below, then
+    // applied to `out`/the base-MHz cache afterward.
+    let mut resolved_base_mhz: Option<f64> = None;
+    let mut base_mhz_resolved = false;
+    let mut cpu_perf_pct: Option<f64> = None;
     if let Some(pdh) = s.pdh.as_ref() {
         unsafe {
             // A single collect updates every counter on the query.
@@ -459,7 +517,34 @@ pub fn sample() -> SensorSample {
                         out.vram_used = Some(sum as u64);
                     }
                 }
+
+                // Live CPU clock (MHz), the way Task Manager derives "Speed":
+                // base_MHz × (% Processor Performance / 100). The percentage is
+                // averaged over the two most recent collects (this query's normal
+                // cadence) and exceeds 100% under turbo/boost. Resolve the base
+                // MHz once: registry `~MHz` first, else the static PDH frequency
+                // counter as a fallback. Reads happen here (counters are freshly
+                // collected); the cache write-back is below to satisfy the borrow
+                // checker, since `s` is borrowed immutably by `s.pdh` above.
+                if !s.base_mhz_done {
+                    resolved_base_mhz = read_base_mhz()
+                        .or_else(|| pdh.cpu_freq.and_then(|c| read_scalar(c)).filter(|v| *v > 0.0));
+                    base_mhz_resolved = true;
+                }
+                cpu_perf_pct = pdh.cpu_perf.and_then(|c| read_scalar(c));
             }
+        }
+    }
+
+    // Apply the once-resolved base MHz and compute the live clock. Done outside
+    // the `s.pdh` borrow above (which is immutable) so we can mutate the cache.
+    if base_mhz_resolved {
+        s.base_mhz = resolved_base_mhz;
+        s.base_mhz_done = true;
+    }
+    if let (Some(base), Some(perf)) = (s.base_mhz, cpu_perf_pct) {
+        if perf.is_finite() && perf >= 0.0 {
+            out.cpu_clock = Some(base * perf / 100.0);
         }
     }
 

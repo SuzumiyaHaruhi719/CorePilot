@@ -65,7 +65,7 @@ export const OSD_METRICS: OsdMetricDef[] = [
   { key: "cpu.util", cat: "cpu", label: "占用率 (%)", tag: "CPU", supported: true, value: (d) => pct(d.metrics?.cpuOverall, 0) },
   { key: "cpu.temp", cat: "cpu", label: "温度 (°C)", tag: "CPU", supported: true, value: (d) => (d.sensors?.cpuTemp == null ? null : `${d.sensors.cpuTemp.toFixed(0)}°`) },
   { key: "cpu.power", cat: "cpu", label: "热功耗 (W)", tag: "CPU", supported: true, value: (d) => (d.sensors?.cpuPower == null ? null : `${d.sensors.cpuPower.toFixed(0)}W`) },
-  { key: "cpu.freq", cat: "cpu", label: "频率 (MHz)", tag: "CPU", supported: false, value: () => null },
+  { key: "cpu.freq", cat: "cpu", label: "频率 (MHz)", tag: "CPU", supported: true, value: (d) => (d.sensors?.cpuClock == null ? null : `${Math.round(d.sensors.cpuClock)}MHz`) },
 
   // GPU
   { key: "gpu.util", cat: "gpu", label: "占用率 (%)", tag: "GPU", supported: true, value: (d) => pct(gpuUtil(d), 0) },

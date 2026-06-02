@@ -122,6 +122,8 @@ export interface Sensors {
   gpuPower: number | null;
   cpuTemp: number | null;
   gpuTemp: number | null;
+  /** Live CPU clock in MHz (base × % processor performance); null if unavailable. */
+  cpuClock: number | null;
 }
 
 export interface GpuOcInfo {
