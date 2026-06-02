@@ -36,7 +36,8 @@ use serde::Serialize;
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
@@ -309,4 +310,50 @@ fn process_image_name(pid: u32) -> Option<String> {
 #[tauri::command]
 pub fn foreground_process() -> Option<String> {
     process_image_name(foreground_pid()?)
+}
+
+/// Foreground app snapshot for OSD targeting + the perf-session recorder.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForegroundInfo {
+    /// Lowercased exe name (e.g. "subnautica2-win64-shipping.exe"); null when unresolved.
+    exe: Option<String>,
+    /// Foreground PID (0 when there is no foreground window).
+    pid: u32,
+    /// True when the foreground app is rendering frames (has recent ETW present
+    /// events) — our driverless "is a game" signal (same source as FPS).
+    is_game: bool,
+}
+
+/// One call returning everything the OSD/recorder needs about the foreground app
+/// (saves three round-trips per poll tick).
+#[tauri::command]
+pub fn foreground_info() -> ForegroundInfo {
+    match foreground_pid() {
+        Some(pid) => ForegroundInfo {
+            exe: process_image_name(pid),
+            pid,
+            is_game: fps_for(pid).is_some(),
+        },
+        None => ForegroundInfo { exe: None, pid: 0, is_game: false },
+    }
+}
+
+/// Whether a process is still running. Used by the perf recorder to detect when
+/// a game has exited (→ finalize its session report). Best-effort; never panics.
+#[tauri::command]
+pub fn pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false.into(), pid) else {
+            return false;
+        };
+        let mut code: u32 = 0;
+        let ok = GetExitCodeProcess(handle, &mut code).is_ok();
+        let _ = CloseHandle(handle);
+        // STILL_ACTIVE (259) means the process has not exited.
+        ok && code == 259
+    }
 }

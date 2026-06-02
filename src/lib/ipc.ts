@@ -190,6 +190,14 @@ export interface StartupItem {
   enabled: boolean;
 }
 
+/** Result of a single network diagnostic or repair step. */
+export interface NetCheck {
+  id: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
 /** Windows priority classes. */
 export const PRIORITY = {
   idle: 0x40,
@@ -251,6 +259,8 @@ export const api = {
   listStartup: () => invoke<StartupItem[]>("list_startup"),
   setStartupEnabled: (name: string, location: string, enabled: boolean) =>
     invoke<void>("set_startup_enabled", { name, location, enabled }),
+  networkDiagnose: () => invoke<NetCheck[]>("network_diagnose"),
+  networkRepair: (actions: string[]) => invoke<NetCheck[]>("network_repair", { actions }),
   gpuOcInfo: () => invoke<GpuOcInfo>("gpu_oc_info"),
   gpuOcApply: (settings: GpuOcSettings) => invoke<void>("gpu_oc_apply", { settings }),
   gpuOcReset: () => invoke<void>("gpu_oc_reset"),
@@ -258,6 +268,8 @@ export const api = {
   osdFps: () => invoke<number | null>("osd_fps"),
   osdFpsStats: () => invoke<OsdFpsStats>("osd_fps_stats"),
   foregroundProcess: () => invoke<string | null>("foreground_process"),
+  foregroundInfo: () => invoke<ForegroundInfo>("foreground_info"),
+  pidAlive: (pid: number) => invoke<boolean>("pid_alive", { pid }),
   setCloseToTray: (enabled: boolean) => invoke<void>("set_close_to_tray", { enabled }),
 };
 
@@ -270,4 +282,14 @@ export interface OsdFpsStats {
   low1: number | null;
   /** 0.1% low FPS (reciprocal of the 99.9th-percentile frame time). */
   low01: number | null;
+}
+
+/** Foreground app snapshot — game detection + the perf-session recorder. */
+export interface ForegroundInfo {
+  /** Lowercased exe name, or null when unresolved. */
+  exe: string | null;
+  /** Foreground PID (0 when none). */
+  pid: number;
+  /** True when the foreground app is rendering frames (has recent presents). */
+  isGame: boolean;
 }

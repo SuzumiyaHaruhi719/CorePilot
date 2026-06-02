@@ -38,14 +38,14 @@ function cfgOf(s: OsdCfg): OsdCfg {
     freeY: s.freeY,
     rounded: s.rounded,
     oledShift: s.oledShift,
+    desktopMode: s.desktopMode,
     metrics: s.metrics,
   };
 }
 
 export function OsdConfig() {
   const osd = useOsd();
-  const { mode, targets, setMode, addTarget, removeTarget, setTargetList, updateTargetConfig } =
-    useOsdTargets();
+  const { targets, addTarget, removeTarget, setTargetList, updateTargetConfig } = useOsdTargets();
   const [cat, setCat] = useState<OsdCategory>("cpu");
   const [data, setData] = useState<OsdData>(EMPTY);
   const [selected, setSelected] = useState<string | null>(null);
@@ -88,8 +88,7 @@ export function OsdConfig() {
   useEffect(() => useOsd.subscribe((s) => void emit("osd:cfg", cfgOf(s))), []);
   // Push every list change too, so the overlay re-resolves immediately.
   useEffect(
-    () =>
-      useOsdTargets.subscribe((s) => void emit("osd:targets", { mode: s.mode, targets: s.targets })),
+    () => useOsdTargets.subscribe((s) => void emit("osd:targets", { targets: s.targets })),
     [],
   );
 
@@ -163,6 +162,16 @@ export function OsdConfig() {
             <Toggle checked={osd.enabled} onChange={setEnabled} />
           </div>
 
+          <div className="mb-3 flex items-center justify-between border-t border-line/60 pt-3">
+            <div>
+              <div className="text-[13.5px] font-medium text-ink">桌面模式</div>
+              <div className="text-[12px] text-dim">
+                非游戏时也在桌面显示（仅 CPU / GPU / 内存 / 硬盘 / 网络，不含 FPS）
+              </div>
+            </div>
+            <Toggle checked={osd.desktopMode} onChange={(v) => osd.update({ desktopMode: v })} />
+          </div>
+
           {/* Live preview over a faux game backdrop */}
           <div className="relative overflow-hidden rounded-xl border border-line">
             <div
@@ -224,25 +233,12 @@ export function OsdConfig() {
 
         {/* Per-game white / black list */}
         <div className="glass hairline rounded-2xl p-4">
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Gamepad2 size={15} className="text-accent-bright" />
-              <span className="text-[13.5px] font-semibold text-ink">游戏名单 / 白·黑名单</span>
-            </div>
-            <Segmented
-              id="osd-mode"
-              value={mode}
-              onChange={(v) => setMode(v as "whitelist" | "all")}
-              options={[
-                { value: "whitelist", label: "白名单" },
-                { value: "all", label: "全部显示 + 黑名单" },
-              ]}
-            />
+          <div className="mb-3 flex items-center gap-2">
+            <Gamepad2 size={15} className="text-accent-bright" />
+            <span className="text-[13.5px] font-semibold text-ink">游戏名单 / 白·黑名单</span>
           </div>
           <div className="mb-3 text-[11.5px] leading-relaxed text-dim">
-            {mode === "whitelist"
-              ? "仅当焦点游戏在白名单中时显示叠加层 — 启动该游戏即自动出现，无需手动开关。"
-              : "默认对所有前台程序显示；黑名单中的程序不显示。"}
+            默认在识别为游戏的应用上自动显示；白名单 = 强制显示，黑名单 = 强制隐藏。
           </div>
 
           {/* Add by exe name */}
@@ -304,8 +300,8 @@ export function OsdConfig() {
                       value={t.list}
                       onChange={(v) => setTargetList(t.name, v as "white" | "black")}
                       options={[
-                        { value: "white", label: "白" },
-                        { value: "black", label: "黑" },
+                        { value: "white", label: "强制显示" },
+                        { value: "black", label: "强制隐藏" },
                       ]}
                     />
                     <button

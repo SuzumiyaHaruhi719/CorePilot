@@ -3,6 +3,7 @@ pub mod commands;
 pub mod error;
 pub mod fps;
 pub mod gpu;
+pub mod netfix;
 pub mod nvapi_oc;
 pub mod optimize;
 pub mod osd;
@@ -75,6 +76,8 @@ pub fn run() {
             commands::control_service,
             commands::list_startup,
             commands::set_startup_enabled,
+            netfix::network_diagnose,
+            netfix::network_repair,
             gpu::gpu_oc_info,
             gpu::gpu_oc_apply,
             gpu::gpu_oc_reset,
@@ -82,6 +85,8 @@ pub fn run() {
             fps::osd_fps,
             fps::osd_fps_stats,
             fps::foreground_process,
+            fps::foreground_info,
+            fps::pid_alive,
             tray::set_close_to_tray,
         ])
         .run(tauri::generate_context!())

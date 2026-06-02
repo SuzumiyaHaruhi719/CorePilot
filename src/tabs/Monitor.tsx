@@ -1,12 +1,22 @@
 import { Activity, ArrowDown, ArrowUp, Cpu, Gamepad2, Gauge, HardDrive, MemoryStick, MonitorPlay } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { motion } from "motion/react";
+import { AnimatePresence, motion } from "motion/react";
+import { useState } from "react";
 import { Sparkline } from "../components/charts/Sparkline";
+import { PerfHistory } from "../components/perf/PerfHistory";
 import { AnimatedNumber } from "../components/ui/AnimatedNumber";
+import { Segmented } from "../components/ui/Segmented";
 import { TabHeader } from "../components/ui/TabHeader";
 import { useMetricsHistory } from "../hooks/useMetricsHistory";
 import { useSensors } from "../hooks/useSensors";
 import { formatBytes } from "../lib/format";
+
+type SubTab = "live" | "history";
+
+const SUB_TABS: { value: SubTab; label: string }[] = [
+  { value: "live", label: "实时" },
+  { value: "history", label: "历史" },
+];
 
 const fmtRate = (v: number | null | undefined) => (v == null ? "—" : `${formatBytes(v)}/s`);
 
@@ -44,7 +54,7 @@ function GaugeCard({ icon: Icon, label, value, hue, hist, sub }: GaugeCardProps)
   );
 }
 
-export function Monitor() {
+function LiveDashboard() {
   const { cpu, memPct, latest } = useMetricsHistory(80);
   const { latest: sensors, gpuHist } = useSensors(80);
 
@@ -54,9 +64,7 @@ export function Monitor() {
   const memNowPct = memTotal > 0 ? (memUsed / memTotal) * 100 : 0;
 
   return (
-    <>
-      <TabHeader icon={Gauge} title="游戏监控" subtitle="实时性能监控 — CPU / GPU / 内存 / 磁盘 / 网络" />
-      <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
+    <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
         <div className="grid gap-4 md:grid-cols-3">
           <GaugeCard icon={Cpu} label="CPU" value={cpuNow} hue={280} hist={cpu} sub={`${cpuNow.toFixed(1)}% 占用`} />
           <GaugeCard
@@ -153,7 +161,33 @@ export function Monitor() {
             </div>
           </motion.div>
         </div>
-      </div>
+    </div>
+  );
+}
+
+export function Monitor() {
+  const [sub, setSub] = useState<SubTab>("live");
+
+  return (
+    <>
+      <TabHeader
+        icon={Gauge}
+        title="游戏监控"
+        subtitle="实时性能监控 — CPU / GPU / 内存 / 磁盘 / 网络"
+        actions={<Segmented id="monitor-sub" value={sub} options={SUB_TABS} onChange={setSub} />}
+      />
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={sub}
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -6 }}
+          transition={{ duration: 0.2, ease: [0.33, 1, 0.68, 1] }}
+          className="flex min-h-0 flex-1 flex-col"
+        >
+          {sub === "live" ? <LiveDashboard /> : <PerfHistory />}
+        </motion.div>
+      </AnimatePresence>
     </>
   );
 }

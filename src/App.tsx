@@ -7,6 +7,7 @@ import { api, type Overview } from "./lib/ipc";
 import { ACCENT_HUE, useSettings } from "./store/settings";
 import { useAffinityEnforcer } from "./hooks/useAffinityEnforcer";
 import { useOsdHotkey } from "./hooks/useOsdHotkey";
+import { usePerfRecorder } from "./hooks/usePerfRecorder";
 import { useUi, type TabId } from "./store/ui";
 import { CoreAssignment } from "./tabs/CoreAssignment";
 import { GpuTune } from "./tabs/GpuTune";
@@ -38,6 +39,7 @@ function App() {
   const [overview, setOverview] = useState<Overview | null>(null);
   useAffinityEnforcer(overview ? (1n << BigInt(overview.logicalCpus)) - 1n : 0n);
   useOsdHotkey();
+  usePerfRecorder();
 
   useEffect(() => {
     api.getOverview().then(setOverview).catch(() => undefined);

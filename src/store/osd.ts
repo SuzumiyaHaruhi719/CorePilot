@@ -22,6 +22,9 @@ export interface OsdConfig {
   rounded: boolean;
   /** OLED anti burn-in: slowly nudge the overlay's position over time. */
   oledShift: boolean;
+  /** Desktop mode: also show the OSD when no game is in the foreground (on the
+   *  desktop / regular apps); FPS metrics are hidden there (no game → no FPS). */
+  desktopMode: boolean;
   /** Enabled metric keys (see OSD_METRICS), in display order. */
   metrics: string[];
 }
@@ -32,11 +35,9 @@ interface OsdStore extends OsdConfig {
   toggleMetric: (key: string) => void;
 }
 
-/** How the per-game list is interpreted. */
-export type OsdMode = "whitelist" | "all";
-
-/** Which list a game sits on. `white` = explicitly shown (whitelist mode) or
- *  just listed (all mode); `black` = explicitly suppressed (all mode). */
+/** Which list a game sits on, as an explicit override of game auto-detection.
+ *  `white` = force SHOW (even if not detected as a game); `black` = force HIDE
+ *  (never show, even if it is a game). */
 export type OsdListKind = "white" | "black";
 
 /** A per-process OSD rule. `config` optionally overrides the *global* default
@@ -72,6 +73,7 @@ export const useOsd = create<OsdStore>()(
       freeY: 0.04,
       rounded: true,
       oledShift: false,
+      desktopMode: false,
       metrics: DEFAULT_METRICS,
       setEnabled: (enabled) => set({ enabled }),
       update: (patch) => set(patch),
@@ -91,11 +93,7 @@ export const useOsd = create<OsdStore>()(
 export type OsdAppearance = Omit<OsdConfig, "enabled">;
 
 interface OsdTargetsStore {
-  /** whitelist = show only for listed games; all = show for everything except
-   *  blacklisted games. */
-  mode: OsdMode;
   targets: OsdTarget[];
-  setMode: (mode: OsdMode) => void;
   /** Add a game by exe name (no-op if already present). New entries default to
    *  the white list with no per-game override (inherit global). */
   addTarget: (name: string, list?: OsdListKind) => void;
@@ -115,9 +113,7 @@ function normName(name: string): string {
 export const useOsdTargets = create<OsdTargetsStore>()(
   persist(
     (set) => ({
-      mode: "all",
       targets: [],
-      setMode: (mode) => set({ mode }),
       addTarget: (name, list = "white") =>
         set((s) => {
           const n = normName(name);
@@ -157,28 +153,30 @@ export function effectiveConfig(global: OsdConfig, override?: Partial<OsdConfig>
 }
 
 /**
- * Decide whether the OSD should render for the given foreground exe, and with
- * what config.
+ * Decide whether the OSD should render for the given foreground app, and with
+ * what config. The default is to show on apps auto-detected as games, with the
+ * white/black lists acting as explicit overrides:
  *
- * - whitelist mode: show **iff** a `white` entry matches → its effective config.
- * - all mode: show for everything **unless** a `black` entry matches → hide.
+ * - blacklist match → force HIDE (never show, even if it is a game).
+ * - whitelist match → force SHOW (show even if NOT detected as a game).
+ * - no match → show **iff** the foreground app is a game (`isGame`).
  *
- * Returns the effective `OsdConfig` to render, or `null` to hide. `exe` of
- * `null`/empty (no foreground app resolvable) always hides.
+ * Returns the effective `OsdConfig` to render, or `null` to hide.
  */
 export function resolveOsd(
   global: OsdConfig,
-  mode: OsdMode,
   targets: OsdTarget[],
   exe: string | null,
+  isGame: boolean,
 ): OsdConfig | null {
   const n = exe ? normName(exe) : "";
   const match = n ? targets.find((t) => t.name === n) : undefined;
-  if (mode === "whitelist") {
-    if (match && match.list === "white") return effectiveConfig(global, match.config);
-    return null;
+  if (match) {
+    if (match.list === "black") return null;
+    // white → force show, even if not detected as a game.
+    return effectiveConfig(global, match.config);
   }
-  // "all": show everywhere, except an explicit blacklist match.
-  if (match && match.list === "black") return null;
-  return effectiveConfig(global, match?.config);
+  // No explicit override: show when auto-detected as a game, or always in
+  // desktop mode (the overlay hides FPS metrics on the desktop).
+  return isGame || global.desktopMode ? effectiveConfig(global, undefined) : null;
 }
