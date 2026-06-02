@@ -389,14 +389,46 @@ pub struct ForegroundInfo {
 
 /// One call returning everything the OSD/recorder needs about the foreground app
 /// (saves three round-trips per poll tick).
+/// Lowercased exe names that present frames (so ETW/DxgKrnl sees them) but are
+/// NOT games: the Windows shell, system UI, and CorePilot's own webview. Without
+/// this they get misdetected as games — e.g. explorer.exe renders the desktop and
+/// taskbar, so at startup (explorer foreground) the recorder/OSD would fire a
+/// bogus "检测到游戏 explorer.exe". Real games aren't on this list.
+fn is_non_game(exe: &str) -> bool {
+    const NOT_GAMES: &[&str] = &[
+        "explorer.exe",
+        "dwm.exe",
+        "searchhost.exe",
+        "searchapp.exe",
+        "shellexperiencehost.exe",
+        "startmenuexperiencehost.exe",
+        "applicationframehost.exe",
+        "textinputhost.exe",
+        "systemsettings.exe",
+        "sihost.exe",
+        "ctfmon.exe",
+        "lockapp.exe",
+        "taskmgr.exe",
+        "widgets.exe",
+        "widgetservice.exe",
+        "corepilot.exe",
+        "msedgewebview2.exe",
+    ];
+    NOT_GAMES.contains(&exe)
+}
+
 #[tauri::command]
 pub fn foreground_info() -> ForegroundInfo {
     match foreground_pid() {
-        Some(pid) => ForegroundInfo {
-            exe: process_image_name(pid),
-            pid,
-            is_game: fps_for(pid).is_some(),
-        },
+        Some(pid) => {
+            let exe = process_image_name(pid);
+            // A process counts as a game only if it presents frames (ETW) AND is
+            // not a known shell/system presenter (desktop, taskbar, settings, …).
+            // An unresolved exe is treated as non-game (conservative).
+            let is_game =
+                fps_for(pid).is_some() && exe.as_deref().map(|e| !is_non_game(e)).unwrap_or(false);
+            ForegroundInfo { exe, pid, is_game }
+        }
         None => ForegroundInfo { exe: None, pid: 0, is_game: false },
     }
 }
