@@ -254,6 +254,18 @@ export const api = {
   gpuOcReset: () => invoke<void>("gpu_oc_reset"),
   osdSetVisible: (visible: boolean) => invoke<void>("osd_set_visible", { visible }),
   osdFps: () => invoke<number | null>("osd_fps"),
+  osdFpsStats: () => invoke<OsdFpsStats>("osd_fps_stats"),
   foregroundProcess: () => invoke<string | null>("foreground_process"),
   setCloseToTray: (enabled: boolean) => invoke<void>("set_close_to_tray", { enabled }),
 };
+
+/** Frame-pacing stats for the in-game OSD, derived from the ETW present stream.
+ *  All fields are null when FPS data is unavailable (no game / no privilege). */
+export interface OsdFpsStats {
+  fps: number | null;
+  frametimeMs: number | null;
+  /** 1% low FPS (reciprocal of the 99th-percentile frame time). */
+  low1: number | null;
+  /** 0.1% low FPS (reciprocal of the 99.9th-percentile frame time). */
+  low01: number | null;
+}

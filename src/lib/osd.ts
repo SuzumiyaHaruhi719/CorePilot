@@ -1,4 +1,4 @@
-import { api, type GpuOcInfo, type Metrics, type Sensors } from "./ipc";
+import { api, type GpuOcInfo, type Metrics, type OsdFpsStats, type Sensors } from "./ipc";
 import { formatBytes } from "./format";
 
 /**
@@ -15,7 +15,8 @@ export interface OsdData {
   metrics: Metrics | null;
   sensors: Sensors | null;
   gpu: GpuOcInfo | null;
-  fps: number | null;
+  /** Frame-pacing stats for the foreground game (null when unavailable). */
+  fps: OsdFpsStats | null;
 }
 
 export type OsdCategory = "fps" | "cpu" | "gpu" | "mem" | "disk" | "net";
@@ -51,9 +52,11 @@ function gpuUtil(d: OsdData): number | null {
 }
 
 export const OSD_METRICS: OsdMetricDef[] = [
-  // FPS — real in-game frame rate via ETW present events (PresentMon-style).
-  { key: "fps", cat: "fps", label: "FPS", tag: "FPS", supported: true, value: (d) => (d.fps == null ? null : d.fps.toFixed(0)) },
-  { key: "fps.frametime", cat: "fps", label: "帧时间 (ms)", tag: "FT", supported: false, value: () => null },
+  // FPS / frame pacing — derived from ETW present events (PresentMon-style).
+  { key: "fps", cat: "fps", label: "FPS", tag: "FPS", supported: true, value: (d) => (d.fps?.fps == null ? null : d.fps.fps.toFixed(0)) },
+  { key: "fps.low1", cat: "fps", label: "1% Low FPS", tag: "1%", supported: true, value: (d) => (d.fps?.low1 == null ? null : d.fps.low1.toFixed(0)) },
+  { key: "fps.low01", cat: "fps", label: "0.1% Low FPS", tag: "0.1%", supported: true, value: (d) => (d.fps?.low01 == null ? null : d.fps.low01.toFixed(0)) },
+  { key: "fps.frametime", cat: "fps", label: "帧时间 (ms)", tag: "FT", supported: true, value: (d) => (d.fps?.frametimeMs == null ? null : `${d.fps.frametimeMs.toFixed(1)}ms`) },
   { key: "net.down", cat: "net", label: "下载速度", tag: "↓", supported: true, value: (d) => { const r = rate(d.sensors?.netDown); return r ? `↓${r}` : null; } },
   { key: "net.up", cat: "net", label: "上传速度", tag: "↑", supported: true, value: (d) => { const r = rate(d.sensors?.netUp); return r ? `↑${r}` : null; } },
 
@@ -106,7 +109,7 @@ export async function fetchOsdData(needGpu: boolean, needFps: boolean): Promise<
     api.getMetrics().catch(() => null),
     api.getSensors().catch(() => null),
     needGpu ? api.gpuOcInfo().catch(() => null) : Promise.resolve(null),
-    needFps ? api.osdFps().catch(() => null) : Promise.resolve(null),
+    needFps ? api.osdFpsStats().catch(() => null) : Promise.resolve(null),
   ]);
   return { metrics, sensors, gpu, fps };
 }

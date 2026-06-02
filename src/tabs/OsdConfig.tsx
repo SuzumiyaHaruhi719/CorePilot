@@ -28,6 +28,7 @@ function cfgOf(s: OsdCfg): OsdCfg {
     opacity: s.opacity,
     position: s.position,
     rounded: s.rounded,
+    oledShift: s.oledShift,
     metrics: s.metrics,
   };
 }
@@ -417,6 +418,9 @@ function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
       </div>
       <Row label="圆角背板">
         <Toggle checked={cfg.rounded} onChange={(v) => onChange({ rounded: v })} />
+      </Row>
+      <Row label="OLED 防烧屏">
+        <Toggle checked={cfg.oledShift} onChange={(v) => onChange({ oledShift: v })} />
       </Row>
     </div>
   );

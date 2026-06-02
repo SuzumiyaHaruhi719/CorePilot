@@ -80,6 +80,7 @@ pub fn run() {
             gpu::gpu_oc_reset,
             osd::osd_set_visible,
             fps::osd_fps,
+            fps::osd_fps_stats,
             fps::foreground_process,
             tray::set_close_to_tray,
         ])

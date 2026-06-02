@@ -32,6 +32,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
+use serde::Serialize;
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Threading::{
@@ -45,9 +46,10 @@ const DXGKRNL_GUID: &str = "802ec45a-1e99-4b83-9920-87c98277ba9d";
 /// DxgKrnl `Present_Info` event id — one per swap-chain Present() call.
 const EVENT_ID_PRESENT_INFO: u16 = 0x00b8;
 
-/// How long a present timestamp is retained before pruning (slightly over 1s so
-/// the 1s FPS window is always fully populated).
-const RETENTION: Duration = Duration::from_millis(1500);
+/// How long a present timestamp is retained before pruning. Sized to the
+/// frame-pacing stats window (10s) so the 1% / 0.1% low percentiles have enough
+/// samples; the 1s FPS count just filters a sub-range of this same history.
+const RETENTION: Duration = Duration::from_millis(10_000);
 
 /// FPS counting window.
 const FPS_WINDOW: Duration = Duration::from_millis(1000);
@@ -170,6 +172,100 @@ pub fn foreground_fps() -> Option<f64> {
 #[tauri::command]
 pub fn osd_fps() -> Option<f64> {
     foreground_fps()
+}
+
+/// Frame-pacing statistics for the foreground game, derived from the same ETW
+/// present stream as [`osd_fps`]. Every field is `None` when unavailable so the
+/// overlay shows "—" rather than fabricating a value.
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FpsStats {
+    /// Presents in the last second.
+    pub fps: Option<f64>,
+    /// Mean frame time (ms) over the last second.
+    pub frametime_ms: Option<f64>,
+    /// 1% low FPS: reciprocal of the 99th-percentile frame time.
+    pub low1: Option<f64>,
+    /// 0.1% low FPS: reciprocal of the 99.9th-percentile frame time.
+    pub low01: Option<f64>,
+}
+
+/// Minimum frame samples before a percentile-low is meaningful. Below these the
+/// value would be dominated by one or two frames, so we report `None` and let it
+/// appear once enough history has accumulated.
+const LOW1_MIN_FRAMES: usize = 60;
+const LOW01_MIN_FRAMES: usize = 200;
+
+/// Compute frame-pacing stats for `pid` from its retained present timestamps.
+fn stats_for(pid: u32) -> FpsStats {
+    ensure_trace_started();
+    let now = Instant::now();
+    let map = match PRESENTS.lock() {
+        Ok(m) => m,
+        Err(_) => return FpsStats::default(),
+    };
+    let Some(dq) = map.get(&pid) else {
+        return FpsStats::default();
+    };
+
+    // FPS: presents within the last second.
+    let fps_count = dq
+        .iter()
+        .filter(|t| now.duration_since(**t) <= FPS_WINDOW)
+        .count();
+    let fps = (fps_count > 0).then_some(fps_count as f64);
+
+    // Need at least two presents to form a frame-time interval.
+    let stamps: Vec<Instant> = dq.iter().copied().collect();
+    if stamps.len() < 2 {
+        return FpsStats {
+            fps,
+            frametime_ms: fps.map(|f| 1000.0 / f),
+            ..Default::default()
+        };
+    }
+    let frametime = |a: &Instant, b: &Instant| b.duration_since(*a).as_secs_f64() * 1000.0;
+
+    // Current frame time: mean interval over the last second (fall back to 1/fps).
+    let recent: Vec<f64> = stamps
+        .windows(2)
+        .filter(|w| now.duration_since(w[1]) <= FPS_WINDOW)
+        .map(|w| frametime(&w[0], &w[1]))
+        .collect();
+    let frametime_ms = if recent.is_empty() {
+        fps.map(|f| 1000.0 / f)
+    } else {
+        Some(recent.iter().sum::<f64>() / recent.len() as f64)
+    };
+
+    // Percentile lows over all retained frame times (sorted ascending: the high
+    // percentile is the slow/stutter frame, whose reciprocal is the low FPS).
+    let mut all: Vec<f64> = stamps.windows(2).map(|w| frametime(&w[0], &w[1])).collect();
+    all.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let percentile_fps = |p: f64, min_frames: usize| -> Option<f64> {
+        if all.len() < min_frames {
+            return None;
+        }
+        let idx = ((p / 100.0) * (all.len() as f64 - 1.0)).round() as usize;
+        all.get(idx).filter(|ft| **ft > 0.0).map(|ft| 1000.0 / ft)
+    };
+
+    FpsStats {
+        fps,
+        frametime_ms,
+        low1: percentile_fps(99.0, LOW1_MIN_FRAMES),
+        low01: percentile_fps(99.9, LOW01_MIN_FRAMES),
+    }
+}
+
+/// Tauri command: frame-pacing stats (FPS, frame time, 1% / 0.1% low) for the
+/// foreground window. All-`None` when no FPS data is available.
+#[tauri::command]
+pub fn osd_fps_stats() -> FpsStats {
+    match foreground_pid() {
+        Some(pid) => stats_for(pid),
+        None => FpsStats::default(),
+    }
 }
 
 /// Resolve a PID's executable file name (e.g. `"cyberpunk2077.exe"`), lowercased.

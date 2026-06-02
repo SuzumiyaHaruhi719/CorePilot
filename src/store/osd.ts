@@ -17,6 +17,8 @@ export interface OsdConfig {
   position: OsdPosition;
   /** Rounded-corner plate. */
   rounded: boolean;
+  /** OLED anti burn-in: slowly nudge the overlay's position over time. */
+  oledShift: boolean;
   /** Enabled metric keys (see OSD_METRICS), in display order. */
   metrics: string[];
 }
@@ -62,6 +64,7 @@ export const useOsd = create<OsdStore>()(
       opacity: 0.55,
       position: "tl",
       rounded: true,
+      oledShift: false,
       metrics: DEFAULT_METRICS,
       setEnabled: (enabled) => set({ enabled }),
       update: (patch) => set(patch),

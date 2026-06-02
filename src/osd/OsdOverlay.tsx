@@ -33,6 +33,18 @@ const EMPTY: OsdData = { metrics: null, sensors: null, gpu: null, fps: null };
 /** Poll interval for the foreground app + metrics (ms). */
 const TICK_MS = 1000;
 
+/** OLED anti burn-in: how often to nudge the overlay, and the small inward
+ *  pixel offsets it cycles through (kept tiny so the plate never clips). */
+const OLED_SHIFT_MS = 45_000;
+const OLED_OFFSETS: ReadonlyArray<readonly [number, number]> = [
+  [0, 0],
+  [4, 2],
+  [2, 5],
+  [5, 3],
+  [1, 4],
+  [3, 1],
+];
+
 export function OsdOverlay() {
   // Global default config (the master switch + the "use default" appearance).
   const global = useOsd();
@@ -42,6 +54,8 @@ export function OsdOverlay() {
 
   const [data, setData] = useState<OsdData>(EMPTY);
   const [foreground, setForeground] = useState<string | null>(null);
+  // OLED anti burn-in step (advances on a slow timer when enabled).
+  const [shiftIdx, setShiftIdx] = useState(0);
 
   // Live config push from the main window's config panel (separate webview), so
   // edits in the panel reflect on the overlay without a reload.
@@ -65,6 +79,7 @@ export function OsdOverlay() {
       opacity: global.opacity,
       position: global.position,
       rounded: global.rounded,
+      oledShift: global.oledShift,
       metrics: global.metrics,
     },
     mode,
@@ -76,7 +91,8 @@ export function OsdOverlay() {
   const cfg = effective ?? global;
 
   const needGpu = cfg.metrics.some((k) => k.startsWith("gpu."));
-  const needFps = cfg.metrics.includes("fps");
+  // Any FPS-group metric (fps / 1% low / 0.1% low / frametime) needs the stats fetch.
+  const needFps = cfg.metrics.some((k) => k.startsWith("fps"));
 
   // Single poll loop: refresh the foreground app and (only while showing) the
   // metric snapshot. When hidden we still track the foreground app cheaply so a
@@ -100,10 +116,23 @@ export function OsdOverlay() {
     };
   }, [needGpu, needFps, show]);
 
+  // OLED anti burn-in: advance the position-nudge step on a slow timer while the
+  // overlay is visible and the option is enabled.
+  useEffect(() => {
+    if (!(show && cfg.oledShift)) return;
+    const id = window.setInterval(() => setShiftIdx((i) => i + 1), OLED_SHIFT_MS);
+    return () => window.clearInterval(id);
+  }, [show, cfg.oledShift]);
+
   if (!show) return null;
 
   const top = cfg.position === "tl" || cfg.position === "tr";
   const left = cfg.position === "tl" || cfg.position === "bl";
+
+  // Nudge the plate inward from its corner (so it never clips off-screen).
+  const [ox, oy] = cfg.oledShift ? OLED_OFFSETS[shiftIdx % OLED_OFFSETS.length] : [0, 0];
+  const dx = left ? ox : -ox;
+  const dy = top ? oy : -oy;
 
   return (
     <div
@@ -113,14 +142,16 @@ export function OsdOverlay() {
         left ? "justify-start" : "justify-end",
       )}
     >
-      <OsdPlate
-        metrics={cfg.metrics}
-        style={cfg.style}
-        scale={cfg.scale}
-        opacity={cfg.opacity}
-        rounded={cfg.rounded}
-        data={data}
-      />
+      <div style={{ transform: `translate(${dx}px, ${dy}px)`, transition: "transform 1.2s ease" }}>
+        <OsdPlate
+          metrics={cfg.metrics}
+          style={cfg.style}
+          scale={cfg.scale}
+          opacity={cfg.opacity}
+          rounded={cfg.rounded}
+          data={data}
+        />
+      </div>
     </div>
   );
 }
