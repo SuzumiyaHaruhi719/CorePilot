@@ -3,7 +3,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import { tauriStorage } from "../lib/persist";
 
 export type OsdStyle = "horizontal" | "vertical";
-export type OsdPosition = "tl" | "tr" | "bl" | "br";
+export type OsdPosition = "tl" | "tr" | "bl" | "br" | "free";
 
 /** OSD overlay configuration. Persisted and shared between the config panel
  *  (main window) and the overlay window via the tauri-store backed `persist`. */
@@ -15,6 +15,9 @@ export interface OsdConfig {
   /** Panel background opacity (0 = no plate, 1 = solid). */
   opacity: number;
   position: OsdPosition;
+  /** Free-placement position (top-left, normalized 0..1); used when position === "free". */
+  freeX: number;
+  freeY: number;
   /** Rounded-corner plate. */
   rounded: boolean;
   /** OLED anti burn-in: slowly nudge the overlay's position over time. */
@@ -47,6 +50,8 @@ export interface OsdTarget {
 }
 
 const DEFAULT_METRICS = [
+  "fps",
+  "fps.low1",
   "cpu.util",
   "cpu.temp",
   "gpu.util",
@@ -63,6 +68,8 @@ export const useOsd = create<OsdStore>()(
       scale: 1,
       opacity: 0.55,
       position: "tl",
+      freeX: 0.04,
+      freeY: 0.04,
       rounded: true,
       oledShift: false,
       metrics: DEFAULT_METRICS,

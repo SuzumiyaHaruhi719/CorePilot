@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import { api, type GpuOcInfo, type Metrics, type OsdFpsStats, type Sensors } from "./ipc";
 import { formatBytes } from "./format";
 
@@ -112,4 +113,16 @@ export async function fetchOsdData(needGpu: boolean, needFps: boolean): Promise<
     needFps ? api.osdFpsStats().catch(() => null) : Promise.resolve(null),
   ]);
   return { metrics, sensors, gpu, fps };
+}
+
+/** Absolute-position style for "free" placement. `x`/`y` are the plate's
+ *  top-left position normalized to 0..1 of the viewport; the same mapping is
+ *  used in the config preview and the live overlay so they stay consistent. */
+export function freePosStyle(x: number, y: number): CSSProperties {
+  const clamp = (v: number) => Math.min(1, Math.max(0, v));
+  return {
+    position: "absolute",
+    left: `${clamp(x) * 100}%`,
+    top: `${clamp(y) * 100}%`,
+  };
 }

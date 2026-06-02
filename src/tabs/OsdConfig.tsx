@@ -1,6 +1,6 @@
 import { Gamepad2, MonitorPlay, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { Segmented } from "../components/ui/Segmented";
 import { Slider } from "../components/ui/Slider";
@@ -8,7 +8,14 @@ import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
 import { api } from "../lib/ipc";
-import { OSD_CATEGORIES, OSD_METRICS, fetchOsdData, type OsdCategory, type OsdData } from "../lib/osd";
+import {
+  OSD_CATEGORIES,
+  OSD_METRICS,
+  fetchOsdData,
+  freePosStyle,
+  type OsdCategory,
+  type OsdData,
+} from "../lib/osd";
 import {
   effectiveConfig,
   useOsd,
@@ -27,6 +34,8 @@ function cfgOf(s: OsdCfg): OsdCfg {
     scale: s.scale,
     opacity: s.opacity,
     position: s.position,
+    freeX: s.freeX,
+    freeY: s.freeY,
     rounded: s.rounded,
     oledShift: s.oledShift,
     metrics: s.metrics,
@@ -41,6 +50,7 @@ export function OsdConfig() {
   const [data, setData] = useState<OsdData>(EMPTY);
   const [selected, setSelected] = useState<string | null>(null);
   const [addName, setAddName] = useState("");
+  const previewRef = useRef<HTMLDivElement>(null);
 
   const selectedTarget = useMemo(
     () => targets.find((t) => t.name === selected) ?? null,
@@ -95,6 +105,28 @@ export function OsdConfig() {
     if (selectedTarget) updateTargetConfig(selectedTarget.name, patch);
     else osd.update(patch);
   }
+  // Free placement: drag the plate within the preview to set its normalized
+  // top-left position (clamped to the box). The same coords drive the overlay.
+  function onFreeDragStart(e: React.PointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    const box = previewRef.current;
+    if (!box) return;
+    const clamp = (v: number) => Math.min(1, Math.max(0, v));
+    const move = (ev: PointerEvent) => {
+      const rect = box.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      applyPatch({
+        freeX: clamp((ev.clientX - rect.left) / rect.width),
+        freeY: clamp((ev.clientY - rect.top) / rect.height),
+      });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
   function toggleMetric(key: string) {
     if (selectedTarget) {
       const cur = previewCfg.metrics;
@@ -134,26 +166,59 @@ export function OsdConfig() {
           {/* Live preview over a faux game backdrop */}
           <div className="relative overflow-hidden rounded-xl border border-line">
             <div
-              className="flex min-h-[120px] p-2"
+              ref={previewRef}
+              className="relative flex min-h-[120px] p-2"
               style={{
                 background:
                   "radial-gradient(120% 140% at 20% 0%, oklch(38% 0.08 250) 0%, oklch(16% 0.03 265) 60%), repeating-linear-gradient(135deg, oklch(20% 0.02 265) 0 14px, oklch(22% 0.02 265) 14px 28px)",
-                alignItems: previewCfg.position.startsWith("t") ? "flex-start" : "flex-end",
-                justifyContent: previewCfg.position.endsWith("l") ? "flex-start" : "flex-end",
+                alignItems:
+                  previewCfg.position === "free"
+                    ? undefined
+                    : previewCfg.position.startsWith("t")
+                      ? "flex-start"
+                      : "flex-end",
+                justifyContent:
+                  previewCfg.position === "free"
+                    ? undefined
+                    : previewCfg.position.endsWith("l")
+                      ? "flex-start"
+                      : "flex-end",
               }}
             >
-              <OsdPlate
-                metrics={previewCfg.metrics}
-                style={previewCfg.style}
-                scale={previewCfg.scale}
-                opacity={previewCfg.opacity}
-                rounded={previewCfg.rounded}
-                data={data}
-              />
+              {previewCfg.position === "free" ? (
+                <div
+                  className="absolute cursor-grab touch-none active:cursor-grabbing"
+                  style={freePosStyle(previewCfg.freeX, previewCfg.freeY)}
+                  onPointerDown={onFreeDragStart}
+                >
+                  <OsdPlate
+                    metrics={previewCfg.metrics}
+                    style={previewCfg.style}
+                    scale={previewCfg.scale}
+                    opacity={previewCfg.opacity}
+                    rounded={previewCfg.rounded}
+                    data={data}
+                  />
+                </div>
+              ) : (
+                <OsdPlate
+                  metrics={previewCfg.metrics}
+                  style={previewCfg.style}
+                  scale={previewCfg.scale}
+                  opacity={previewCfg.opacity}
+                  rounded={previewCfg.rounded}
+                  data={data}
+                />
+              )}
             </div>
             <span className="pointer-events-none absolute right-2 top-2 rounded bg-black/40 px-1.5 py-0.5 text-[10px] text-white/60">
               {editingOverride ? `预览 · ${selectedTarget?.name}` : "预览 · 默认"}
             </span>
+            {previewCfg.position === "free" && (
+              <span className="pointer-events-none absolute left-2 top-2 rounded bg-accent/25 px-1.5 py-0.5 text-[10px] text-white/85">
+                拖动叠加层自由摆放
+              </span>
+            )}
           </div>
         </div>
 
@@ -391,6 +456,7 @@ function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
             { value: "tr", label: "右上" },
             { value: "bl", label: "左下" },
             { value: "br", label: "右下" },
+            { value: "free", label: "自由" },
           ]}
         />
       </Row>

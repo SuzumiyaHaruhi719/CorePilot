@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { cn } from "../lib/cn";
 import { api } from "../lib/ipc";
-import { fetchOsdData, type OsdData } from "../lib/osd";
+import { fetchOsdData, freePosStyle, type OsdData } from "../lib/osd";
 import {
   resolveOsd,
   useOsd,
@@ -78,6 +78,8 @@ export function OsdOverlay() {
       scale: global.scale,
       opacity: global.opacity,
       position: global.position,
+      freeX: global.freeX,
+      freeY: global.freeY,
       rounded: global.rounded,
       oledShift: global.oledShift,
       metrics: global.metrics,
@@ -126,23 +128,31 @@ export function OsdOverlay() {
 
   if (!show) return null;
 
+  const isFree = cfg.position === "free";
   const top = cfg.position === "tl" || cfg.position === "tr";
   const left = cfg.position === "tl" || cfg.position === "bl";
 
-  // Nudge the plate inward from its corner (so it never clips off-screen).
+  // OLED nudge: inward from the corner (or any small direction in free mode).
   const [ox, oy] = cfg.oledShift ? OLED_OFFSETS[shiftIdx % OLED_OFFSETS.length] : [0, 0];
-  const dx = left ? ox : -ox;
-  const dy = top ? oy : -oy;
+  const dx = isFree || left ? ox : -ox;
+  const dy = isFree || top ? oy : -oy;
 
   return (
     <div
       className={cn(
-        "fixed inset-0 flex p-1.5",
-        top ? "items-start" : "items-end",
-        left ? "justify-start" : "justify-end",
+        "fixed inset-0",
+        !isFree && "flex p-1.5",
+        !isFree && (top ? "items-start" : "items-end"),
+        !isFree && (left ? "justify-start" : "justify-end"),
       )}
     >
-      <div style={{ transform: `translate(${dx}px, ${dy}px)`, transition: "transform 1.2s ease" }}>
+      <div
+        style={{
+          ...(isFree ? freePosStyle(cfg.freeX, cfg.freeY) : undefined),
+          transform: `translate(${dx}px, ${dy}px)`,
+          transition: "transform 1.2s ease",
+        }}
+      >
         <OsdPlate
           metrics={cfg.metrics}
           style={cfg.style}
