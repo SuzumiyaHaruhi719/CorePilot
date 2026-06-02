@@ -121,6 +121,7 @@ pub fn run() {
             commands::control_service,
             commands::list_startup,
             commands::set_startup_enabled,
+            commands::pick_exe_files,
             netfix::network_diagnose,
             netfix::network_repair,
             gpu::gpu_oc_info,

@@ -239,6 +239,8 @@ export const api = {
     return raw.map((p) => ({ ...p, affinity: BigInt(p.affinity) }));
   },
   processIcon: (exePath: string) => invoke<string | null>("process_icon", { exePath }),
+  /** Open a native .exe file picker; returns chosen files' lowercased base names. */
+  pickExeFiles: () => invoke<string[]>("pick_exe_files"),
   gpuEngines: () => invoke<Record<string, number>>("gpu_engine_loads"),
   getMetrics: () => invoke<Metrics>("get_metrics"),
   setAffinity: (pid: number, mask: bigint) =>

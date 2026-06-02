@@ -65,4 +65,7 @@ base64 = "0.22"
 # Shared-memory contract with the injected overlay DLL. The app is the *writer*:
 # the sampler thread publishes metrics into the named block this crate maps.
 corepilot-osd-ipc = { path = "crates/corepilot-osd-ipc" }
+# Native file-open dialog for picking a game's .exe into the OSD white/black list
+# (so a game that isn't running yet can still be added). Used by `pick_exe_files`.
+rfd = "0.15"
 

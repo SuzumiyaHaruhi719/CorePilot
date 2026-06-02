@@ -163,3 +163,19 @@ pub fn list_startup() -> CoreResult<Vec<crate::winsvc::StartupItem>> {
 pub fn set_startup_enabled(name: String, location: String, enabled: bool) -> CoreResult<()> {
     crate::winsvc::set_startup_enabled(name, location, enabled)
 }
+
+/// Open a native file-open dialog for `.exe` files and return the chosen files'
+/// base names, lowercased (e.g. `["cyberpunk2077.exe"]`); empty if cancelled.
+/// Lets the OSD game list add a game by browsing to its executable, without the
+/// game having to be running first. Async so the modal dialog never blocks the
+/// IPC worker thread.
+#[tauri::command]
+pub async fn pick_exe_files() -> Vec<String> {
+    rfd::AsyncFileDialog::new()
+        .set_title("选择游戏可执行文件")
+        .add_filter("可执行文件", &["exe"])
+        .pick_files()
+        .await
+        .map(|files| files.iter().map(|f| f.file_name().to_lowercase()).collect())
+        .unwrap_or_default()
+}

@@ -1,4 +1,5 @@
 import {
+  FolderOpen,
   Gamepad2,
   ListPlus,
   MonitorPlay,
@@ -184,6 +185,22 @@ export function OsdConfig() {
     setPickerOpen(false);
   }
 
+  // Add one or more games by browsing to their .exe via a native file dialog —
+  // works for games that aren't running yet (unlike the running-process picker).
+  async function pickFromFile() {
+    try {
+      const names = await api.pickExeFiles();
+      let last: string | null = null;
+      for (const n of names) {
+        addTarget(n);
+        last = n.toLowerCase();
+      }
+      if (last) setSelected(last);
+    } catch {
+      /* dialog cancelled or unavailable — ignore */
+    }
+  }
+
   // De-duplicate by lowercased name, filter by the search query, sort alphabetically.
   const pickerProcs = useMemo(() => {
     const q = procQuery.trim().toLowerCase();
@@ -329,6 +346,12 @@ export function OsdConfig() {
               className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
             >
               <ListPlus size={13} /> 从运行中的进程选择
+            </button>
+            <button
+              onClick={() => void pickFromFile()}
+              className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+            >
+              <FolderOpen size={13} /> 从文件选择
             </button>
           </div>
 
