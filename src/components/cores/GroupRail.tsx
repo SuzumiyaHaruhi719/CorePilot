@@ -1,6 +1,7 @@
 import { Download, ListTree, Plus, Power, Upload } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { cn } from "../../lib/cn";
+import { groupColor } from "../../lib/colors";
 import { maskToCpuList } from "../../lib/format";
 import { hoverPop } from "../../lib/motion";
 import type { ProcInfo } from "../../lib/ipc";
@@ -49,7 +50,9 @@ export function GroupRail({
         </motion.button>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-1.5 overflow-auto px-2.5 pb-2">
+      {/* py-2.5 matches px-2.5 so the selected item's glow-sm (≈10px blur) isn't
+          clipped by overflow-auto at the top/bottom edges. */}
+      <div className="min-h-0 flex-1 space-y-1.5 overflow-auto px-2.5 py-2.5">
         <button
           onClick={() => select(null)}
           className={cn(
@@ -90,7 +93,7 @@ export function GroupRail({
                 <div className="flex min-w-0 items-center gap-2">
                   <span
                     className="h-2.5 w-2.5 shrink-0 rounded-full glow-sm"
-                    style={{ background: `oklch(74% 0.15 ${group.hue})` }}
+                    style={{ background: groupColor(group.hue) }}
                   />
                   <span className="truncate text-[13px] font-medium text-ink">{group.name}</span>
                 </div>

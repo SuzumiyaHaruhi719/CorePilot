@@ -1,8 +1,16 @@
-//! CPU topology detection for Ryzen dual-CCD parts (e.g. 9950X3D).
+//! CPU topology detection, generalized across desktop hardware.
 //!
-//! Strategy: `GetLogicalProcessorInformationEx(RelationAll)`. Each L3 cache
-//! record maps to one CCD; the L3 with the largest `CacheSize` is the 3D
-//! V-Cache CCD. Falls back to a sane split if detection is ambiguous.
+//! Strategy: `GetLogicalProcessorInformationEx(RelationAll)`.
+//!  • AMD multi-CCD (incl. 3D V-Cache): each L3 cache record maps to one CCD;
+//!    the L3 larger than its sibling is the 3D V-Cache CCD.
+//!  • Intel hybrid (P-core / E-core): a single shared L3 means L3 grouping can't
+//!    split the cores, so when the system is hybrid (cores report differing
+//!    Windows `EfficiencyClass`) we cluster by efficiency class instead — the
+//!    highest class is the performance (P) cluster.
+//!  • Everything else (single-CCD Ryzen, homogeneous Intel) collapses to one
+//!    cluster covering all cores.
+//!
+//! Falls back to a sane split if detection is ambiguous.
 
 use serde::Serialize;
 use windows::Win32::System::SystemInformation::{
@@ -18,6 +26,8 @@ pub struct LogicalCpu {
     pub core_id: u32,
     pub ccd_id: u32,
     pub is_vcache: bool,
+    /// Windows efficiency class (higher = more performant). 0 on homogeneous CPUs.
+    pub efficiency_class: u8,
     pub smt_sibling: Option<u32>,
 }
 
@@ -29,6 +39,10 @@ pub struct Ccd {
     pub l3_bytes: u64,
     pub logical_cpus: Vec<u32>,
     pub mask: u64,
+    /// Cluster nature: "vcache" | "freq" | "standard" | "pcore" | "ecore".
+    pub kind: String,
+    /// Display label, e.g. "3D V-Cache", "频率核心", "CCD", "性能核", "能效核".
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,6 +51,8 @@ pub struct CpuTopology {
     pub logical_count: u32,
     pub physical_cores: u32,
     pub smt: bool,
+    /// True when clusters were split by efficiency class (Intel P/E hybrid).
+    pub hybrid: bool,
     pub ccds: Vec<Ccd>,
     pub logical: Vec<LogicalCpu>,
     pub vcache_ccd: Option<u32>,
@@ -45,6 +61,8 @@ pub struct CpuTopology {
 
 struct CoreRec {
     mask: u64,
+    /// EfficiencyClass from the processor relationship (higher = faster core).
+    eff: u8,
 }
 
 struct L3Rec {
@@ -55,6 +73,18 @@ struct L3Rec {
 /// Returns bit positions (logical CPU ids) set in a group-0 mask.
 fn bits(mask: u64) -> Vec<u32> {
     (0..64).filter(|i| mask & (1u64 << i) != 0).collect()
+}
+
+/// Pick a (kind, label) for an L3-based cluster.
+fn l3_kind(is_vcache: bool, has_smaller: bool) -> (&'static str, &'static str) {
+    if is_vcache {
+        ("vcache", "3D V-Cache")
+    } else if has_smaller {
+        // Only meaningful as the smaller-cache sibling of a V-Cache CCD.
+        ("freq", "频率核心")
+    } else {
+        ("standard", "CCD")
+    }
 }
 
 pub fn detect() -> CpuTopology {
@@ -99,7 +129,10 @@ unsafe fn raw_detect() -> Option<CpuTopology> {
                     mask |= ga.Mask as u64;
                 }
             }
-            cores.push(CoreRec { mask });
+            cores.push(CoreRec {
+                mask,
+                eff: pr.EfficiencyClass,
+            });
         } else if rec.Relationship == RelationCache {
             let cr = &rec.Anonymous.Cache;
             if cr.Level == 3 {
@@ -126,21 +159,69 @@ unsafe fn raw_detect() -> Option<CpuTopology> {
         return None;
     }
 
-    // Build CCDs from L3 groups, ordered by lowest logical id for stable ids.
-    l3s.sort_by_key(|l| l.mask.trailing_zeros());
-    let max_l3 = l3s.iter().map(|l| l.size).max().unwrap_or(0);
-    // V-Cache only exists when one CCD's L3 is *larger* than another's. On a
-    // non-3D dual-CCD part (equal L3 per CCD) no CCD is V-Cache; flagging the
-    // (equal) max on every CCD would be wrong, so require a smaller sibling.
-    let has_smaller = l3s.iter().any(|l| l.size < max_l3);
+    // Decide clustering strategy. L3 grouping wins whenever there are ≥2 L3
+    // caches (AMD multi-CCD) — this keeps V-Cache detection byte-identical and
+    // never mistakes an AMD chip for a hybrid. Only when there's a single (or
+    // no) L3 *and* the cores report differing efficiency classes do we treat it
+    // as an Intel-style P/E hybrid and split by efficiency class.
+    let max_eff = cores.iter().map(|c| c.eff).max().unwrap_or(0);
+    let min_eff = cores.iter().map(|c| c.eff).min().unwrap_or(0);
+    let use_efficiency = l3s.len() < 2 && max_eff != min_eff;
+
     let mut ccds: Vec<Ccd> = Vec::new();
-    for (idx, l) in l3s.iter().enumerate() {
+    if use_efficiency {
+        // Intel hybrid: highest efficiency class = performance (P) cluster.
+        let mut classes: Vec<u8> = cores.iter().map(|c| c.eff).collect();
+        classes.sort_unstable();
+        classes.dedup();
+        classes.reverse(); // highest (P) first → ccd_id 0
+        for (idx, class) in classes.iter().enumerate() {
+            let mask: u64 = cores
+                .iter()
+                .filter(|c| c.eff == *class)
+                .fold(0u64, |a, c| a | c.mask);
+            let is_p = idx == 0;
+            ccds.push(Ccd {
+                ccd_id: idx as u32,
+                is_vcache: false,
+                l3_bytes: 0,
+                logical_cpus: bits(mask),
+                mask,
+                kind: if is_p { "pcore" } else { "ecore" }.into(),
+                label: if is_p { "性能核" } else { "能效核" }.into(),
+            });
+        }
+    } else if !l3s.is_empty() {
+        // L3-based CCDs (AMD multi-CCD, or single L3). Ordered by lowest id.
+        l3s.sort_by_key(|l| l.mask.trailing_zeros());
+        let max_l3 = l3s.iter().map(|l| l.size).max().unwrap_or(0);
+        // V-Cache only exists when one CCD's L3 is *larger* than another's. On a
+        // non-3D dual-CCD part (equal L3) no CCD is V-Cache.
+        let has_smaller = l3s.iter().any(|l| l.size < max_l3);
+        for (idx, l) in l3s.iter().enumerate() {
+            let is_vcache = has_smaller && l.size == max_l3;
+            let (kind, label) = l3_kind(is_vcache, has_smaller);
+            ccds.push(Ccd {
+                ccd_id: idx as u32,
+                is_vcache,
+                l3_bytes: l.size,
+                logical_cpus: bits(l.mask),
+                mask: l.mask,
+                kind: kind.into(),
+                label: label.into(),
+            });
+        }
+    } else {
+        // No L3 info and not hybrid: one cluster covering every core.
+        let mask = cores.iter().fold(0u64, |a, c| a | c.mask);
         ccds.push(Ccd {
-            ccd_id: idx as u32,
-            is_vcache: has_smaller && l.size == max_l3,
-            l3_bytes: l.size,
-            logical_cpus: bits(l.mask),
-            mask: l.mask,
+            ccd_id: 0,
+            is_vcache: false,
+            l3_bytes: 0,
+            logical_cpus: bits(mask),
+            mask,
+            kind: "standard".into(),
+            label: "CCD".into(),
         });
     }
 
@@ -165,15 +246,15 @@ unsafe fn raw_detect() -> Option<CpuTopology> {
             .find(|c| c.mask & (1u64 << id) != 0)
             .map(|c| (c.ccd_id, c.is_vcache))
             .unwrap_or((0, false));
-        let sibling = cores
-            .get(core_idx as usize)
-            .and_then(|c| bits(c.mask).into_iter().find(|&b| b != id));
+        let core = cores.get(core_idx as usize);
+        let sibling = core.and_then(|c| bits(c.mask).into_iter().find(|&b| b != id));
         logical.push(LogicalCpu {
             id,
             group: 0,
             core_id: core_idx,
             ccd_id,
             is_vcache,
+            efficiency_class: core.map(|c| c.eff).unwrap_or(0),
             smt_sibling: sibling,
         });
     }
@@ -184,6 +265,7 @@ unsafe fn raw_detect() -> Option<CpuTopology> {
         logical_count,
         physical_cores: cores.len() as u32,
         smt,
+        hybrid: use_efficiency,
         ccds,
         logical,
         vcache_ccd,
@@ -191,25 +273,20 @@ unsafe fn raw_detect() -> Option<CpuTopology> {
     })
 }
 
-/// Fallback assuming a 9950X3D-like layout: CCD0 (logical 0..15) = V-Cache,
-/// CCD1 (logical 16..31) = frequency. Uses the real logical count.
+/// Fallback when detection fails entirely: a single cluster spanning all logical
+/// CPUs. Hardware-agnostic — makes no V-Cache / CCD assumptions.
 fn fallback() -> CpuTopology {
     let n = std::thread::available_parallelism()
         .map(|v| v.get() as u32)
-        .unwrap_or(32);
-    let half = (n / 2).max(1);
-    let mask0: u64 = if half >= 64 { u64::MAX } else { (1u64 << half) - 1 };
-    let mask1: u64 = if n >= 64 {
-        !mask0
-    } else {
-        ((1u64 << n) - 1) & !mask0
-    };
-    let smt = n > 8;
+        .unwrap_or(8)
+        .min(64);
+    let mask: u64 = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
+    // Assume SMT (2 threads/core) only on clearly multi-threaded parts; this is
+    // a best-effort guess used solely when the OS topology query fails.
+    let smt = n >= 4 && n % 2 == 0;
     let cores_per = if smt { 2 } else { 1 };
     let mut logical = Vec::new();
     for id in 0..n {
-        let ccd_id = if (mask0 & (1u64 << id)) != 0 { 0 } else { 1 };
-        let core_id = id / cores_per;
         let sibling = if smt {
             Some(if id % 2 == 0 { id + 1 } else { id - 1 })
         } else {
@@ -218,9 +295,10 @@ fn fallback() -> CpuTopology {
         logical.push(LogicalCpu {
             id,
             group: 0,
-            core_id,
-            ccd_id,
-            is_vcache: ccd_id == 0,
+            core_id: id / cores_per,
+            ccd_id: 0,
+            is_vcache: false,
+            efficiency_class: 0,
             smt_sibling: sibling,
         });
     }
@@ -228,24 +306,18 @@ fn fallback() -> CpuTopology {
         logical_count: n,
         physical_cores: n / cores_per,
         smt,
-        ccds: vec![
-            Ccd {
-                ccd_id: 0,
-                is_vcache: true,
-                l3_bytes: 96 * 1024 * 1024,
-                logical_cpus: bits(mask0),
-                mask: mask0,
-            },
-            Ccd {
-                ccd_id: 1,
-                is_vcache: false,
-                l3_bytes: 32 * 1024 * 1024,
-                logical_cpus: bits(mask1),
-                mask: mask1,
-            },
-        ],
+        hybrid: false,
+        ccds: vec![Ccd {
+            ccd_id: 0,
+            is_vcache: false,
+            l3_bytes: 0,
+            logical_cpus: bits(mask),
+            mask,
+            kind: "standard".into(),
+            label: "CCD".into(),
+        }],
         logical,
-        vcache_ccd: Some(0),
+        vcache_ccd: None,
         detection: "fallback".into(),
     }
 }

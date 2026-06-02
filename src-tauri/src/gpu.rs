@@ -166,6 +166,27 @@ fn init_device() -> Result<(Nvml, Device<'static>), String> {
     Ok((nvml, device))
 }
 
+/// Cached "is there an NVIDIA GPU" probe so the telemetry sampler doesn't retry
+/// NVML init every poll on non-NVIDIA systems.
+static NVML_PRESENT: Lazy<bool> = Lazy::new(|| Nvml::init().is_ok());
+
+/// Lightweight GPU temperature (°C) and power (W) read for the telemetry sampler.
+/// Using NVML here keeps the Monitor/StatusBar consistent with the GPU tab and
+/// `nvidia-smi` (NVML core temp), rather than the sidecar's hotspot reading. Each
+/// field is independent; returns `(None, None)` on systems without an NVIDIA GPU
+/// (the sampler then falls back to the LibreHardwareMonitor sidecar).
+pub fn gpu_temp_power() -> (Option<f32>, Option<f32>) {
+    if !*NVML_PRESENT {
+        return (None, None);
+    }
+    let Ok((_nvml, device)) = init_device() else {
+        return (None, None);
+    };
+    let temp = device.temperature(TemperatureSensor::Gpu).ok().map(|t| t as f32);
+    let power = device.power_usage().ok().map(|mw| mw as f32 / 1000.0);
+    (temp, power)
+}
+
 /// Highest attainable graphics clock (MHz). Prefers `max_clock_info`, which is
 /// reliable on all NVIDIA GPUs including Ada (RTX 40-series) where the
 /// `supported_graphics_clocks` enumeration returns `NotSupported`. Falls back to

@@ -463,15 +463,18 @@ pub fn sample() -> SensorSample {
         }
     }
 
-    // Power and temperature come from the `sensord` sidecar (LibreHardwareMonitor
-    // reading MSRs / hardware sensors). These remain `None` until the sidecar has
-    // emitted a sample, or stay `None` permanently if it is unavailable.
+    // CPU power/temperature come from the `sensord` sidecar (LibreHardwareMonitor
+    // reading MSRs); NVML can't read those. GPU power/temperature prefer NVML so
+    // the Monitor/StatusBar stay consistent with the GPU tab and nvidia-smi
+    // (NVML reports the core temp; the sidecar's LHM reports the hotspot, ~15 °C
+    // higher). On non-NVIDIA GPUs we fall back to the sidecar.
     {
         let readings = *SIDECAR.lock();
         out.cpu_power = readings.cpu_power;
-        out.gpu_power = readings.gpu_power;
         out.cpu_temp = readings.cpu_temp;
-        out.gpu_temp = readings.gpu_temp;
+        let (nvml_temp, nvml_power) = crate::gpu::gpu_temp_power();
+        out.gpu_temp = nvml_temp.or(readings.gpu_temp);
+        out.gpu_power = nvml_power.or(readings.gpu_power);
     }
 
     out

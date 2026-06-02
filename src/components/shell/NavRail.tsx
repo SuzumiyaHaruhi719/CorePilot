@@ -21,6 +21,11 @@ const ITEMS: NavItem[] = [
   { id: "settings", label: "设置", icon: SettingsIcon },
 ];
 
+// Variant labels (not inline objects) so the button's hover/tap gesture
+// propagates to the icon, which plays its own slightly larger "pop".
+const ITEM_VARIANTS = { hover: { scale: 1.08, y: -2 }, tap: { scale: 0.95 } };
+const ICON_VARIANTS = { hover: { scale: 1.16, y: -2 }, tap: { scale: 0.9 } };
+
 export function NavRail() {
   const tab = useUi((s) => s.tab);
   const setTab = useUi((s) => s.setTab);
@@ -34,8 +39,9 @@ export function NavRail() {
           <motion.button
             key={item.id}
             onClick={() => setTab(item.id)}
-            whileHover={{ scale: 1.08, y: -2 }}
-            whileTap={{ scale: 0.95 }}
+            variants={ITEM_VARIANTS}
+            whileHover="hover"
+            whileTap="tap"
             transition={hoverPop}
             className="no-drag relative flex h-[60px] w-[72px] flex-col items-center justify-center gap-1 rounded-xl transition-colors hover:bg-surface2/40"
           >
@@ -47,7 +53,7 @@ export function NavRail() {
               />
             )}
             <motion.span
-              variants={{ hover: { scale: 1.16, y: -2 }, tap: { scale: 0.9 } }}
+              variants={ICON_VARIANTS}
               transition={hoverPop}
               className={cn(
                 "relative z-10 transition-colors",

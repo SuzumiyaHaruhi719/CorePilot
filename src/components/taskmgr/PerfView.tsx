@@ -117,7 +117,15 @@ export function PerfView() {
             <div className="grid grid-cols-3 gap-2">
               <Stat label="核心" value={overview ? `${overview.physicalCores}` : "—"} />
               <Stat label="逻辑处理器" value={overview ? `${overview.logicalCpus}` : "—"} />
-              <Stat label="V-Cache" value={overview?.vcacheCcd != null ? `CCD${overview.vcacheCcd}` : "—"} />
+              {/* V-Cache is X3D-only; on other CPUs show SMT status instead. */}
+              {overview?.vcacheCcd != null ? (
+                <Stat label="V-Cache" value={`CCD${overview.vcacheCcd}`} />
+              ) : (
+                <Stat
+                  label="超线程"
+                  value={overview ? (overview.logicalCpus > overview.physicalCores ? "开启" : "关闭") : "—"}
+                />
+              )}
             </div>
           </Card>
         )}

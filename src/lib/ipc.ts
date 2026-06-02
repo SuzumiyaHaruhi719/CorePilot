@@ -16,6 +16,8 @@ export interface LogicalCpu {
   coreId: number;
   ccdId: number;
   isVcache: boolean;
+  /** Windows efficiency class (higher = more performant); 0 on homogeneous CPUs. */
+  efficiencyClass: number;
   smtSibling: number | null;
 }
 
@@ -25,12 +27,18 @@ export interface Ccd {
   l3Bytes: number;
   logicalCpus: number[];
   mask: number;
+  /** Cluster nature: "vcache" | "freq" | "standard" | "pcore" | "ecore". */
+  kind: string;
+  /** Display label, e.g. "3D V-Cache", "频率核心", "CCD", "性能核", "能效核". */
+  label: string;
 }
 
 export interface CpuTopology {
   logicalCount: number;
   physicalCores: number;
   smt: boolean;
+  /** True when clusters were split by efficiency class (Intel P/E hybrid). */
+  hybrid: boolean;
   ccds: Ccd[];
   logical: LogicalCpu[];
   vcacheCcd: number | null;
@@ -63,6 +71,12 @@ export interface ProcInfo {
   description?: string | null;
   /** Whether the process's CPU affinity can be set (false for protected/system processes). */
   settable?: boolean;
+  /**
+   * Synthetic placeholder for a group member that has been added but is not
+   * currently running. Front-end only — never sent by the backend. Such rows
+   * have no real pid (a stable negative id) and no live metrics.
+   */
+  offline?: boolean;
 }
 
 export interface Metrics {

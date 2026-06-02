@@ -1,12 +1,13 @@
 import { ArrowDown, ArrowUp } from "lucide-react";
 import type { MouseEvent } from "react";
 import { cn } from "../../lib/cn";
+import { groupColor } from "../../lib/colors";
 import { classifyCcd } from "../../lib/cpu";
 import { formatBytes } from "../../lib/format";
 import type { CpuTopology, ProcInfo } from "../../lib/ipc";
 import { groupForProcess, useGroups } from "../../store/groups";
 
-export type SortKey = "name" | "threads" | "cpu" | "gpu" | "mem" | "power";
+export type SortKey = "name" | "group" | "threads" | "cpu" | "gpu" | "mem" | "power";
 
 interface ProcessTableProps {
   processes: ProcInfo[];
@@ -18,18 +19,41 @@ interface ProcessTableProps {
   onToggleAll: () => void;
   onRowContextMenu?: (e: MouseEvent, proc: ProcInfo) => void;
   topo: CpuTopology | null;
+  /** Show a sortable "分组" column (used in the 全部进程 view). */
+  showGroup?: boolean;
 }
 
-const COLS = "grid-cols-[28px_minmax(0,1fr)_76px_88px_50px_92px_56px]";
+// The 分组 column is only present in the 全部进程 view; both literal templates
+// appear in full so Tailwind's scanner picks them up.
+const COLS_WITH_GROUP = "grid-cols-[28px_minmax(0,1fr)_124px_76px_88px_50px_92px_56px]";
+const COLS_NO_GROUP = "grid-cols-[28px_minmax(0,1fr)_76px_88px_50px_92px_56px]";
 
-/** Hardware threads + CCD a process spans (from its affinity mask). */
+/** Hardware threads + cluster a process spans (from its affinity mask). */
 function HwThreads({ mask, topo }: { mask: number; topo: CpuTopology | null }) {
   const c = classifyCcd(mask, topo);
   if (c.count === 0) return <span className="nums text-right text-dim">—</span>;
   const dot =
-    c.kind === "vcache" ? "bg-vcache" : c.kind === "freq" ? "bg-freq" : c.kind === "mixed" ? "bg-accent" : "bg-dim/60";
+    c.kind === "vcache" || c.kind === "pcore"
+      ? "bg-vcache"
+      : c.kind === "freq" || c.kind === "ecore"
+        ? "bg-freq"
+        : c.kind === "mixed" || c.kind === "standard"
+          ? "bg-accent"
+          : "bg-dim/60";
   const label =
-    c.kind === "vcache" ? "V-Cache CCD" : c.kind === "freq" ? "频率 CCD" : c.kind === "mixed" ? "跨 CCD" : "全部核心";
+    c.kind === "vcache"
+      ? "V-Cache CCD"
+      : c.kind === "freq"
+        ? "频率 CCD"
+        : c.kind === "pcore"
+          ? "性能核"
+          : c.kind === "ecore"
+            ? "能效核"
+            : c.kind === "standard"
+              ? `CCD ${c.ccdId}`
+              : c.kind === "mixed"
+                ? "跨 CCD"
+                : "全部核心";
   return (
     <span className="flex items-center justify-end gap-1.5" title={`${c.count} 硬件线程 · ${label}`}>
       <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dot)} />
@@ -74,9 +98,11 @@ export function ProcessTable({
   onToggleAll,
   onRowContextMenu,
   topo,
+  showGroup = false,
 }: ProcessTableProps) {
   const groups = useGroups((s) => s.groups);
   const allOn = processes.length > 0 && processes.every((p) => selected.has(p.pid));
+  const COLS = showGroup ? COLS_WITH_GROUP : COLS_NO_GROUP;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/40">
@@ -97,6 +123,9 @@ export function ProcessTable({
           {allOn && <span className="h-2 w-2 rounded-[2px] bg-white" />}
         </button>
         <Head k="name" label="进程名" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="left" />
+        {showGroup && (
+          <Head k="group" label="分组" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="left" />
+        )}
         <Head k="threads" label="硬件线程" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <Head k="cpu" label="CPU" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <Head k="gpu" label="GPU" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
@@ -108,6 +137,7 @@ export function ProcessTable({
         {processes.map((p) => {
           const group = groupForProcess(groups, p.name);
           const isSelected = selected.has(p.pid);
+          const offline = p.offline === true;
           return (
             <div
               key={p.pid}
@@ -117,6 +147,7 @@ export function ProcessTable({
                 "grid cursor-pointer items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] transition-colors",
                 COLS,
                 isSelected ? "bg-accent/10" : "hover:bg-surface2/50",
+                offline && "opacity-65",
               )}
             >
               <span
@@ -132,31 +163,56 @@ export function ProcessTable({
                 {group ? (
                   <span
                     className="h-2 w-2 shrink-0 rounded-full"
-                    style={{ background: `oklch(74% 0.15 ${group.hue})` }}
+                    style={{ background: groupColor(group.hue) }}
                     title={group.name}
                   />
                 ) : (
                   <span className="h-2 w-2 shrink-0 rounded-full bg-dim/40" />
                 )}
-                <span className="truncate text-ink" title={p.name}>
+                <span className={cn("truncate", offline ? "text-muted" : "text-ink")} title={p.name}>
                   {p.name}
                 </span>
+                {offline && (
+                  <span className="shrink-0 rounded-full border border-line-strong/60 px-1.5 py-px text-[10px] font-medium text-dim">
+                    未运行
+                  </span>
+                )}
               </div>
+
+              {showGroup &&
+                (group ? (
+                  <span
+                    className="max-w-full justify-self-start truncate rounded-full px-2 py-0.5 text-[11px] font-medium"
+                    style={{
+                      background: `oklch(74% 0.15 ${group.hue} / 0.16)`,
+                      color: `oklch(82% 0.13 ${group.hue})`,
+                    }}
+                    title={group.name}
+                  >
+                    {group.name}
+                  </span>
+                ) : (
+                  <span className="justify-self-start text-[11.5px] text-dim">—</span>
+                ))}
 
               <HwThreads mask={p.affinity} topo={topo} />
 
-              <div className="flex items-center justify-end gap-1.5">
-                <span className="relative h-1 w-8 overflow-hidden rounded-full bg-surface3">
-                  <span
-                    className="absolute inset-y-0 left-0 rounded-full bg-accent"
-                    style={{ width: `${Math.min(p.cpu, 100)}%` }}
-                  />
-                </span>
-                <span className="nums w-[38px] text-right text-ink">{p.cpu.toFixed(1)}</span>
-              </div>
+              {offline ? (
+                <span className="nums text-right text-dim">—</span>
+              ) : (
+                <div className="flex items-center justify-end gap-1.5">
+                  <span className="relative h-1 w-8 overflow-hidden rounded-full bg-surface3">
+                    <span
+                      className="absolute inset-y-0 left-0 rounded-full bg-accent"
+                      style={{ width: `${Math.min(p.cpu, 100)}%` }}
+                    />
+                  </span>
+                  <span className="nums w-[38px] text-right text-ink">{p.cpu.toFixed(1)}</span>
+                </div>
+              )}
 
               <span className="nums text-right text-dim">{p.gpu > 0.05 ? p.gpu.toFixed(1) : "—"}</span>
-              <span className="nums text-right text-muted">{formatBytes(p.mem, 0)}</span>
+              <span className="nums text-right text-muted">{offline ? "—" : formatBytes(p.mem, 0)}</span>
               <span className="nums text-right text-dim">{p.power > 0.05 ? p.power.toFixed(0) : "—"}</span>
             </div>
           );

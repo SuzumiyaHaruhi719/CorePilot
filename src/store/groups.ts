@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { hueDistance, pickDistinctHue } from "../lib/colors";
 import { tauriStorage } from "../lib/persist";
 
 /**
@@ -31,8 +32,6 @@ interface GroupsState {
   importGroups: (groups: GroupRule[]) => void;
 }
 
-const GROUP_HUES = [274, 220, 182, 75, 12, 320, 140];
-
 function newId(): string {
   return crypto.randomUUID();
 }
@@ -45,11 +44,11 @@ export const useGroups = create<GroupsState>()(
       seeded: false,
       addGroup: (partial) => {
         const id = partial?.id ?? newId();
-        const index = get().groups.length;
         const group: GroupRule = {
           id,
           name: partial?.name ?? "新建分组",
-          hue: partial?.hue ?? GROUP_HUES[index % GROUP_HUES.length],
+          // Auto-pick a hue distinct from existing groups so colors never collide.
+          hue: partial?.hue ?? pickDistinctHue(get().groups.map((g) => g.hue)),
           mask: partial?.mask ?? 0,
           priority: partial?.priority ?? 0x20,
           patterns: partial?.patterns ?? [],
@@ -86,7 +85,28 @@ export const useGroups = create<GroupsState>()(
       markSeeded: () => set({ seeded: true }),
       importGroups: (groups) => set({ groups, selectedId: null }),
     }),
-    { name: "corepilot-groups", version: 1, storage: createJSONStorage(() => tauriStorage) },
+    {
+      name: "corepilot-groups",
+      version: 2,
+      storage: createJSONStorage(() => tauriStorage),
+      // v1 assigned group hues from a fixed cycling palette, so groups could
+      // share a color (e.g. the seeded 游戏 and a user group both landing on
+      // 182). One-time fix: give any group that collides with an earlier one a
+      // distinct hue. Only `hue` changes — patterns/mask/name are preserved.
+      migrate: (persisted, version) => {
+        const state = persisted as GroupsState;
+        if (version < 2 && state && Array.isArray(state.groups)) {
+          const seen: number[] = [];
+          state.groups = state.groups.map((g) => {
+            const collides = seen.some((h) => hueDistance(h, g.hue) < 12);
+            const hue = collides ? pickDistinctHue(seen) : g.hue;
+            seen.push(hue);
+            return { ...g, hue };
+          });
+        }
+        return state;
+      },
+    },
   ),
 );
 

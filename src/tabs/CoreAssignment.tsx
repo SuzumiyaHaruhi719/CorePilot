@@ -1,18 +1,35 @@
 import { CircleMinus, Copy, Cpu, ListTree, Plus, Search, SlidersHorizontal, X, Zap } from "lucide-react";
+import { motion } from "motion/react";
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { CoreGrid } from "../components/cores/CoreGrid";
 import { GroupRail } from "../components/cores/GroupRail";
 import { ProcessTable, type SortKey } from "../components/cores/ProcessTable";
 import { Button } from "../components/ui/Button";
+import { ColorPicker, type ColorAnchor } from "../components/ui/ColorPicker";
 import { ContextMenu, type MenuState } from "../components/ui/ContextMenu";
 import { Modal } from "../components/ui/Modal";
 import { TabHeader } from "../components/ui/TabHeader";
 import { useProcesses } from "../hooks/useProcesses";
+import { groupColor } from "../lib/colors";
 import { maskFromIds, popcount } from "../lib/cpu";
+import { easeOut } from "../lib/motion";
 import { maskToCpuList } from "../lib/format";
 import { api, type CpuTopology, type ProcInfo } from "../lib/ipc";
-import { useGroups, type GroupRule } from "../store/groups";
+import { groupForProcess, useGroups, type GroupRule } from "../store/groups";
 import { useUi } from "../store/ui";
+
+/**
+ * A stable, negative pseudo-pid for an offline (added-but-not-running) member,
+ * derived from its exe name. Negative so it can never collide with a real
+ * Windows pid (always ≥ 0); stable so row selection survives re-renders.
+ */
+function offlinePid(name: string): number {
+  let h = 0;
+  for (let i = 0; i < name.length; i += 1) {
+    h = (Math.imul(h, 31) + name.charCodeAt(i)) | 0;
+  }
+  return -(Math.abs(h) + 1);
+}
 
 export function CoreAssignment() {
   const [topo, setTopo] = useState<CpuTopology | null>(null);
@@ -40,15 +57,18 @@ export function CoreAssignment() {
   const [editMask, setEditMask] = useState(0);
   const [status, setStatus] = useState("");
   const [menu, setMenu] = useState<MenuState | null>(null);
+  const [colorAnchor, setColorAnchor] = useState<ColorAnchor | null>(null);
   const addBtnRef = useRef<HTMLDivElement>(null);
+  const colorBtnRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     api.getTopology().then(setTopo).catch(() => undefined);
   }, []);
 
-  // Clear the multi-select when switching between 全部进程 and a group view.
+  // Clear the multi-select (and close the color popover) when switching views.
   useEffect(() => {
     setSelectedPids(new Set());
+    setColorAnchor(null);
   }, [selectedId]);
 
   const fullMask = useMemo(() => (topo ? maskFromIds(topo.logical.map((l) => l.id)) : 0), [topo]);
@@ -71,10 +91,20 @@ export function CoreAssignment() {
     }
     const vcache = topo.ccds.find((c) => c.isVcache);
     const all = maskFromIds(topo.logical.map((l) => l.id));
+    // Gaming group target, generalized across hardware:
+    //  • X3D: the 3D V-Cache CCD (best gaming cores)
+    //  • non-X3D multi-CCD: the first CCD (keep a game on one CCD → less
+    //    cross-CCD latency) so 游戏 ≠ 全核
+    //  • single cluster (most Intel / single-CCD Ryzen): all cores
+    const gamingMask = vcache
+      ? maskFromIds(vcache.logicalCpus)
+      : topo.ccds.length > 1
+        ? maskFromIds(topo.ccds[0].logicalCpus)
+        : all;
     addGroup({
       name: "游戏",
       hue: 182,
-      mask: vcache ? maskFromIds(vcache.logicalCpus) : all,
+      mask: gamingMask,
       priority: 0x8000,
       patterns: [],
       builtin: true,
@@ -88,8 +118,9 @@ export function CoreAssignment() {
   const visible = useMemo(() => {
     // Never show non-adjustable system processes anywhere in core-assignment:
     // the 全部进程 view lists all adjustable processes, and a group view shows
-    // only its members — both filtered to processes whose affinity can be set.
-    const base = selectedGroup ? membersOf(selectedGroup) : processes;
+    // its full membership (running members + greyed "not running" placeholders),
+    // both filtered to entries whose affinity can be set.
+    const base = selectedGroup ? groupRows(selectedGroup) : processes;
     const source = base.filter((p) => p.settable);
     const q = search.trim().toLowerCase();
     const filtered = q ? source.filter((p) => p.name.toLowerCase().includes(q)) : source;
@@ -99,6 +130,14 @@ export function CoreAssignment() {
         case "name":
           r = a.name.localeCompare(b.name);
           break;
+        case "group": {
+          const ga = groupForProcess(groups, a.name)?.name ?? "";
+          const gb = groupForProcess(groups, b.name)?.name ?? "";
+          // Ungrouped (empty) always sorts to the bottom regardless of direction.
+          if (!ga !== !gb) return ga ? -1 : 1;
+          r = ga.localeCompare(gb);
+          break;
+        }
         case "threads":
           r = popcount(a.affinity) - popcount(b.affinity);
           break;
@@ -118,14 +157,14 @@ export function CoreAssignment() {
       return sortDir === "asc" ? r : -r;
     });
     return sorted;
-  }, [processes, search, sortKey, sortDir, selectedGroup]);
+  }, [processes, search, sortKey, sortDir, selectedGroup, fullMask, groups]);
 
   function handleSort(key: SortKey) {
     if (key === sortKey) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
       setSortKey(key);
-      setSortDir(key === "name" ? "asc" : "desc");
+      setSortDir(key === "name" || key === "group" ? "asc" : "desc");
     }
   }
 
@@ -147,6 +186,25 @@ export function CoreAssignment() {
 
   function openRowMenu(e: ReactMouseEvent, proc: ProcInfo) {
     e.preventDefault();
+    // Offline placeholder: not running, so only membership actions apply.
+    if (proc.offline) {
+      setMenu({
+        x: e.clientX,
+        y: e.clientY,
+        items: [
+          {
+            label: "从分组移出",
+            icon: CircleMinus,
+            onClick: () => {
+              removeProcess(proc.name);
+              setStatus(`已将 ${proc.name} 移出分组`);
+            },
+          },
+          { label: "复制名称", icon: Copy, onClick: () => void navigator.clipboard.writeText(proc.name) },
+        ],
+      });
+      return;
+    }
     const group = groups.find((g) => g.patterns.includes(proc.name.toLowerCase()));
     const items: MenuState["items"] = [];
     if (!selectedGroup) {
@@ -210,9 +268,51 @@ export function CoreAssignment() {
     }
   }
 
+  /** Running processes that belong to a group (used for affinity/priority ops). */
   function membersOf(group: GroupRule): ProcInfo[] {
     const names = new Set(group.patterns);
     return processes.filter((p) => names.has(p.name.toLowerCase()));
+  }
+
+  /**
+   * All rows to display for a group: every running member, plus a greyed
+   * placeholder for each member that has been added but is not running right
+   * now. This lets the group view show its full membership, not just whatever
+   * happens to be alive — e.g. a game you added but haven't launched yet.
+   */
+  function groupRows(group: GroupRule): ProcInfo[] {
+    const names = new Set(group.patterns);
+    const running = new Map<string, ProcInfo[]>();
+    for (const p of processes) {
+      const n = p.name.toLowerCase();
+      if (!names.has(n)) continue;
+      const arr = running.get(n);
+      if (arr) arr.push(p);
+      else running.set(n, [p]);
+    }
+    const effectiveMask = group.mask === 0 ? fullMask : group.mask;
+    const rows: ProcInfo[] = [];
+    for (const pattern of group.patterns) {
+      const live = running.get(pattern);
+      if (live && live.length) {
+        rows.push(...live);
+      } else {
+        rows.push({
+          pid: offlinePid(pattern),
+          name: pattern,
+          cpu: 0,
+          mem: 0,
+          threads: 0,
+          gpu: 0,
+          power: 0,
+          // Show the CPU set this member *will* get once it launches.
+          affinity: effectiveMask,
+          settable: true,
+          offline: true,
+        });
+      }
+    }
+    return rows;
   }
 
   async function assignSelectedTo(groupId: string) {
@@ -258,9 +358,11 @@ export function CoreAssignment() {
   /** Remove the selected member processes from the current group (group view). */
   async function removeSelected() {
     if (!selectedGroup) return;
-    const chosen = membersOf(selectedGroup).filter((p) => selectedPids.has(p.pid));
+    const chosen = groupRows(selectedGroup).filter((p) => selectedPids.has(p.pid));
     for (const proc of chosen) {
       removeProcess(proc.name);
+      // Offline members aren't running, so there's no affinity to restore.
+      if (proc.offline) continue;
       try {
         await api.setAffinity(proc.pid, fullMask);
       } catch {
@@ -269,6 +371,11 @@ export function CoreAssignment() {
     }
     setSelectedPids(new Set());
     setStatus(`已从「${selectedGroup.name}」移出 ${chosen.length} 个进程`);
+  }
+
+  function openColorPicker() {
+    const r = colorBtnRef.current?.getBoundingClientRect();
+    setColorAnchor({ x: r ? Math.round(r.left) : 320, y: r ? Math.round(r.bottom + 6) : 120 });
   }
 
   function openCoreModal() {
@@ -361,6 +468,17 @@ export function CoreAssignment() {
           <div className="flex flex-wrap items-center gap-2">
             {selectedGroup ? (
               <>
+                <button
+                  ref={colorBtnRef}
+                  onClick={openColorPicker}
+                  title="自定义分组颜色"
+                  className="no-drag grid h-[34px] w-[34px] shrink-0 place-items-center rounded-lg border border-line bg-surface2 transition-colors hover:border-line-strong"
+                >
+                  <span
+                    className="h-4 w-4 rounded-full glow-sm"
+                    style={{ background: groupColor(selectedGroup.hue) }}
+                  />
+                </button>
                 <input
                   value={selectedGroup.name}
                   onChange={(e) => updateGroup(selectedGroup.id, { name: e.target.value })}
@@ -416,17 +534,28 @@ export function CoreAssignment() {
 
           {status && <div className="text-[11.5px] text-accent">{status}</div>}
 
-          <ProcessTable
-            processes={visible}
-            sortKey={sortKey}
-            sortDir={sortDir}
-            onSort={handleSort}
-            selected={selectedPids}
-            onToggle={toggleSelect}
-            onToggleAll={toggleAll}
-            onRowContextMenu={openRowMenu}
-            topo={topo}
-          />
+          {/* Keyed on the selected group so the list animates in when switching
+              groups (not on the ~1.5s data poll, which keeps the same key). */}
+          <motion.div
+            key={selectedId ?? "__all__"}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.22, ease: easeOut }}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <ProcessTable
+              processes={visible}
+              sortKey={sortKey}
+              sortDir={sortDir}
+              onSort={handleSort}
+              selected={selectedPids}
+              onToggle={toggleSelect}
+              onToggleAll={toggleAll}
+              onRowContextMenu={openRowMenu}
+              topo={topo}
+              showGroup={!selectedGroup}
+            />
+          </motion.div>
         </div>
       </div>
 
@@ -448,6 +577,12 @@ export function CoreAssignment() {
         </Modal>
       )}
       <ContextMenu state={menu} onClose={() => setMenu(null)} />
+      <ColorPicker
+        anchor={colorAnchor}
+        hue={selectedGroup?.hue ?? 280}
+        onChange={(hue) => selectedGroup && updateGroup(selectedGroup.id, { hue })}
+        onClose={() => setColorAnchor(null)}
+      />
     </>
   );
 }

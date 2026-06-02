@@ -1,5 +1,6 @@
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
+import { clusterName, clusterTag } from "../../lib/cpu";
 import type { CpuTopology } from "../../lib/ipc";
 
 interface CoreHeatmapProps {
@@ -27,7 +28,15 @@ function Cell({ id, load, vcache }: { id: number; load: number; vcache: boolean 
 
 export function CoreHeatmap({ perCore, topo }: CoreHeatmapProps) {
   const ccds = topo?.ccds ?? [
-    { ccdId: 0, isVcache: false, l3Bytes: 0, logicalCpus: perCore.map((_, i) => i), mask: 0 },
+    {
+      ccdId: 0,
+      isVcache: false,
+      l3Bytes: 0,
+      logicalCpus: perCore.map((_, i) => i),
+      mask: 0,
+      kind: "standard",
+      label: "全部核心",
+    },
   ];
 
   return (
@@ -37,7 +46,8 @@ export function CoreHeatmap({ perCore, topo }: CoreHeatmapProps) {
           <div className="mb-1.5 flex items-center gap-1.5 text-[11px]">
             <span className={cn("h-2 w-2 rounded-full glow-sm", ccd.isVcache ? "bg-vcache" : "bg-freq")} />
             <span className="font-medium text-muted">
-              CCD{ccd.ccdId} {ccd.isVcache ? "· V-Cache" : topo ? "· 频率" : ""}
+              {clusterName(topo, ccd)}
+              {clusterTag(ccd) ? ` · ${clusterTag(ccd)}` : ""}
             </span>
           </div>
           <div className="grid grid-cols-8 gap-1.5">
