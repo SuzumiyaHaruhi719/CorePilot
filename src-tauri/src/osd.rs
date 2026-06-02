@@ -66,19 +66,20 @@ fn hwnd_of(win: &tauri::WebviewWindow) -> isize {
 /// Show or hide the overlay window, creating it on first show. Idempotent.
 #[tauri::command]
 pub fn osd_set_visible(app: AppHandle, visible: bool) -> Result<(), String> {
+    // The overlay is a KEEP-ALIVE window: once created it stays shown and is
+    // never hidden. Hiding a WebView2 window freezes its renderer's task loop,
+    // which silently stops BOTH the overlay's own metric poll AND the perf
+    // recorder (they run in the shared renderer). When there is nothing to
+    // display the React overlay parks itself off-screen (1×1 at -200,-200) so it
+    // is invisible without being hidden. `visible` is therefore advisory only —
+    // we always ensure the window exists and is shown.
+    let _ = visible;
     if let Some(win) = app.get_webview_window(OSD_LABEL) {
-        if visible {
-            let _ = win.show();
-            let _ = win.set_always_on_top(true);
-            // Re-assert click-through on every show (WebView2 can reset it).
-            let _ = win.set_ignore_cursor_events(true);
-            force_click_through(hwnd_of(&win));
-        } else {
-            let _ = win.hide();
-        }
-        return Ok(());
-    }
-    if !visible {
+        let _ = win.show();
+        let _ = win.set_always_on_top(true);
+        // Re-assert click-through on every show (WebView2 can reset it).
+        let _ = win.set_ignore_cursor_events(true);
+        force_click_through(hwnd_of(&win));
         return Ok(());
     }
 
@@ -88,6 +89,11 @@ pub fn osd_set_visible(app: AppHandle, visible: bool) -> Result<(), String> {
     // can never lock the whole screen if click-through momentarily fails.
     let win = WebviewWindowBuilder::new(&app, OSD_LABEL, WebviewUrl::App("index.html?osd".into()))
         .title("CorePilot OSD")
+        // Keep this background, always-on-top, ALWAYS-occluded overlay's JS timers
+        // running. Critically this must disable `CalculateNativeWinOcclusion`, or
+        // WebView2 marks the (game-covered) overlay hidden and freezes its task
+        // scheduler so the metric poll never ticks. See `crate::WEBVIEW_ARGS`.
+        .additional_browser_args(crate::WEBVIEW_ARGS)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)

@@ -55,6 +55,15 @@ const RETENTION: Duration = Duration::from_millis(10_000);
 /// FPS counting window.
 const FPS_WINDOW: Duration = Duration::from_millis(1000);
 
+/// Fixed real-time ETW session name. A user-mode ETW session OUTLIVES the process
+/// that created it, so an ungracefully-killed CorePilot leaves its session
+/// running. Several stale sessions on the same DxgKrnl provider starve our live
+/// one of present events, so FPS / game-detection silently break (observed: with
+/// ~10 leftover sessions, foreground games read as `is_game=false`, no FPS). Using
+/// ONE fixed name and force-stopping any leftover before starting guarantees
+/// exactly one session, so capture is always healthy.
+const FPS_SESSION_NAME: &str = "CorePilot-FPS";
+
 /// PID → recent present timestamps (newest pushed at the back).
 static PRESENTS: Lazy<Mutex<HashMap<u32, VecDeque<Instant>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -105,31 +114,60 @@ fn run_trace() -> Result<(), ferrisetw::trace::TraceError> {
     use ferrisetw::trace::UserTrace;
     use ferrisetw::EventRecord;
 
-    let provider = Provider::by_guid(DXGKRNL_GUID)
-        .add_callback(|record: &EventRecord, _schema: &SchemaLocator| {
-            // Only Present_Info maps 1:1 to a submitted frame; ignore the rest
-            // of DxgKrnl's chatter so we don't inflate the rate. The submitting
-            // process id comes straight from the event header.
-            if record.event_id() == EVENT_ID_PRESENT_INFO {
-                record_present(record.process_id());
-            }
-        })
-        .build();
+    // Build a fresh provider (the callback closure is consumed by `build`), so we
+    // can rebuild it for the retry below.
+    let make_provider = || {
+        Provider::by_guid(DXGKRNL_GUID)
+            .add_callback(|record: &EventRecord, _schema: &SchemaLocator| {
+                // Only Present_Info maps 1:1 to a submitted frame; ignore the rest
+                // of DxgKrnl's chatter so we don't inflate the rate. The submitting
+                // process id comes straight from the event header.
+                if record.event_id() == EVENT_ID_PRESENT_INFO {
+                    record_present(record.process_id());
+                }
+            })
+            .build()
+    };
 
-    // `start_and_process` blocks here until the trace stops. Keep the returned
-    // handle alive in a static so the session isn't torn down underneath us.
-    //
-    // The session name is made unique per process. A user-mode ETW session is
-    // NOT auto-removed when its creating process is killed, so a fixed name
-    // collides on the next launch (`EtwNativeError(AlreadyExist)`) and FPS /
-    // game-detection silently breaks until reboot. A per-PID name always starts
-    // cleanly; the orphaned session from an ungraceful exit is cleared on reboot.
-    let trace = UserTrace::new()
-        .named(format!("CorePilot-FPS-{}", std::process::id()))
-        .enable(provider)
-        .start_and_process()?;
+    // Clear any session leaked by a previous (ungracefully-exited) CorePilot before
+    // starting, so exactly ONE `CorePilot-FPS` session exists on the provider —
+    // multiple stale sessions starve ours of present events. `start_and_process`
+    // then blocks here until the trace stops; the returned handle is kept alive in
+    // a static so the session isn't torn down underneath us.
+    stop_stale_session();
+    let trace = match UserTrace::new()
+        .named(FPS_SESSION_NAME.to_string())
+        .enable(make_provider())
+        .start_and_process()
+    {
+        Ok(t) => t,
+        // A leftover session can linger a moment after `logman stop`; if the start
+        // still races an existing one, force-stop and retry once.
+        Err(_) => {
+            stop_stale_session();
+            UserTrace::new()
+                .named(FPS_SESSION_NAME.to_string())
+                .enable(make_provider())
+                .start_and_process()?
+        }
+    };
     let _ = TRACE.set(trace);
     Ok(())
+}
+
+/// Force-stop any leftover real-time ETW session named [`FPS_SESSION_NAME`].
+/// Best-effort and silent: a user-mode ETW session survives the process that
+/// created it, so this clears one left behind by an ungraceful exit. Uses the
+/// built-in `logman` so we need no extra ETW-control FFI; runs with no console.
+fn stop_stale_session() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = std::process::Command::new("logman")
+        .args(["stop", FPS_SESSION_NAME, "-ets"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// Live FPS for `pid`: number of presents in the last second. `None` when the

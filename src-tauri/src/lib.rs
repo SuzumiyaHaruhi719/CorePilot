@@ -19,11 +19,35 @@ pub mod winsvc;
 use state::AppState;
 use tauri::Manager;
 
+/// Chromium / WebView2 command-line flags applied to every CorePilot webview.
+///
+/// The OSD overlay and the perf recorder must keep their JS timers running while
+/// a game holds the foreground — which means CorePilot's own windows are both
+/// *backgrounded* and *occluded*. The first three switches disable the regular
+/// background timer / renderer throttling. The two `disable-features` are the
+/// ones that actually matter for an overlay:
+/// * `CalculateNativeWinOcclusion` — without disabling it Chromium detects the
+///   occluded window, marks the page **hidden**, and freezes its task scheduler
+///   (timers fire at most once, incoming events stall) — exactly our symptom.
+/// * `IntensiveWakeUpThrottling` — the "≤1 wake per minute" clamp applied to
+///   pages hidden for >5 min.
+pub const WEBVIEW_ARGS: &str = "--disable-background-timer-throttling \
+     --disable-renderer-backgrounding --disable-backgrounding-occluded-windows \
+     --disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling";
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .try_init();
+
+    // WebView2 / Chromium aggressively throttle (or pause) JS timers in
+    // background / occluded windows. But the in-game OSD overlay and the perf
+    // recorder both poll on a setInterval and MUST keep running while a *game*
+    // holds the foreground (so CorePilot's own windows are in the background).
+    // Disable that throttling for every webview, or the OSD goes stale and the
+    // recorder stops sampling exactly when it matters.
+    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", WEBVIEW_ARGS);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -39,6 +63,15 @@ pub fn run() {
             if let Err(err) = tray::build_tray(app.handle()) {
                 tracing::warn!("failed to build system tray: {err}");
             }
+
+            // Bring up the OSD overlay as a KEEP-ALIVE window at startup. A shown,
+            // always-on-top WebView2 window keeps the shared renderer's task loop
+            // running; without it the renderer freezes whenever CorePilot is
+            // backgrounded (e.g. a game holds the foreground), which is what
+            // silently killed the overlay's metric poll and the perf recorder.
+            // The overlay parks itself off-screen when there is nothing to show.
+            let _ = osd::osd_set_visible(app.handle().clone(), true);
+
             Ok(())
         })
         .on_window_event(|window, event| {
