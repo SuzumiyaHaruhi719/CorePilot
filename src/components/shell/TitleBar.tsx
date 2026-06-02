@@ -34,8 +34,11 @@ interface TitleBarProps {
 
 export function TitleBar({ cpuName }: TitleBarProps) {
   return (
-    <header className="drag-region relative z-20 flex h-10 shrink-0 items-center justify-between border-b border-line px-3">
-      <div className="flex items-center gap-2.5">
+    <header
+      data-tauri-drag-region
+      className="relative z-20 flex h-10 shrink-0 items-center justify-between border-b border-line px-3"
+    >
+      <div data-tauri-drag-region className="flex items-center gap-2.5">
         <motion.div
           initial={{ rotate: -90, opacity: 0, scale: 0.6 }}
           animate={{ rotate: 0, opacity: 1, scale: 1 }}

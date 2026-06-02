@@ -45,10 +45,16 @@ export function OsdPlate({ metrics, style, scale, opacity, rounded, data }: OsdP
     <div
       className={cn(
         "inline-flex font-semibold leading-none text-white",
-        vertical ? "flex-col gap-1.5" : "flex-wrap items-center gap-x-3 gap-y-1",
+        vertical ? "flex-col items-start gap-1.5" : "flex-nowrap items-center gap-x-3 gap-y-1",
         rounded ? "rounded-lg" : "rounded-[3px]",
       )}
       style={{
+        // Lay out at the plate's natural content size so the overlay window
+        // (which is sized from getBoundingClientRect) fits it exactly and the
+        // horizontal row never wraps inside the tiny initial window.
+        width: "max-content",
+        maxWidth: "none",
+        whiteSpace: "nowrap",
         fontSize: `${Math.round(13 * scale)}px`,
         background: `rgba(8, 10, 16, ${opacity})`,
         padding: `${Math.round(6 * scale)}px ${Math.round(10 * scale)}px`,

@@ -179,11 +179,11 @@ export function OsdOverlay() {
   // park the window off-screen. The window itself is positioned at the corner, so
   // the plate just renders at the wrapper's top-left.
   if (!show) {
-    return <div ref={plateRef} style={{ position: "fixed", top: 0, left: 0 }} />;
+    return <div ref={plateRef} style={{ position: "fixed", top: 0, left: 0, width: "max-content" }} />;
   }
 
   return (
-    <div ref={plateRef} style={{ position: "fixed", top: 0, left: 0 }}>
+    <div ref={plateRef} style={{ position: "fixed", top: 0, left: 0, width: "max-content" }}>
       <OsdPlate
         metrics={shownMetrics}
         style={cfg.style}

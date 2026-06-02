@@ -1,13 +1,14 @@
-import { Gamepad2, MonitorPlay, Plus, RotateCcw, Trash2 } from "lucide-react";
+import { Gamepad2, ListPlus, MonitorPlay, Plus, RotateCcw, Search, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
+import { Modal } from "../components/ui/Modal";
 import { Segmented } from "../components/ui/Segmented";
 import { Slider } from "../components/ui/Slider";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
-import { api } from "../lib/ipc";
+import { api, type ProcInfo } from "../lib/ipc";
 import {
   OSD_CATEGORIES,
   OSD_METRICS,
@@ -50,6 +51,11 @@ export function OsdConfig() {
   const [data, setData] = useState<OsdData>(EMPTY);
   const [selected, setSelected] = useState<string | null>(null);
   const [addName, setAddName] = useState("");
+  // "Pick from running processes" picker state.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [procs, setProcs] = useState<ProcInfo[]>([]);
+  const [procLoading, setProcLoading] = useState(false);
+  const [procQuery, setProcQuery] = useState("");
   const previewRef = useRef<HTMLDivElement>(null);
 
   const selectedTarget = useMemo(
@@ -144,6 +150,42 @@ export function OsdConfig() {
     setAddName("");
     setSelected(n.toLowerCase());
   }
+
+  // Open the "pick from running processes" picker and (re)load the process list.
+  async function openProcessPicker() {
+    setProcQuery("");
+    setPickerOpen(true);
+    setProcLoading(true);
+    try {
+      const list = await api.listProcesses();
+      setProcs(list);
+    } catch {
+      setProcs([]);
+    } finally {
+      setProcLoading(false);
+    }
+  }
+
+  // Add a process by exe name from the picker, then close it.
+  function pickProcess(name: string) {
+    addTarget(name);
+    setSelected(name.toLowerCase());
+    setPickerOpen(false);
+  }
+
+  // De-duplicate by lowercased name, filter by the search query, sort alphabetically.
+  const pickerProcs = useMemo(() => {
+    const q = procQuery.trim().toLowerCase();
+    const byName = new Map<string, ProcInfo>();
+    for (const p of procs) {
+      const key = p.name.toLowerCase();
+      if (!key || byName.has(key)) continue;
+      byName.set(key, p);
+    }
+    return [...byName.values()]
+      .filter((p) => (q ? p.name.toLowerCase().includes(q) : true))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+  }, [procs, procQuery]);
 
   return (
     <>
@@ -267,6 +309,12 @@ export function OsdConfig() {
               className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Plus size={13} /> 添加
+            </button>
+            <button
+              onClick={() => void openProcessPicker()}
+              className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+            >
+              <ListPlus size={13} /> 从运行中的进程选择
             </button>
           </div>
 
@@ -426,6 +474,56 @@ export function OsdConfig() {
           </AnimatePresence>
         </div>
       </div>
+
+      {/* Pick a target from the currently-running processes. */}
+      <Modal open={pickerOpen} onClose={() => setPickerOpen(false)} title="从运行中的进程选择">
+        <div className="no-drag relative mb-3">
+          <Search
+            size={14}
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-dim"
+          />
+          <input
+            autoFocus
+            value={procQuery}
+            onChange={(e) => setProcQuery(e.target.value)}
+            placeholder="搜索进程名…"
+            className="w-full rounded-lg border border-line bg-surface2 py-2 pl-9 pr-3 text-[12.5px] text-ink outline-none transition-colors focus:border-accent/50"
+          />
+        </div>
+        <div className="hairline max-h-[320px] overflow-auto rounded-xl border border-line bg-surface2/40">
+          {procLoading ? (
+            <div className="px-3 py-6 text-center text-[12px] text-dim">正在读取进程…</div>
+          ) : pickerProcs.length === 0 ? (
+            <div className="px-3 py-6 text-center text-[12px] text-dim">
+              {procQuery.trim() ? "没有匹配的进程" : "未发现进程"}
+            </div>
+          ) : (
+            <div className="space-y-0.5 p-1">
+              {pickerProcs.map((p) => {
+                const already = targets.some((t) => t.name === p.name.toLowerCase());
+                return (
+                  <button
+                    key={p.name.toLowerCase()}
+                    onClick={() => pickProcess(p.name)}
+                    className="no-drag flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[12.5px] text-muted transition-colors hover:bg-accent/10 hover:text-ink"
+                  >
+                    <MonitorPlay size={13} className="shrink-0 text-dim" />
+                    <span className="flex-1 truncate">{p.name}</span>
+                    {p.description && (
+                      <span className="truncate text-[11px] text-dim">{p.description}</span>
+                    )}
+                    {already && (
+                      <span className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent-bright">
+                        已添加
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </Modal>
     </>
   );
 }
