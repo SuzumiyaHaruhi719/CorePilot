@@ -9,6 +9,11 @@ import {
   type PerfSession,
 } from "../lib/perf";
 import { usePerfHistory } from "../store/perfHistory";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 
 /** Sampling cadence — one ~1 Hz tick per second while a game is foregrounded. */
 const SAMPLE_INTERVAL_MS = 1000;
@@ -48,6 +53,17 @@ export function usePerfRecorder(): void {
   const running = useRef(false);
 
   useEffect(() => {
+    /** Send a Windows system notification (permission-guarded; best-effort). */
+    const notify = async (body: string) => {
+      try {
+        let granted = await isPermissionGranted();
+        if (!granted) granted = (await requestPermission()) === "granted";
+        if (granted) sendNotification({ title: "CorePilot", body });
+      } catch {
+        /* notifications unavailable — ignore */
+      }
+    };
+
     /** Summarize + persist a session, or discard it if it captured no samples. */
     const finalize = (session: ActiveSession) => {
       if (session.samples.length === 0) return; // nothing worth keeping
@@ -66,6 +82,7 @@ export function usePerfRecorder(): void {
         samples: downsample(session.samples),
       };
       usePerfHistory.getState().addSession(report);
+      void notify(`${report.name} 性能报告已生成`);
     };
 
     /** Begin tracking a freshly-detected foreground game. */
@@ -86,6 +103,7 @@ export function usePerfRecorder(): void {
         gpuName,
         samples: [],
       };
+      void notify(`检测到游戏运行：${gameDisplayName(exe)} — 正在记录性能`);
     };
 
     /** Pull one OSD snapshot and append a sample to the active session. */

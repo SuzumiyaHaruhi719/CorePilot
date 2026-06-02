@@ -61,10 +61,12 @@ function App() {
     return useGpuProfiles.persist.onFinishHydration(applyActive);
   }, []);
 
-  // Re-show the OSD overlay on launch if it was left enabled (store is async).
+  // Re-show the OSD overlay on launch if it was left enabled OR desktop mode is
+  // on (the overlay window must exist for either; store is async → wait for it).
   useEffect(() => {
     const showIfEnabled = () => {
-      if (useOsd.getState().enabled) api.osdSetVisible(true).catch(() => undefined);
+      const s = useOsd.getState();
+      if (s.enabled || s.desktopMode) api.osdSetVisible(true).catch(() => undefined);
     };
     if (useOsd.persist.hasHydrated()) {
       showIfEnabled();

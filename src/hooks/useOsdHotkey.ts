@@ -28,7 +28,8 @@ export function useOsdHotkey(): void {
           if (event.state !== "Pressed") return;
           const next = !useOsd.getState().enabled;
           useOsd.getState().setEnabled(next);
-          api.osdSetVisible(next).catch(() => {});
+          // Keep the overlay window up if desktop mode still wants it.
+          api.osdSetVisible(next || useOsd.getState().desktopMode).catch(() => {});
         });
         dispose = () => {
           gs.unregister(OSD_HOTKEY).catch(() => {});

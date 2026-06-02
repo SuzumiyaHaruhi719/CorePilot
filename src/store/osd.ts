@@ -176,7 +176,10 @@ export function resolveOsd(
     // white → force show, even if not detected as a game.
     return effectiveConfig(global, match.config);
   }
-  // No explicit override: show when auto-detected as a game, or always in
-  // desktop mode (the overlay hides FPS metrics on the desktop).
-  return isGame || global.desktopMode ? effectiveConfig(global, undefined) : null;
+  // No explicit override: a game shows when the in-game overlay (`enabled`) is
+  // on; a non-game / desktop shows when `desktopMode` is on (the overlay hides
+  // FPS metrics there). The overlay window itself only exists when either flag
+  // is on, so "both off" shows nothing.
+  if (isGame) return global.enabled ? effectiveConfig(global, undefined) : null;
+  return global.desktopMode ? effectiveConfig(global, undefined) : null;
 }

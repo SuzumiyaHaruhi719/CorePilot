@@ -94,8 +94,9 @@ export function OsdOverlay() {
     fg.exe,
     fg.isGame,
   );
-  // Master switch off → never show. Otherwise show iff a config resolved.
-  const show = global.enabled && effective !== null;
+  // Show iff resolveOsd returned a config — it already gates games on `enabled`
+  // and desktop on `desktopMode`; the overlay window only exists when one is on.
+  const show = effective !== null;
   const cfg = effective ?? global;
 
   // Desktop mode: when showing on a non-game (desktop / regular app), FPS is

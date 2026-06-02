@@ -94,7 +94,8 @@ export function OsdConfig() {
 
   function setEnabled(enabled: boolean) {
     osd.setEnabled(enabled);
-    api.osdSetVisible(enabled).catch(() => undefined);
+    // Keep the overlay window up if desktop mode still wants it.
+    api.osdSetVisible(enabled || osd.desktopMode).catch(() => undefined);
   }
 
   // Appearance/metric editors operate on either the global default or the
@@ -169,7 +170,15 @@ export function OsdConfig() {
                 非游戏时也在桌面显示（仅 CPU / GPU / 内存 / 硬盘 / 网络，不含 FPS）
               </div>
             </div>
-            <Toggle checked={osd.desktopMode} onChange={(v) => osd.update({ desktopMode: v })} />
+            <Toggle
+              checked={osd.desktopMode}
+              onChange={(v) => {
+                osd.update({ desktopMode: v });
+                // Desktop mode needs the overlay window too — show it now (or
+                // hide if both this and the in-game master are off).
+                api.osdSetVisible(v || osd.enabled).catch(() => undefined);
+              }}
+            />
           </div>
 
           {/* Live preview over a faux game backdrop */}
@@ -254,7 +263,8 @@ export function OsdConfig() {
             />
             <button
               onClick={submitAdd}
-              className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+              disabled={!addName.trim()}
+              className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Plus size={13} /> 添加
             </button>
