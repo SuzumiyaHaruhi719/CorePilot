@@ -45,11 +45,20 @@ pub fn set_close_to_tray(prefs: tauri::State<'_, TrayPrefs>, enabled: bool) {
 }
 
 /// Bring the main window back to the foreground (restore from the tray).
+///
+/// `show()` + `set_focus()` alone is unreliable on Windows: the OS forbids a
+/// background process from calling `SetForegroundWindow`, so the restored window
+/// often appears *behind* the current foreground app — to the user it looks like
+/// clicking "显示 CorePilot" did nothing. Briefly pinning the window always-on-top
+/// forces it visibly to the top (this isn't blocked), then we unpin it so it
+/// behaves like a normal window afterwards.
 fn show_main<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
         let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_always_on_top(true);
         let _ = window.set_focus();
+        let _ = window.set_always_on_top(false);
     }
 }
 
