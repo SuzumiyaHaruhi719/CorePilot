@@ -1,22 +1,28 @@
 import {
   Check,
   CheckCircle2,
+  FolderOpen,
+  ListPlus,
   Loader2,
+  MonitorPlay,
+  Plus,
+  Search,
   Settings as SettingsIcon,
   Stethoscope,
+  Trash2,
   Wrench,
   X,
   XCircle,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
 import { Segmented } from "../components/ui/Segmented";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
-import { api, type NetCheck } from "../lib/ipc";
+import { api, type NetCheck, type ProcInfo } from "../lib/ipc";
 import {
   ACCENT_HUE,
   useSettings,
@@ -24,6 +30,7 @@ import {
   type GlowLevel,
   type Language,
 } from "../store/settings";
+import { useRecordTargets } from "../store/recordTargets";
 
 const ACCENTS: AccentName[] = ["violet", "cyan", "teal", "amber", "rose"];
 
@@ -307,6 +314,206 @@ function NetworkCard() {
   );
 }
 
+/**
+ * 性能记录名单 — a dedicated white / black list controlling which apps the perf
+ * recorder (`usePerfRecorder`) samples. SEPARATE from the OSD show/hide list:
+ *
+ *  - 白名单 (white) = force-record this exe even if not auto-detected as a game.
+ *  - 黑名单 (black) = NEVER record this exe, even if auto-detected (kills false
+ *    positives).
+ *
+ * Mirrors the OsdConfig list UX: text-input add, "从运行中的进程选择" modal, and
+ * "从文件选择" native picker.
+ */
+function PerfRecordTargetsCard() {
+  const { targets, addTarget, removeTarget, setTargetList } = useRecordTargets();
+  const [addName, setAddName] = useState("");
+  // "Pick from running processes" picker state.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [procs, setProcs] = useState<ProcInfo[]>([]);
+  const [procLoading, setProcLoading] = useState(false);
+  const [procQuery, setProcQuery] = useState("");
+
+  function submitAdd() {
+    const n = addName.trim();
+    if (!n) return;
+    addTarget(n);
+    setAddName("");
+  }
+
+  // Open the "pick from running processes" picker and (re)load the process list.
+  async function openProcessPicker() {
+    setProcQuery("");
+    setPickerOpen(true);
+    setProcLoading(true);
+    try {
+      setProcs(await api.listProcesses());
+    } catch {
+      setProcs([]);
+    } finally {
+      setProcLoading(false);
+    }
+  }
+
+  // Add a process by exe name from the picker, then close it.
+  function pickProcess(name: string) {
+    addTarget(name);
+    setPickerOpen(false);
+  }
+
+  // Add one or more exes by browsing to their .exe via a native file dialog —
+  // works for apps that aren't running yet (unlike the running-process picker).
+  async function pickFromFile() {
+    try {
+      const names = await api.pickExeFiles();
+      for (const n of names) addTarget(n);
+    } catch {
+      /* dialog cancelled or unavailable — ignore */
+    }
+  }
+
+  // De-duplicate by lowercased name, filter by the search query, sort alphabetically.
+  const pickerProcs = useMemo(() => {
+    const q = procQuery.trim().toLowerCase();
+    const byName = new Map<string, ProcInfo>();
+    for (const p of procs) {
+      const key = p.name.toLowerCase();
+      if (!key || byName.has(key)) continue;
+      byName.set(key, p);
+    }
+    return [...byName.values()]
+      .filter((p) => (q ? p.name.toLowerCase().includes(q) : true))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+  }, [procs, procQuery]);
+
+  return (
+    <div className="border-b border-line/60 py-3.5 last:border-0">
+      <div className="mb-1 text-[13.5px] font-medium text-ink">性能记录名单 / 白·黑名单</div>
+      <div className="mb-3 text-[12px] leading-relaxed text-dim">
+        控制哪些程序会被记录性能报告（独立于 OSD 显示名单）：白名单 = 强制记录（即使未被识别为游戏），黑名单
+        = 从不记录（即使被识别为游戏）。
+      </div>
+
+      {/* Add by exe name + pickers */}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <input
+          value={addName}
+          onChange={(e) => setAddName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submitAdd();
+          }}
+          placeholder="可执行文件名，如 cyberpunk2077.exe"
+          className="no-drag w-64 rounded-lg border border-line bg-surface2 px-3 py-1.5 text-[12.5px] text-ink outline-none transition-colors focus:border-accent/50"
+        />
+        <button
+          onClick={submitAdd}
+          disabled={!addName.trim()}
+          className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <Plus size={13} /> 添加
+        </button>
+        <button
+          onClick={() => void openProcessPicker()}
+          className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+        >
+          <ListPlus size={13} /> 从运行中的进程选择
+        </button>
+        <button
+          onClick={() => void pickFromFile()}
+          className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+        >
+          <FolderOpen size={13} /> 从文件选择
+        </button>
+      </div>
+
+      {/* Entry list */}
+      {targets.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-line/70 px-3 py-4 text-center text-[12px] text-dim">
+          暂无条目 — 默认仅记录自动识别为游戏的程序。在此添加以强制记录或屏蔽误判。
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {targets.map((t) => (
+            <div
+              key={t.name}
+              className="no-drag flex items-center gap-2 rounded-lg border border-line bg-surface2 px-3 py-2 text-[12.5px]"
+            >
+              <MonitorPlay size={13} className="shrink-0 text-dim" />
+              <span className="flex-1 truncate text-muted">{t.name}</span>
+              <Segmented
+                id={`rec-list-${t.name}`}
+                value={t.list}
+                onChange={(v) => setTargetList(t.name, v as "white" | "black")}
+                options={[
+                  { value: "white", label: "强制记录" },
+                  { value: "black", label: "从不记录" },
+                ]}
+              />
+              <button
+                onClick={() => removeTarget(t.name)}
+                className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-dim transition-colors hover:bg-danger/15 hover:text-danger"
+                title="移除"
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Pick a target from the currently-running processes. */}
+      <Modal open={pickerOpen} onClose={() => setPickerOpen(false)} title="从运行中的进程选择">
+        <div className="no-drag relative mb-3">
+          <Search
+            size={14}
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-dim"
+          />
+          <input
+            autoFocus
+            value={procQuery}
+            onChange={(e) => setProcQuery(e.target.value)}
+            placeholder="搜索进程名…"
+            className="w-full rounded-lg border border-line bg-surface2 py-2 pl-9 pr-3 text-[12.5px] text-ink outline-none transition-colors focus:border-accent/50"
+          />
+        </div>
+        <div className="hairline max-h-[320px] overflow-auto rounded-xl border border-line bg-surface2/40">
+          {procLoading ? (
+            <div className="px-3 py-6 text-center text-[12px] text-dim">正在读取进程…</div>
+          ) : pickerProcs.length === 0 ? (
+            <div className="px-3 py-6 text-center text-[12px] text-dim">
+              {procQuery.trim() ? "没有匹配的进程" : "未发现进程"}
+            </div>
+          ) : (
+            <div className="space-y-0.5 p-1">
+              {pickerProcs.map((p) => {
+                const already = targets.some((t) => t.name === p.name.toLowerCase());
+                return (
+                  <button
+                    key={p.name.toLowerCase()}
+                    onClick={() => pickProcess(p.name)}
+                    className="no-drag flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[12.5px] text-muted transition-colors hover:bg-accent/10 hover:text-ink"
+                  >
+                    <MonitorPlay size={13} className="shrink-0 text-dim" />
+                    <span className="flex-1 truncate">{p.name}</span>
+                    {p.description && (
+                      <span className="truncate text-[11px] text-dim">{p.description}</span>
+                    )}
+                    {already && (
+                      <span className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent-bright">
+                        已添加
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
 export function Settings() {
   const settings = useSettings();
 
@@ -432,6 +639,7 @@ export function Settings() {
               onChange={(value) => settings.update({ gameNotify: value })}
             />
           </SettingRow>
+          <PerfRecordTargetsCard />
         </motion.div>
 
         <NetworkCard />

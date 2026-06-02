@@ -18,6 +18,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useSettings } from "../store/settings";
 import { useUi } from "../store/ui";
 import { useOsdTargets } from "../store/osd";
+import { useRecordTargets } from "../store/recordTargets";
 
 /** Sampling cadence — one ~1 Hz tick per second while a game is foregrounded. */
 const SAMPLE_INTERVAL_MS = 1000;
@@ -196,13 +197,34 @@ export function usePerfRecorder(): void {
           }
         }
 
-        // Start: record when the foreground app is a detected game OR is on the
-        // OSD whitelist (whitelisting force-records, mirroring force-show).
+        // Start: decide whether to record this foreground app.
+        //
+        // The dedicated record white/black list (useRecordTargets) takes
+        // precedence over auto-detection:
+        //   - recBlack → NEVER record (skip entirely, even if auto-detected as a
+        //     game) so the user can kill any false-positive.
+        //   - recWhite → force-record (even if NOT auto-detected as a game).
+        // The OSD whitelist also force-records, kept for back-compat so an
+        // existing OSD-whitelist setup (e.g. furmark) keeps recording.
         const exeLc = fg.exe ? fg.exe.trim().toLowerCase() : null;
-        const whitelisted =
+        const recTargets = useRecordTargets.getState().targets;
+        const recBlack = !!exeLc && recTargets.some((t) => t.list === "black" && t.name === exeLc);
+        const recWhite = !!exeLc && recTargets.some((t) => t.list === "white" && t.name === exeLc);
+        const osdWhitelisted =
           !!exeLc &&
           useOsdTargets.getState().targets.some((t) => t.list === "white" && t.name === exeLc);
-        if ((fg.isGame || whitelisted) && fg.exe) {
+        // Blacklist precedence: if the foreground app is blacklisted, finalize
+        // any session we're recording for it and stop — so toggling a live
+        // false-positive to 黑名单 takes effect immediately.
+        if (recBlack) {
+          const existing = active.current;
+          if (existing && fg.pid === existing.pid) {
+            finalize(existing);
+            active.current = null;
+          }
+          return;
+        }
+        if ((fg.isGame || recWhite || osdWhitelisted) && fg.exe) {
           const exe = fg.exe.toLowerCase();
           const existing = active.current;
           if (!existing || existing.exe !== exe) {
