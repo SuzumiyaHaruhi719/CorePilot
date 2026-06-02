@@ -118,8 +118,14 @@ fn run_trace() -> Result<(), ferrisetw::trace::TraceError> {
 
     // `start_and_process` blocks here until the trace stops. Keep the returned
     // handle alive in a static so the session isn't torn down underneath us.
+    //
+    // The session name is made unique per process. A user-mode ETW session is
+    // NOT auto-removed when its creating process is killed, so a fixed name
+    // collides on the next launch (`EtwNativeError(AlreadyExist)`) and FPS /
+    // game-detection silently breaks until reboot. A per-PID name always starts
+    // cleanly; the orphaned session from an ungraceful exit is cleared on reboot.
     let trace = UserTrace::new()
-        .named("CorePilot-FPS".to_string())
+        .named(format!("CorePilot-FPS-{}", std::process::id()))
         .enable(provider)
         .start_and_process()?;
     let _ = TRACE.set(trace);
