@@ -15,7 +15,9 @@ export function Sparkline({ data, max, hue, height = 96 }: SparklineProps) {
 
   const points = data.map((v, i) => {
     const x = n > 1 ? (i / (n - 1)) * 100 : 0;
-    const y = 100 - Math.min(Math.max(v, 0) / max, 1) * 100;
+    // Map into [6, 100] (top inset) so a peak line's glow has room inside the box
+    // and isn't harshly clipped at the top edge once we clip overflow.
+    const y = 100 - Math.min(Math.max(v, 0) / max, 1) * 94;
     return `${x.toFixed(2)},${y.toFixed(2)}`;
   });
   const line = points.join(" ");
@@ -26,7 +28,7 @@ export function Sparkline({ data, max, hue, height = 96 }: SparklineProps) {
       viewBox="0 0 100 100"
       preserveAspectRatio="none"
       style={{ height }}
-      className="w-full overflow-visible"
+      className="w-full overflow-hidden"
     >
       <defs>
         <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
