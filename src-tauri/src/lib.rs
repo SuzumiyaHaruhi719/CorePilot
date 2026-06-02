@@ -83,6 +83,7 @@ pub fn run() {
             gpu::gpu_oc_apply,
             gpu::gpu_oc_reset,
             osd::osd_set_visible,
+            osd::osd_set_bounds,
             fps::osd_fps,
             fps::osd_fps_stats,
             fps::foreground_process,

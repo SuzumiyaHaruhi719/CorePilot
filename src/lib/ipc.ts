@@ -265,6 +265,8 @@ export const api = {
   gpuOcApply: (settings: GpuOcSettings) => invoke<void>("gpu_oc_apply", { settings }),
   gpuOcReset: () => invoke<void>("gpu_oc_reset"),
   osdSetVisible: (visible: boolean) => invoke<void>("osd_set_visible", { visible }),
+  osdSetBounds: (x: number, y: number, w: number, h: number) =>
+    invoke<void>("osd_set_bounds", { x, y, w, h }),
   osdFps: () => invoke<number | null>("osd_fps"),
   osdFpsStats: () => invoke<OsdFpsStats>("osd_fps_stats"),
   foregroundProcess: () => invoke<string | null>("foreground_process"),

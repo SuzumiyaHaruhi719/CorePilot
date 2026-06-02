@@ -1,8 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { cn } from "../lib/cn";
 import { api } from "../lib/ipc";
-import { fetchOsdData, freePosStyle, type OsdData } from "../lib/osd";
+import { fetchOsdData, type OsdData } from "../lib/osd";
 import {
   resolveOsd,
   useOsd,
@@ -26,6 +25,12 @@ import { OsdPlate } from "./OsdPlate";
  * created; it simply renders nothing when nothing should show. Config is hydrated from
  * the shared store and kept live via the `osd:cfg` / `osd:targets` events emitted
  * by the config panel (which lives in a different webview).
+ *
+ * Window geometry: the overlay window is small and content-sized. We render the
+ * plate at the window's top-left and, after each render, measure it and drive the
+ * native window's size + position (corner / free placement, plus the OLED nudge)
+ * via `api.osdSetBounds`. A small window cannot lock the screen if click-through
+ * momentarily fails, unlike the previous fullscreen overlay.
  */
 
 const EMPTY: OsdData = { metrics: null, sensors: null, gpu: null, fps: null };
@@ -59,6 +64,8 @@ export function OsdOverlay() {
   });
   // OLED anti burn-in step (advances on a slow timer when enabled).
   const [shiftIdx, setShiftIdx] = useState(0);
+  // The plate element — measured each render to size/position the native window.
+  const plateRef = useRef<HTMLDivElement>(null);
 
   // Live config push from the main window's config panel (separate webview), so
   // edits in the panel reflect on the overlay without a reload.
@@ -136,42 +143,55 @@ export function OsdOverlay() {
     return () => window.clearInterval(id);
   }, [show, cfg.oledShift]);
 
-  if (!show) return null;
+  // Drive the native window's size + position from the rendered plate. The window
+  // (not CSS) is what sits at the chosen corner now, so we measure the plate and
+  // place a content-sized window there. When hidden, park a 1×1 window off-screen.
+  useLayoutEffect(() => {
+    const margin = 8;
+    if (!show) {
+      api.osdSetBounds(-200, -200, 1, 1).catch(() => {});
+      return;
+    }
+    const el = plateRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const w = Math.max(1, Math.ceil(r.width));
+    const h = Math.max(1, Math.ceil(r.height));
+    const sw = window.screen.availWidth;
+    const sh = window.screen.availHeight;
+    // OLED nudge offsets (small, inward from the corner).
+    const [ox, oy] = cfg.oledShift ? OLED_OFFSETS[shiftIdx % OLED_OFFSETS.length] : [0, 0];
+    const top = cfg.position === "tl" || cfg.position === "tr";
+    const left = cfg.position === "tl" || cfg.position === "bl";
+    let x: number;
+    let y: number;
+    if (cfg.position === "free") {
+      x = Math.min(Math.max(cfg.freeX * sw, 0), Math.max(0, sw - w));
+      y = Math.min(Math.max(cfg.freeY * sh, 0), Math.max(0, sh - h));
+    } else {
+      x = left ? margin + ox : sw - w - margin - ox;
+      y = top ? margin + oy : sh - h - margin - oy;
+    }
+    api.osdSetBounds(x, y, w, h).catch(() => {});
+  }, [show, cfg, data, shownMetrics, shiftIdx]);
 
-  const isFree = cfg.position === "free";
-  const top = cfg.position === "tl" || cfg.position === "tr";
-  const left = cfg.position === "tl" || cfg.position === "bl";
-
-  // OLED nudge: inward from the corner (or any small direction in free mode).
-  const [ox, oy] = cfg.oledShift ? OLED_OFFSETS[shiftIdx % OLED_OFFSETS.length] : [0, 0];
-  const dx = isFree || left ? ox : -ox;
-  const dy = isFree || top ? oy : -oy;
+  // Keep the component mounted even when hidden so the layout effect can run and
+  // park the window off-screen. The window itself is positioned at the corner, so
+  // the plate just renders at the wrapper's top-left.
+  if (!show) {
+    return <div ref={plateRef} style={{ position: "fixed", top: 0, left: 0 }} />;
+  }
 
   return (
-    <div
-      className={cn(
-        "fixed inset-0",
-        !isFree && "flex p-1.5",
-        !isFree && (top ? "items-start" : "items-end"),
-        !isFree && (left ? "justify-start" : "justify-end"),
-      )}
-    >
-      <div
-        style={{
-          ...(isFree ? freePosStyle(cfg.freeX, cfg.freeY) : undefined),
-          transform: `translate(${dx}px, ${dy}px)`,
-          transition: "transform 1.2s ease",
-        }}
-      >
-        <OsdPlate
-          metrics={shownMetrics}
-          style={cfg.style}
-          scale={cfg.scale}
-          opacity={cfg.opacity}
-          rounded={cfg.rounded}
-          data={data}
-        />
-      </div>
+    <div ref={plateRef} style={{ position: "fixed", top: 0, left: 0 }}>
+      <OsdPlate
+        metrics={shownMetrics}
+        style={cfg.style}
+        scale={cfg.scale}
+        opacity={cfg.opacity}
+        rounded={cfg.rounded}
+        data={data}
+      />
     </div>
   );
 }
