@@ -3,7 +3,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import { tauriStorage } from "../lib/persist";
 
 export type OsdStyle = "horizontal" | "vertical";
-export type OsdPosition = "tl" | "tr" | "bl" | "br" | "free";
+export type OsdPosition = "tl" | "tr" | "tc" | "bl" | "br" | "bc" | "free";
 
 /** OSD overlay configuration. Persisted and shared between the config panel
  *  (main window) and the overlay window via the tauri-store backed `persist`. */

@@ -268,9 +268,11 @@ export function OsdConfig() {
                 justifyContent:
                   previewCfg.position === "free"
                     ? undefined
-                    : previewCfg.position.endsWith("l")
-                      ? "flex-start"
-                      : "flex-end",
+                    : previewCfg.position === "tc" || previewCfg.position === "bc"
+                      ? "center"
+                      : previewCfg.position.endsWith("l")
+                        ? "flex-start"
+                        : "flex-end",
               }}
             >
               {previewCfg.position === "free" ? (
@@ -764,8 +766,10 @@ function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
           onChange={(v) => onChange({ position: v as OsdCfg["position"] })}
           options={[
             { value: "tl", label: "左上" },
+            { value: "tc", label: "上中" },
             { value: "tr", label: "右上" },
             { value: "bl", label: "左下" },
+            { value: "bc", label: "下中" },
             { value: "br", label: "右下" },
             { value: "free", label: "自由" },
           ]}

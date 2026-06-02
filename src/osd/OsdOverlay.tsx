@@ -161,15 +161,20 @@ export function OsdOverlay() {
     const sh = window.screen.availHeight;
     // OLED nudge offsets (small, inward from the corner).
     const [ox, oy] = cfg.oledShift ? OLED_OFFSETS[shiftIdx % OLED_OFFSETS.length] : [0, 0];
-    const top = cfg.position === "tl" || cfg.position === "tr";
+    const top = cfg.position === "tl" || cfg.position === "tr" || cfg.position === "tc";
     const left = cfg.position === "tl" || cfg.position === "bl";
+    const center = cfg.position === "tc" || cfg.position === "bc";
     let x: number;
     let y: number;
     if (cfg.position === "free") {
       x = Math.min(Math.max(cfg.freeX * sw, 0), Math.max(0, sw - w));
       y = Math.min(Math.max(cfg.freeY * sh, 0), Math.max(0, sh - h));
     } else {
-      x = left ? margin + ox : sw - w - margin - ox;
+      x = center
+        ? Math.min(Math.max((sw - w) / 2 + ox, 0), Math.max(0, sw - w))
+        : left
+          ? margin + ox
+          : sw - w - margin - ox;
       y = top ? margin + oy : sh - h - margin - oy;
     }
     api.osdSetBounds(x, y, w, h).catch(() => {});
