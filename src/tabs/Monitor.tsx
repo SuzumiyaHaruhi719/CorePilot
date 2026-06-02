@@ -1,7 +1,6 @@
 import { Activity, ArrowDown, ArrowUp, Cpu, Gamepad2, Gauge, HardDrive, MemoryStick, MonitorPlay } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useState } from "react";
 import { Sparkline } from "../components/charts/Sparkline";
 import { PerfHistory } from "../components/perf/PerfHistory";
 import { AnimatedNumber } from "../components/ui/AnimatedNumber";
@@ -10,10 +9,9 @@ import { TabHeader } from "../components/ui/TabHeader";
 import { useMetricsHistory } from "../hooks/useMetricsHistory";
 import { useSensors } from "../hooks/useSensors";
 import { formatBytes } from "../lib/format";
+import { useUi, type MonitorSub } from "../store/ui";
 
-type SubTab = "live" | "history";
-
-const SUB_TABS: { value: SubTab; label: string }[] = [
+const SUB_TABS: { value: MonitorSub; label: string }[] = [
   { value: "live", label: "实时" },
   { value: "history", label: "历史" },
 ];
@@ -166,7 +164,8 @@ function LiveDashboard() {
 }
 
 export function Monitor() {
-  const [sub, setSub] = useState<SubTab>("live");
+  const sub = useUi((s) => s.monitorSub);
+  const setSub = useUi((s) => s.setMonitorSub);
 
   return (
     <>

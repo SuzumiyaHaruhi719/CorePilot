@@ -417,6 +417,15 @@ export function Settings() {
               onChange={(value) => settings.update({ perfRecording: value })}
             />
           </SettingRow>
+          <SettingRow
+            title="游戏结束后自动弹出性能报告"
+            desc="游戏关闭时将 CorePilot 切到前台并打开本次性能报告"
+          >
+            <Toggle
+              checked={settings.autoShowReport}
+              onChange={(value) => settings.update({ autoShowReport: value })}
+            />
+          </SettingRow>
           <SettingRow title="游戏检测通知" desc="检测到游戏运行 / 性能报告生成时发送 Windows 系统通知">
             <Toggle
               checked={settings.gameNotify}

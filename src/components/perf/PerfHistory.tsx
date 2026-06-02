@@ -109,9 +109,21 @@ export function PerfHistory() {
   const sessions = usePerfHistory((s) => s.sessions);
   const removeSession = usePerfHistory((s) => s.removeSession);
   const clear = usePerfHistory((s) => s.clear);
+  const pendingReportId = usePerfHistory((s) => s.pendingReportId);
+  const clearPendingReport = usePerfHistory((s) => s.clearPendingReport);
 
   const [selectedId, setSelectedId] = useState<string | null>(sessions[0]?.id ?? null);
   const [confirmClear, setConfirmClear] = useState(false);
+
+  // Auto-surface a session requested by the recorder (game just exited): select
+  // it, then clear the one-shot pending flag so manual selection isn't overridden.
+  useEffect(() => {
+    if (pendingReportId === null) return;
+    if (sessions.some((s) => s.id === pendingReportId)) {
+      setSelectedId(pendingReportId);
+    }
+    clearPendingReport();
+  }, [pendingReportId, sessions, clearPendingReport]);
 
   // Keep a valid selection as sessions are added/removed (default: newest).
   useEffect(() => {

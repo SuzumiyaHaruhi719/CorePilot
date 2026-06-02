@@ -14,6 +14,8 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "core:window:allow-set-focus",
+    "core:window:allow-show",
+    "core:window:allow-set-always-on-top",
     "core:event:default",
     "opener:default",
     "store:default",

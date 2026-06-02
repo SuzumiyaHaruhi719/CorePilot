@@ -29,6 +29,8 @@ interface SettingsState {
   closeToTray: boolean;
   /** Auto-record a performance session per detected game (Monitor → 历史). */
   perfRecording: boolean;
+  /** When a game exits, bring CorePilot to the front and open its report. */
+  autoShowReport: boolean;
   /** Send a Windows notification when a game is detected / its report is saved. */
   gameNotify: boolean;
   update: (patch: Partial<Omit<SettingsState, "update" | "togglePerfCard">>) => void;
@@ -50,6 +52,7 @@ export const useSettings = create<SettingsState>()(
       perfCards: { cpu: true, mem: true, gpu: true, disk: true, net: true, power: true },
       closeToTray: true,
       perfRecording: true,
+      autoShowReport: true,
       gameNotify: true,
       update: (patch) => set(patch),
       togglePerfCard: (card) =>
