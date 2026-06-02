@@ -14,6 +14,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { useSettings } from "../store/settings";
 
 /** Sampling cadence — one ~1 Hz tick per second while a game is foregrounded. */
 const SAMPLE_INTERVAL_MS = 1000;
@@ -55,6 +56,7 @@ export function usePerfRecorder(): void {
   useEffect(() => {
     /** Send a Windows system notification (permission-guarded; best-effort). */
     const notify = async (body: string) => {
+      if (!useSettings.getState().gameNotify) return;
       try {
         let granted = await isPermissionGranted();
         if (!granted) granted = (await requestPermission()) === "granted";
@@ -137,6 +139,15 @@ export function usePerfRecorder(): void {
       try {
         const fg = await api.foregroundInfo();
         const cur = active.current;
+
+        // Recording disabled in Settings — finalize any active session and stop.
+        if (!useSettings.getState().perfRecording) {
+          if (cur) {
+            finalize(cur);
+            active.current = null;
+          }
+          return;
+        }
 
         // Finalize-on-exit / switch: the foreground PID no longer matches the
         // session we're tracking.

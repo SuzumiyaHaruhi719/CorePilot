@@ -27,6 +27,10 @@ interface SettingsState {
   perfCards: Record<PerfCard, boolean>;
   /** Hide to the system tray on window close instead of quitting the app. */
   closeToTray: boolean;
+  /** Auto-record a performance session per detected game (Monitor → 历史). */
+  perfRecording: boolean;
+  /** Send a Windows notification when a game is detected / its report is saved. */
+  gameNotify: boolean;
   update: (patch: Partial<Omit<SettingsState, "update" | "togglePerfCard">>) => void;
   togglePerfCard: (card: PerfCard) => void;
 }
@@ -45,6 +49,8 @@ export const useSettings = create<SettingsState>()(
       pollMs: 1500,
       perfCards: { cpu: true, mem: true, gpu: true, disk: true, net: true, power: true },
       closeToTray: true,
+      perfRecording: true,
+      gameNotify: true,
       update: (patch) => set(patch),
       togglePerfCard: (card) =>
         set((s) => ({ perfCards: { ...s.perfCards, [card]: !s.perfCards[card] } })),

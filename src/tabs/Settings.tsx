@@ -399,6 +399,32 @@ export function Settings() {
           </SettingRow>
         </motion.div>
 
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1], delay: 0.03 }}
+          className="glass hairline mx-auto mt-4 max-w-2xl rounded-2xl px-5 py-2"
+        >
+          <div className="border-b border-line/60 py-3 text-[12px] font-semibold uppercase tracking-wider text-muted">
+            性能与监控
+          </div>
+          <SettingRow
+            title="游戏性能记录"
+            desc="检测到游戏运行时自动采样性能；游戏关闭后在 监控 → 历史 生成报告"
+          >
+            <Toggle
+              checked={settings.perfRecording}
+              onChange={(value) => settings.update({ perfRecording: value })}
+            />
+          </SettingRow>
+          <SettingRow title="游戏检测通知" desc="检测到游戏运行 / 性能报告生成时发送 Windows 系统通知">
+            <Toggle
+              checked={settings.gameNotify}
+              onChange={(value) => settings.update({ gameNotify: value })}
+            />
+          </SettingRow>
+        </motion.div>
+
         <NetworkCard />
       </div>
     </>
