@@ -1,0 +1,15 @@
+[package]
+name = "corepilot-overlay"
+version = "0.1.0"
+edition = "2021"
+description = "Injectable in-game OSD overlay DLL (hooks Present, draws metrics read from shared memory)."
+
+[lib]
+# Produces corepilot_overlay.dll — injected into the target game process.
+crate-type = ["cdylib"]
+
+[dependencies]
+corepilot-osd-ipc = { path = "../corepilot-osd-ipc" }
+# NOTE: the real overlay (hudhook = "0.9.1", imgui = "0.12", windows 0.62, tracing)
+# is added by the implementation step. This stub keeps the workspace valid and the
+# IPC dependency wired while the foundation is verified.

@@ -1,0 +1,16 @@
+[package]
+name = "corepilot-osd-ipc"
+version = "0.1.0"
+edition = "2021"
+description = "Shared-memory contract between the CorePilot app and the injected in-game overlay DLL."
+
+[dependencies]
+# Pinned to the same windows-rs as src-tauri AND hudhook (0.62) so the HANDLE /
+# COM types are identical across all three crates in the workspace.
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_System_Memory",
+  # CreateFileMappingW's signature references SECURITY_ATTRIBUTES, so windows-rs
+  # only generates the function when Win32_Security is also enabled.
+  "Win32_Security",
+] }
