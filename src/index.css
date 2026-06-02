@@ -237,5 +237,20 @@
   }
 }
 
+/* uPlot perf charts — fill the sized wrapper and theme the synced crosshair to
+   match the cockpit palette (default uPlot CSS is a min-content light theme). */
+.uplot,
+.uplot .u-wrap {
+  width: 100% !important;
+  height: 100% !important;
+  font-family: var(--font-mono);
+}
+.uplot .u-hz .u-cursor-x {
+  border-right: 1px dashed oklch(100% 0 0 / 0.34);
+}
+.uplot .u-hz .u-cursor-y {
+  border-bottom: 1px dashed oklch(100% 0 0 / 0.18);
+}
+
 /* Motion is controlled in-app via the 减弱动画 setting (MotionConfig), not the
    OS prefers-reduced-motion media query — so animations always play by default. */

@@ -30,7 +30,12 @@ export const usePerfHistory = create<PerfHistoryStore>()(
     }),
     {
       name: "corepilot-perf-history",
-      version: 1,
+      // v2: PerfSample gained optional fields (gpuMemClock, gpuFan, disk/net,…)
+      // and PerfSummary gained energy/CO₂ + more aggregates. All additions are
+      // optional/nullable, so older persisted sessions load unchanged — their
+      // new chart series simply read as "no data" and the energy/CO₂ headline
+      // shows "—". No data transform is required; the bump is documentary.
+      version: 2,
       storage: createJSONStorage(() => tauriStorage),
     },
   ),

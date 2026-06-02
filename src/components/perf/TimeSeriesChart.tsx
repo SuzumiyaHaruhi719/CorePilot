@@ -1,19 +1,29 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import uPlot from "uplot";
+import "uplot/dist/uPlot.min.css";
 
 /**
- * GamePP-style time-series chart for a finished perf session: filled area +
- * smooth line, subtle grid, and avg / min / max reference lines with labels.
+ * GamePP-style time-series chart for a finished perf session, rendered with
+ * uPlot (canvas) for crisp lines and a shared, synced cursor.
  *
- * Built as a plain SVG drawn in real pixel space (measured via ResizeObserver)
- * so axis labels and reference text stay crisp and never stretch — unlike the
- * live `Sparkline` which uses preserveAspectRatio="none". Null samples are
- * skipped: the line bridges across gaps instead of dropping to zero.
+ * Visual: smooth spline line + a vertical area-gradient fill, a subtle grid, and
+ * dashed avg / min / max reference lines (drawn in a `draw` hook so they sit
+ * under the series). A null sample bridges across the gap (spanGaps) so the line
+ * never dives to zero.
+ *
+ * Interaction: every chart in a report joins the same `uPlot.sync(syncKey)`
+ * group, so hovering anywhere moves the vertical crosshair to the SAME timestamp
+ * on every chart at once. On cursor move the chart reports the hovered sample
+ * index up via `onHover`, letting the parent render one shared tooltip listing
+ * the full hardware status at that instant. Charts are uncontrolled re-mounts:
+ * the data/refs are fixed for a finished session, so the plot is built once and
+ * only resized on container width changes.
  */
 
 const isNum = (v: number | null | undefined): v is number =>
   typeof v === "number" && Number.isFinite(v);
 
-interface RefLine {
+export interface RefLine {
   value: number;
   /** Short prefix shown before the formatted value, e.g. "平均". */
   label: string;
@@ -22,178 +32,231 @@ interface RefLine {
 }
 
 interface TimeSeriesChartProps {
-  /** y-values in sample order; null points are skipped. */
+  /** x-axis values: elapsed seconds per sample (shared across all charts). */
+  timesSec: number[];
+  /** y-values in sample order; null points are bridged. */
   values: Array<number | null>;
   /** Accent hue (oklch) used for line + area gradient. */
   hue: number;
-  /** Format a y value for the reference labels. */
+  /** Format a y value for the reference labels + axis ticks. */
   format: (v: number) => string;
   /** Horizontal reference lines (avg / min / max). */
   refLines?: RefLine[];
-  /** Pin the y-axis floor to 0 (FPS); frame-time auto-fits its own range. */
+  /** Pin the y-axis floor to 0 (FPS); other metrics auto-fit their range. */
   zeroFloor?: boolean;
   height?: number;
+  /** Cursor-sync group key — identical across all charts in one report. */
+  syncKey: string;
+  /** Reports the hovered sample index (null when the cursor leaves the plot). */
+  onHover: (idx: number | null) => void;
 }
 
-const PAD = { top: 12, right: 52, bottom: 6, left: 8 } as const;
-const GRID_ROWS = 4;
+const PAD_RIGHT = 56;
+// uPlot paints axes/grid/points to <canvas>, which can't resolve CSS custom
+// properties (var(--…)) — these must be literal color/font strings. They mirror
+// the design tokens (--color-dim, --color-line, --font-mono) by hand.
+const AXIS_STROKE = "oklch(54% 0.018 265)";
+const GRID_STROKE = "oklch(100% 0 0 / 0.06)";
+const POINT_FILL = "oklch(15% 0.014 265)";
+const AXIS_FONT = '10px "Cascadia Mono", ui-monospace, monospace';
 
-/** Catmull-Rom → cubic Bézier path for a smooth line through the points. */
-function smoothPath(pts: Array<{ x: number; y: number }>): string {
-  if (pts.length === 0) return "";
-  if (pts.length === 1) return `M ${pts[0].x} ${pts[0].y}`;
-  let d = `M ${pts[0].x.toFixed(2)} ${pts[0].y.toFixed(2)}`;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const p0 = pts[i - 1] ?? pts[i];
-    const p1 = pts[i];
-    const p2 = pts[i + 1];
-    const p3 = pts[i + 2] ?? p2;
-    const c1x = p1.x + (p2.x - p0.x) / 6;
-    const c1y = p1.y + (p2.y - p0.y) / 6;
-    const c2x = p2.x - (p3.x - p1.x) / 6;
-    const c2y = p2.y - (p3.y - p1.y) / 6;
-    d += ` C ${c1x.toFixed(2)} ${c1y.toFixed(2)}, ${c2x.toFixed(2)} ${c2y.toFixed(2)}, ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`;
-  }
-  return d;
+/** Resolve an oklch line color and a low-alpha fill stop for the gradient. */
+function colors(hue: number): { line: string; fill: string } {
+  return {
+    line: `oklch(74% 0.15 ${hue})`,
+    fill: `oklch(74% 0.15 ${hue})`,
+  };
 }
 
 export function TimeSeriesChart({
+  timesSec,
   values,
   hue,
   format,
   refLines = [],
   zeroFloor = false,
   height = 168,
+  syncKey,
+  onHover,
 }: TimeSeriesChartProps) {
-  const id = useId();
   const wrapRef = useRef<HTMLDivElement>(null);
+  const plotRef = useRef<uPlot | null>(null);
   const [width, setWidth] = useState(640);
 
+  // Keep the latest onHover in a ref so the (once-built) plot's hook always
+  // calls the current callback without forcing a rebuild.
+  const onHoverRef = useRef(onHover);
+  useEffect(() => {
+    onHoverRef.current = onHover;
+  }, [onHover]);
+
+  // Width tracking — uPlot needs an explicit pixel size.
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width;
-      if (w && w > 0) setWidth(w);
+      if (w && w > 0) setWidth(Math.round(w));
     });
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
 
-  const color = `oklch(74% 0.15 ${hue})`;
-  const nums = values.filter(isNum);
-  const hasData = nums.length > 0;
+  // Build the plot once per data identity. For a finished session the inputs are
+  // stable, so this runs on mount / when the selected session changes.
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const { line, fill } = colors(hue);
+    const hasData = values.some(isNum);
 
-  // y-domain: pad ~8% headroom; floor at 0 for FPS, fit-to-data for frame time.
-  const dataMin = hasData ? Math.min(...nums) : 0;
-  const dataMax = hasData ? Math.max(...nums) : 1;
-  const refVals = refLines.map((r) => r.value).filter(isNum);
-  const lo0 = Math.min(dataMin, ...refVals);
-  const hi0 = Math.max(dataMax, ...refVals);
-  const span0 = hi0 - lo0 || 1;
-  const yMin = zeroFloor ? 0 : Math.max(0, lo0 - span0 * 0.08);
-  const yMax = hi0 + span0 * 0.08 || 1;
-  const ySpan = yMax - yMin || 1;
+    // Cache the latest cursor x-index in CSS px for the ref-line + tooltip hook.
+    const refVals = refLines.map((r) => r.value).filter(isNum);
 
-  const innerW = Math.max(1, width - PAD.left - PAD.right);
-  const innerH = Math.max(1, height - PAD.top - PAD.bottom);
-  const n = values.length;
+    const data: uPlot.AlignedData = [
+      Float64Array.from(timesSec),
+      Float64Array.from(values.map((v) => (isNum(v) ? v : NaN))),
+    ];
 
-  const xAt = (i: number) => PAD.left + (n > 1 ? (i / (n - 1)) * innerW : innerW / 2);
-  const yAt = (v: number) => PAD.top + (1 - (v - yMin) / ySpan) * innerH;
+    const opts: uPlot.Options = {
+      width,
+      height,
+      // Compact: no built-in legend/title; we render our own shared tooltip.
+      legend: { show: false },
+      padding: [10, PAD_RIGHT, 2, 0],
+      cursor: {
+        // Vertical crosshair only; sync x across the whole report.
+        x: true,
+        y: false,
+        points: { show: true, size: 6, width: 2, stroke: line, fill: POINT_FILL },
+        sync: { key: syncKey, setSeries: false },
+        // Bridge nulls when scanning for the closest hover index.
+        hover: { skip: [undefined, NaN] },
+      },
+      scales: {
+        x: { time: false },
+        y: zeroFloor
+          ? { range: (_u, _min, max) => [0, max <= 0 ? 1 : max * 1.08] }
+          : {
+              range: (_u, min, max) => {
+                const lo = Math.min(min, ...refVals);
+                const hi = Math.max(max, ...refVals);
+                const span = hi - lo || 1;
+                return [Math.max(0, lo - span * 0.08), hi + span * 0.08];
+              },
+            },
+      },
+      axes: [
+        {
+          stroke: AXIS_STROKE,
+          grid: { show: false },
+          ticks: { show: false },
+          font: AXIS_FONT,
+          size: 22,
+          // Elapsed seconds → m:ss tick labels.
+          values: (_u, splits) =>
+            splits.map((s) => {
+              const t = Math.max(0, Math.round(s));
+              return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`;
+            }),
+        },
+        {
+          stroke: AXIS_STROKE,
+          side: 1,
+          grid: { stroke: GRID_STROKE, width: 1 },
+          ticks: { show: false },
+          font: AXIS_FONT,
+          size: PAD_RIGHT,
+          values: (_u, splits) => splits.map((v) => format(v)),
+        },
+      ],
+      series: [
+        {},
+        {
+          label: "value",
+          stroke: line,
+          width: 1.8,
+          fill: (u) => {
+            const ctx = u.ctx;
+            const grad = ctx.createLinearGradient(0, u.bbox.top, 0, u.bbox.top + u.bbox.height);
+            grad.addColorStop(0, withAlpha(fill, 0.34));
+            grad.addColorStop(1, withAlpha(fill, 0));
+            return grad;
+          },
+          paths: uPlot.paths.spline ? uPlot.paths.spline() : undefined,
+          spanGaps: true,
+          points: { show: false },
+        },
+      ],
+      hooks: {
+        // Dashed avg/min/max reference lines, drawn under the series stroke.
+        drawClear: [
+          (u) => {
+            if (!hasData) return;
+            const ctx = u.ctx;
+            const { left, width: w } = u.bbox;
+            ctx.save();
+            ctx.setLineDash([3, 3]);
+            ctx.lineWidth = 1 * uPlot.pxRatio;
+            for (const r of refLines) {
+              if (!isNum(r.value)) continue;
+              const y = Math.round(u.valToPos(r.value, "y", true));
+              ctx.strokeStyle = r.muted ? "oklch(70% 0.02 265 / 0.5)" : withAlpha(line, 0.85);
+              ctx.beginPath();
+              ctx.moveTo(left, y);
+              ctx.lineTo(left + w, y);
+              ctx.stroke();
+            }
+            ctx.restore();
+          },
+        ],
+        // Report the hovered sample index up to the parent for the shared tooltip.
+        setCursor: [
+          (u) => {
+            const idx = u.cursor.idx ?? null;
+            onHoverRef.current(idx);
+          },
+        ],
+      },
+    };
 
-  // Build the smooth line over only the non-null points (bridges gaps).
-  const pts = values
-    .map((v, i) => (isNum(v) ? { x: xAt(i), y: yAt(v) } : null))
-    .filter((p): p is { x: number; y: number } => p !== null);
-  const linePath = smoothPath(pts);
-  const areaPath =
-    pts.length > 0
-      ? `${linePath} L ${pts[pts.length - 1].x.toFixed(2)} ${(PAD.top + innerH).toFixed(2)} L ${pts[0].x.toFixed(2)} ${(PAD.top + innerH).toFixed(2)} Z`
-      : "";
+    const plot = new uPlot(opts, data, el);
+    plotRef.current = plot;
 
-  const gridYs = Array.from({ length: GRID_ROWS + 1 }, (_, i) => PAD.top + (i / GRID_ROWS) * innerH);
+    // Clear the shared tooltip when the pointer leaves this plot.
+    const over = plot.over;
+    const onLeave = () => onHoverRef.current(null);
+    over.addEventListener("mouseleave", onLeave);
 
+    return () => {
+      over.removeEventListener("mouseleave", onLeave);
+      plot.destroy();
+      plotRef.current = null;
+    };
+    // Rebuild only when the underlying data identity changes (finished session).
+    // width is applied via setSize below, not a rebuild.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timesSec, values, hue, zeroFloor, syncKey]);
+
+  // Apply width changes without tearing down the plot.
+  useEffect(() => {
+    if (plotRef.current) plotRef.current.setSize({ width, height });
+  }, [width, height]);
+
+  const hasData = values.some(isNum);
   return (
-    <div ref={wrapRef} className="w-full">
-      <svg width={width} height={height} className="block overflow-visible">
-        <defs>
-          <linearGradient id={`fill-${id}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity="0.34" />
-            <stop offset="100%" stopColor={color} stopOpacity="0" />
-          </linearGradient>
-        </defs>
-
-        {/* horizontal grid */}
-        {gridYs.map((y, i) => (
-          <line
-            key={i}
-            x1={PAD.left}
-            x2={width - PAD.right}
-            y1={y}
-            y2={y}
-            stroke="oklch(100% 0 0 / 0.06)"
-            strokeWidth={1}
-          />
-        ))}
-
-        {hasData && (
-          <>
-            <path d={areaPath} fill={`url(#fill-${id})`} />
-            <path
-              d={linePath}
-              fill="none"
-              stroke={color}
-              strokeWidth={1.8}
-              strokeLinejoin="round"
-              strokeLinecap="round"
-              style={{ filter: `drop-shadow(0 0 4px ${color})` }}
-            />
-          </>
-        )}
-
-        {/* reference lines (avg / min / max) */}
-        {hasData &&
-          refLines.filter((r) => isNum(r.value)).map((r, i) => {
-            const y = yAt(r.value);
-            const stroke = r.muted ? "oklch(70% 0.02 265 / 0.5)" : color;
-            return (
-              <g key={i}>
-                <line
-                  x1={PAD.left}
-                  x2={width - PAD.right}
-                  y1={y}
-                  y2={y}
-                  stroke={stroke}
-                  strokeWidth={1}
-                  strokeDasharray="3 3"
-                  opacity={r.muted ? 0.7 : 0.9}
-                />
-                <text
-                  x={width - PAD.right + 6}
-                  y={y + 3.5}
-                  fontSize={10}
-                  className="nums"
-                  fill={r.muted ? "var(--color-dim)" : "var(--color-muted)"}
-                >
-                  {r.label ? `${r.label} ${format(r.value)}` : format(r.value)}
-                </text>
-              </g>
-            );
-          })}
-
-        {!hasData && (
-          <text
-            x={width / 2}
-            y={height / 2}
-            textAnchor="middle"
-            fontSize={11}
-            fill="var(--color-dim)"
-          >
-            无数据
-          </text>
-        )}
-      </svg>
+    <div ref={wrapRef} className="relative w-full" style={{ height }}>
+      {!hasData && (
+        <div className="absolute inset-0 grid place-items-center text-[11px] text-dim">
+          无数据
+        </div>
+      )}
     </div>
   );
+}
+
+/** Replace the alpha of an `oklch(L C H)` string, producing `oklch(L C H / a)`. */
+function withAlpha(oklch: string, alpha: number): string {
+  const inner = oklch.slice(oklch.indexOf("(") + 1, oklch.lastIndexOf(")")).trim();
+  return `oklch(${inner} / ${alpha})`;
 }

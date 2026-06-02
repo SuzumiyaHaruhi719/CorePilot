@@ -5,7 +5,7 @@ import { useMetricsHistory } from "../../hooks/useMetricsHistory";
 import { useSensors } from "../../hooks/useSensors";
 import { cn } from "../../lib/cn";
 import { formatBytes } from "../../lib/format";
-import { api, type CpuTopology, type Overview } from "../../lib/ipc";
+import { api, type CpuTopology, type GpuOcInfo, type Overview } from "../../lib/ipc";
 import { useSettings, type PerfCard } from "../../store/settings";
 import { CoreGraphs } from "../charts/CoreGraphs";
 import { GpuDetail } from "./GpuDetail";
@@ -23,6 +23,13 @@ const CARDS: { id: PerfCard; label: string }[] = [
 
 const fmtRate = (v: number | null | undefined) => (v == null ? "—" : `${formatBytes(v)}/s`);
 const fmtPct = (v: number | null | undefined) => (v == null ? "—" : `${v.toFixed(1)}%`);
+const fmtTemp = (v: number | null | undefined) => (v == null ? "—" : `${v.toFixed(0)} °C`);
+const fmtWatts = (v: number | null | undefined) => (v == null ? "—" : `${v.toFixed(0)} W`);
+/** Live CPU clock: shown in GHz once it crosses 1 GHz, otherwise MHz. */
+const fmtCpuClock = (mhz: number | null | undefined) =>
+  mhz == null ? "—" : mhz >= 1000 ? `${(mhz / 1000).toFixed(2)} GHz` : `${Math.round(mhz)} MHz`;
+/** GPU core/memory clock — always MHz, matching the GPU detail panel. */
+const fmtMhz = (mhz: number | null | undefined) => (mhz == null ? "—" : `${Math.round(mhz)} MHz`);
 
 function Card({ children }: { children: ReactNode }) {
   return (
@@ -64,13 +71,34 @@ export function PerfView() {
   const { latest: sensors, gpuHist, diskHist, netHist } = useSensors(60);
   const [topo, setTopo] = useState<CpuTopology | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
+  const [gpuOc, setGpuOc] = useState<GpuOcInfo | null>(null);
   const perfCards = useSettings((s) => s.perfCards);
   const togglePerfCard = useSettings((s) => s.togglePerfCard);
+  const pollMs = useSettings((s) => s.pollMs);
 
   useEffect(() => {
     api.getTopology().then(setTopo).catch(() => undefined);
     api.getOverview().then(setOverview).catch(() => undefined);
   }, []);
+
+  // NVML GPU clocks/temperature for the GPU card (graphicsClock isn't in Sensors).
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const info = await api.gpuOcInfo();
+        if (alive) setGpuOc(info);
+      } catch {
+        /* NVML may be unavailable — the card falls back to Sensors. */
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), Math.max(pollMs, 1000));
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [pollMs]);
 
   const cpuNow = latest?.cpuOverall ?? 0;
   const memUsed = latest?.memUsed ?? 0;
@@ -78,6 +106,10 @@ export function PerfView() {
   const memNowPct = memTotal > 0 ? (memUsed / memTotal) * 100 : 0;
   const vramPct =
     sensors?.vramTotal && sensors.vramUsed ? (sensors.vramUsed / sensors.vramTotal) * 100 : null;
+  // Prefer NVML readings; fall back to the generic sensor when NVML is absent.
+  const gpuOcLive = gpuOc?.available ? gpuOc : null;
+  const gpuTemp = gpuOcLive?.temperature ?? sensors?.gpuTemp ?? null;
+  const gpuCoreClock = gpuOcLive?.graphicsClock ?? null;
 
   return (
     <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
@@ -115,6 +147,9 @@ export function PerfView() {
               <Sparkline data={cpu} max={100} hue={280} height={84} />
             </div>
             <div className="grid grid-cols-3 gap-2">
+              <Stat label="频率" value={fmtCpuClock(sensors?.cpuClock)} />
+              <Stat label="温度" value={fmtTemp(sensors?.cpuTemp)} />
+              <Stat label="功耗" value={fmtWatts(sensors?.cpuPower)} />
               <Stat label="核心" value={overview ? `${overview.physicalCores}` : "—"} />
               <Stat label="逻辑处理器" value={overview ? `${overview.logicalCpus}` : "—"} />
               {/* V-Cache is X3D-only; on other CPUs show SMT status instead. */}
@@ -167,6 +202,9 @@ export function PerfView() {
               <Sparkline data={gpuHist} max={100} hue={184} height={84} />
             </div>
             <div className="grid grid-cols-3 gap-2">
+              <Stat label="核心" value={fmtMhz(gpuCoreClock)} />
+              <Stat label="温度" value={fmtTemp(gpuTemp)} />
+              <Stat label="功耗" value={fmtWatts(sensors?.gpuPower)} />
               <Stat label="显存已用" value={sensors?.vramUsed != null ? formatBytes(sensors.vramUsed) : "—"} />
               <Stat label="显存总量" value={sensors?.vramTotal != null ? formatBytes(sensors.vramTotal) : "—"} />
               <Stat label="显存占用" value={fmtPct(vramPct)} />

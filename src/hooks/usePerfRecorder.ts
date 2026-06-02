@@ -17,8 +17,10 @@ import {
 import { useSettings } from "../store/settings";
 import { useOsdTargets } from "../store/osd";
 
-/** Sampling cadence — one ~1 Hz tick per second while a game is foregrounded. */
-const SAMPLE_INTERVAL_MS = 1000;
+/** Sampling cadence — ~5 Hz (every 200 ms) while a game is foregrounded, for
+ *  GamePP-grade resolution. Energy integration uses each sample's real timestamp
+ *  so the rate can change without skewing the kWh/CO₂ totals. */
+const SAMPLE_INTERVAL_MS = 200;
 
 /** Live recording state, held in a ref so ticks never trigger re-renders. */
 interface ActiveSession {
@@ -36,9 +38,10 @@ interface ActiveSession {
 /**
  * Per-game performance session recorder.
  *
- * A single ~1 Hz effect that, while a detected game holds the foreground, samples
+ * A single ~5 Hz effect that, while a detected game holds the foreground, samples
  * the same metrics the OSD reads (FPS / frame time, CPU & GPU load / temp / power
- * / clock, VRAM & RAM usage) into an in-memory buffer. When the tracked game's
+ * / clock, VRAM & RAM usage, GPU mem-clock/fan, disk & net) into an in-memory
+ * buffer. When the tracked game's
  * process exits — or the user switches to a different game — the buffered session
  * is summarized and persisted to history (store/perfHistory) for the Monitor → 历史
  * report. Alt-tabbing away from a still-running game pauses sampling without
@@ -130,6 +133,14 @@ export function usePerfRecorder(): void {
         gpuClock: d.gpu?.graphicsClock ?? null,
         vramLoad: vramTotal > 0 ? (vramUsed / vramTotal) * 100 : null,
         memLoad: memTotal > 0 ? (memUsed / memTotal) * 100 : null,
+        gpuMemClock: d.gpu?.memClock ?? null,
+        gpuMemCtrlLoad: d.gpu?.utilizationMem ?? null,
+        gpuFan: d.gpu?.fanSpeedPct ?? null,
+        diskLoad: d.sensors?.diskPct ?? null,
+        diskRead: d.sensors?.diskRead ?? null,
+        diskWrite: d.sensors?.diskWrite ?? null,
+        netDown: d.sensors?.netDown ?? null,
+        netUp: d.sensors?.netUp ?? null,
       };
       session.samples.push(s);
     };
