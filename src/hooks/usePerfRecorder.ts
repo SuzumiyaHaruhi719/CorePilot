@@ -15,6 +15,7 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import { useSettings } from "../store/settings";
+import { useOsdTargets } from "../store/osd";
 
 /** Sampling cadence — one ~1 Hz tick per second while a game is foregrounded. */
 const SAMPLE_INTERVAL_MS = 1000;
@@ -163,8 +164,13 @@ export function usePerfRecorder(): void {
           }
         }
 
-        // Start: a game is foregrounded and we're not already recording it.
-        if (fg.isGame && fg.exe) {
+        // Start: record when the foreground app is a detected game OR is on the
+        // OSD whitelist (whitelisting force-records, mirroring force-show).
+        const exeLc = fg.exe ? fg.exe.trim().toLowerCase() : null;
+        const whitelisted =
+          !!exeLc &&
+          useOsdTargets.getState().targets.some((t) => t.list === "white" && t.name === exeLc);
+        if ((fg.isGame || whitelisted) && fg.exe) {
           const exe = fg.exe.toLowerCase();
           const existing = active.current;
           if (!existing || existing.exe !== exe) {
