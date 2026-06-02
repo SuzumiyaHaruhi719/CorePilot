@@ -74,6 +74,10 @@ export interface ProcInfo {
   description?: string | null;
   /** Whether the process's CPU affinity can be set (false for protected/system processes). */
   settable?: boolean;
+  /** Parent process PID (0 when unresolved). Used to collapse children under their app. */
+  parentPid?: number;
+  /** Full path to the executable (e.g. "C:\\…\\chrome.exe"); used for the per-exe icon. */
+  exePath?: string | null;
   /**
    * Synthetic placeholder for a group member that has been added but is not
    * currently running. Front-end only — never sent by the backend. Such rows
@@ -234,6 +238,7 @@ export const api = {
     const raw = await invoke<RawProcInfo[]>("list_processes");
     return raw.map((p) => ({ ...p, affinity: BigInt(p.affinity) }));
   },
+  processIcon: (exePath: string) => invoke<string | null>("process_icon", { exePath }),
   gpuEngines: () => invoke<Record<string, number>>("gpu_engine_loads"),
   getMetrics: () => invoke<Metrics>("get_metrics"),
   setAffinity: (pid: number, mask: bigint) =>

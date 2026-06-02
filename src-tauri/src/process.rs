@@ -72,6 +72,15 @@ pub struct ProcInfo {
     /// processes (System, Registry, Secure System, some AV) are not settable;
     /// the core-assignment view hides those.
     pub settable: bool,
+    /// PID of this process's parent, or 0 when sysinfo can't resolve one (e.g.
+    /// the parent has exited). Used by the Task-Manager process view to collapse
+    /// child processes under their parent app.
+    pub parent_pid: u32,
+    /// Full path to the process executable (e.g. `C:\\…\\chrome.exe`), or `None`
+    /// when inaccessible (protected/system processes). The Task-Manager view
+    /// passes this to `process_icon` to fetch the real per-exe icon, and uses it
+    /// to key icon caching. Serialized as `exePath`.
+    pub exe_path: Option<String>,
 }
 
 /// PDH success return code (`ERROR_SUCCESS`).
@@ -488,6 +497,16 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
             // cached user/platform.
             let details = process_details(id);
             live_pids.insert(id);
+            let exe = process.exe();
+            // Full exe path (used for both the friendly description and the
+            // per-exe icon lookup on the frontend). `None` when inaccessible.
+            let exe_path = exe.and_then(|p| {
+                if p.as_os_str().is_empty() {
+                    None
+                } else {
+                    Some(p.to_string_lossy().to_string())
+                }
+            });
             ProcInfo {
                 pid: id,
                 name: process.name().to_string_lossy().to_string(),
@@ -503,8 +522,10 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
                 platform: details.platform,
                 gpu_engine,
                 gpu_adapter,
-                description: description_for(process.exe()),
+                description: description_for(exe),
                 settable: settable_for(id),
+                parent_pid: process.parent().map(|p| p.as_u32()).unwrap_or(0),
+                exe_path,
             }
         })
         .collect();

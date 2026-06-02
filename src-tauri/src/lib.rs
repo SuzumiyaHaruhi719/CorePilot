@@ -9,6 +9,7 @@ pub mod optimize;
 pub mod osd;
 pub mod overlay;
 pub mod process;
+pub mod process_icon;
 pub mod sensors;
 pub mod serde_u64;
 pub mod state;
@@ -93,6 +94,7 @@ pub fn run() {
             commands::get_topology,
             commands::get_overview,
             commands::list_processes,
+            process_icon::process_icon,
             process::gpu_engine_loads,
             commands::get_metrics,
             commands::set_affinity,
