@@ -3,11 +3,13 @@ pub mod commands;
 pub mod error;
 pub mod fps;
 pub mod gpu;
+pub mod inject;
 pub mod netfix;
 pub mod nvapi_oc;
 pub mod optimize;
 pub mod osd;
 pub mod overlay;
+pub mod overlay_inject;
 pub mod process;
 pub mod process_icon;
 pub mod sensors;
@@ -74,6 +76,12 @@ pub fn run() {
             // The overlay parks itself off-screen when there is nothing to show.
             let _ = osd::osd_set_visible(app.handle().clone(), true);
 
+            // Start the in-game OSD sampler. This creates the ONE long-lived
+            // shared-memory writer (kept alive for the whole app lifetime so the
+            // injected overlay DLL never loses the mapping) and loops at ~3 Hz,
+            // publishing metrics while a game is attached and idling otherwise.
+            overlay_inject::start_sampler(app.handle().clone());
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -125,6 +133,9 @@ pub fn run() {
             fps::foreground_process,
             fps::foreground_info,
             fps::pid_alive,
+            overlay_inject::overlay_attach,
+            overlay_inject::overlay_detach,
+            overlay_inject::overlay_status,
             tray::set_close_to_tray,
         ])
         .run(tauri::generate_context!())

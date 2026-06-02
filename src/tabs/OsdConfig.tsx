@@ -1,6 +1,16 @@
-import { Gamepad2, ListPlus, MonitorPlay, Plus, RotateCcw, Search, Trash2 } from "lucide-react";
+import {
+  Gamepad2,
+  ListPlus,
+  MonitorPlay,
+  Plus,
+  RotateCcw,
+  Search,
+  ShieldCheck,
+  Syringe,
+  Trash2,
+} from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { Modal } from "../components/ui/Modal";
 import { Segmented } from "../components/ui/Segmented";
@@ -8,12 +18,13 @@ import { Slider } from "../components/ui/Slider";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
-import { api, type ProcInfo } from "../lib/ipc";
+import { api, type OverlayStatus, type ProcInfo } from "../lib/ipc";
 import {
   OSD_CATEGORIES,
   OSD_METRICS,
   fetchOsdData,
   freePosStyle,
+  layoutFlagsFromMetrics,
   type OsdCategory,
   type OsdData,
 } from "../lib/osd";
@@ -282,6 +293,9 @@ export function OsdConfig() {
           </div>
         </div>
 
+        {/* In-frame injection overlay (true fullscreen) + anti-cheat-safe hybrid */}
+        <InjectionOverlaySection metrics={previewCfg.metrics} />
+
         {/* Per-game white / black list */}
         <div className="glass hairline rounded-2xl p-4">
           <div className="mb-3 flex items-center gap-2">
@@ -525,6 +539,176 @@ export function OsdConfig() {
         </div>
       </Modal>
     </>
+  );
+}
+
+interface InjectionOverlaySectionProps {
+  /** The currently-previewed metric selection — drives which rows the injected
+   *  overlay draws (mapped to `layout_flags`). */
+  metrics: readonly string[];
+}
+
+/** How often we re-check the foreground app + (re)attach while injection is on. */
+const INJECT_POLL_MS = 1500;
+
+/**
+ * "游戏内叠加（注入）" — the MSI-Afterburner-style in-frame overlay that draws
+ * inside the game's own back buffer (so it works in true exclusive fullscreen,
+ * unlike the window overlay). It carries the SAFE hybrid: when the foreground
+ * game is anti-cheat-protected or uses an API we can't hook, the backend refuses
+ * to inject and transparently falls back to the window overlay — this section's
+ * status line explains exactly what happened, so a user never gets silently
+ * nothing (or, worse, a ban).
+ */
+function InjectionOverlaySection({ metrics }: InjectionOverlaySectionProps) {
+  const [enabled, setEnabled] = useState(false);
+  const [status, setStatus] = useState<OverlayStatus | null>(null);
+  // PID we currently have the injected overlay attached to (0 = none). A ref so
+  // the poll loop can detach the previous game when the foreground changes
+  // without re-subscribing the interval on every attach.
+  const attachedPid = useRef(0);
+
+  // Keep the latest layout flags in a ref so the steady-state poll uses the
+  // user's current metric selection without restarting the interval.
+  const layoutFlags = useMemo(() => layoutFlagsFromMetrics(metrics), [metrics]);
+  const flagsRef = useRef(layoutFlags);
+  flagsRef.current = layoutFlags;
+
+  const detachCurrent = useCallback(async () => {
+    const pid = attachedPid.current;
+    if (pid !== 0) {
+      attachedPid.current = 0;
+      await api.overlayDetach(pid).catch(() => undefined);
+    }
+  }, []);
+
+  // While enabled: poll the foreground app; inject when it's an injectable game
+  // (detaching any previously-attached game first), else show the explanatory
+  // status (the backend has already fallen back to the window overlay).
+  useEffect(() => {
+    if (!enabled) {
+      // Turning off: detach whatever we attached.
+      void detachCurrent();
+      setStatus(null);
+      return;
+    }
+    let alive = true;
+    const tick = async () => {
+      try {
+        const st = await api.overlayStatus();
+        if (!alive) return;
+        if (st.mode === "inject") {
+          // Re-attach when the foreground game changed; (re)attaching the same
+          // pid is cheap and keeps the layout flags current.
+          if (attachedPid.current !== st.target.pid) {
+            if (attachedPid.current !== 0) await detachCurrent();
+            const attached = await api.overlayAttach(st.target.pid, flagsRef.current);
+            attachedPid.current = st.target.pid;
+            if (alive) setStatus(attached);
+          } else {
+            // Refresh the layout flags on the live target.
+            const attached = await api.overlayAttach(st.target.pid, flagsRef.current);
+            if (alive) setStatus(attached);
+          }
+        } else {
+          // Not injectable (anti-cheat / unsupported / no game): drop any prior
+          // attach and surface the reason. The backend already chose the window
+          // fallback when appropriate.
+          if (attachedPid.current !== 0) await detachCurrent();
+          if (alive) setStatus(st);
+        }
+      } catch {
+        if (alive) setStatus(null);
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), INJECT_POLL_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [enabled, detachCurrent]);
+
+  // Detach on unmount (leaving the tab) so we never leave a stale injection.
+  useEffect(() => () => void detachCurrent(), [detachCurrent]);
+
+  return (
+    <div className="glass hairline rounded-2xl p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Syringe size={15} className="text-accent-bright" />
+          <div>
+            <div className="text-[13.5px] font-semibold text-ink">游戏内叠加（注入）</div>
+            <div className="text-[12px] text-dim">
+              注入式叠加，绘制在游戏画面内 — 支持独占全屏；自动检测反作弊并避让
+            </div>
+          </div>
+        </div>
+        <Toggle checked={enabled} onChange={setEnabled} />
+      </div>
+
+      {/* Anti-cheat safety note — always visible so the guarantee is explicit. */}
+      <div className="mb-3 flex items-start gap-2 rounded-lg border border-line/60 bg-surface2/50 px-3 py-2">
+        <ShieldCheck size={14} className="mt-0.5 shrink-0 text-ok" />
+        <span className="text-[11.5px] leading-relaxed text-dim">
+          检测到 EasyAntiCheat / BattlEye / Vanguard 等反作弊时
+          <span className="text-muted">绝不注入</span>
+          ，自动改用窗口叠加，避免误判封号。
+        </span>
+      </div>
+
+      {/* Live status line for the foreground game. */}
+      <InjectionStatusLine enabled={enabled} status={status} />
+    </div>
+  );
+}
+
+interface InjectionStatusLineProps {
+  enabled: boolean;
+  status: OverlayStatus | null;
+}
+
+/** The live status pill: colour + icon follow the resolved overlay mode so the
+ *  user instantly sees "injected", "fell back to window (anti-cheat)", etc. */
+function InjectionStatusLine({ enabled, status }: InjectionStatusLineProps) {
+  if (!enabled) {
+    return (
+      <div className="rounded-lg border border-dashed border-line/70 px-3 py-2.5 text-center text-[12px] text-dim">
+        开启后将自动叠加到前台游戏
+      </div>
+    );
+  }
+  if (!status) {
+    return (
+      <div className="rounded-lg border border-line bg-surface2 px-3 py-2.5 text-[12px] text-dim">
+        正在检测前台游戏…
+      </div>
+    );
+  }
+  // Map mode → accent colour. Inject = success; window fallback = warning amber;
+  // none = neutral.
+  const tone =
+    status.mode === "inject"
+      ? "border-ok/40 bg-ok/10 text-ok"
+      : status.mode === "window"
+        ? "border-warn/40 bg-warn/10 text-warn"
+        : "border-line bg-surface2 text-muted";
+  return (
+    <div className={cn("flex items-center gap-2 rounded-lg border px-3 py-2.5 text-[12.5px]", tone)}>
+      {status.mode === "inject" ? (
+        <Syringe size={14} className="shrink-0" />
+      ) : status.mode === "window" ? (
+        <MonitorPlay size={14} className="shrink-0" />
+      ) : (
+        <Gamepad2 size={14} className="shrink-0" />
+      )}
+      <span className="flex-1">{status.reason}</span>
+      {status.target.pid !== 0 && (
+        <span className="shrink-0 rounded bg-black/20 px-1.5 py-0.5 text-[10.5px] opacity-80">
+          PID {status.target.pid}
+        </span>
+      )}
+    </div>
   );
 }
 

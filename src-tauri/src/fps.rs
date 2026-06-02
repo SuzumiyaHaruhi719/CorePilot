@@ -213,6 +213,13 @@ pub fn foreground_fps() -> Option<f64> {
     fps_for(foreground_pid()?)
 }
 
+/// PID of the current foreground window's process (0 when there is none). Public
+/// wrapper over the internal `foreground_pid` for the overlay-injector status
+/// command, which targets the foreground game by default.
+pub fn foreground_pid_public() -> u32 {
+    foreground_pid().unwrap_or(0)
+}
+
 /// Tauri command: best-effort foreground-window FPS (null when unavailable).
 #[tauri::command]
 pub fn osd_fps() -> Option<f64> {
@@ -311,6 +318,17 @@ pub fn osd_fps_stats() -> FpsStats {
         Some(pid) => stats_for(pid),
         None => FpsStats::default(),
     }
+}
+
+/// Frame-pacing stats for a *specific* `pid` (not necessarily the foreground).
+/// Used by the injection-overlay sampler, which targets the injected game's PID
+/// directly rather than whatever currently holds the foreground. All-`None` when
+/// that PID has no recent present events.
+pub fn stats_for_pid(pid: u32) -> FpsStats {
+    if pid == 0 {
+        return FpsStats::default();
+    }
+    stats_for(pid)
 }
 
 /// Resolve a PID's executable file name (e.g. `"cyberpunk2077.exe"`), lowercased.

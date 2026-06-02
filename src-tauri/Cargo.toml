@@ -4,6 +4,15 @@ members = [".", "crates/corepilot-osd-ipc", "crates/corepilot-overlay"]
 # vendored MinHook via a C build); keep it OUT of the default `tauri dev`/`build`
 # so normal builds stay fast. Build it explicitly:
 #   cargo build -p corepilot-overlay --release
+#
+# BUILD ORDER (required): build the overlay DLL FIRST, then the app. The app's
+# `tauri.conf.json` lists `target/release/corepilot_overlay.dll` as a bundle
+# resource, and `tauri-build` validates that resource path at compile time — so a
+# plain `cargo build` (not just `tauri build`) fails until the DLL exists. The
+# canonical sequence is:
+#   1) cargo build -p corepilot-overlay --release   # produces the injected DLL
+#   2) cargo build                                   # app (sees the DLL resource)
+#   3) npm run build                                 # frontend (tsc && vite)
 default-members = [".", "crates/corepilot-osd-ipc"]
 resolver = "2"
 
@@ -34,7 +43,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_ProcessStatus", "Win32_System_Memory", "Win32_System_Power", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Performance", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Services", "Win32_System_Registry", "Win32_Storage_FileSystem"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_ProcessStatus", "Win32_System_Memory", "Win32_System_Power", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Performance", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Services", "Win32_System_Registry", "Win32_Storage_FileSystem"] }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 sysinfo = "0.39.3"
@@ -53,4 +62,7 @@ nvapi = "0.1.4"
 ferrisetw = "1"
 png = "0.17"
 base64 = "0.22"
+# Shared-memory contract with the injected overlay DLL. The app is the *writer*:
+# the sampler thread publishes metrics into the named block this crate maps.
+corepilot-osd-ipc = { path = "crates/corepilot-osd-ipc" }
 

@@ -277,6 +277,15 @@ export const api = {
   foregroundProcess: () => invoke<string | null>("foreground_process"),
   foregroundInfo: () => invoke<ForegroundInfo>("foreground_info"),
   pidAlive: (pid: number) => invoke<boolean>("pid_alive", { pid }),
+  /** Attach the in-game (injection) overlay to `pid` — or, when the target is
+   *  anti-cheat-protected / unsupported, transparently fall back to the window
+   *  overlay. `layoutFlags` is the `show::*` bitfield of metric rows to draw. */
+  overlayAttach: (pid: number, layoutFlags?: number) =>
+    invoke<OverlayStatus>("overlay_attach", { pid, layoutFlags }),
+  /** Detach (eject) the injected overlay from `pid`; idempotent. */
+  overlayDetach: (pid: number) => invoke<void>("overlay_detach", { pid }),
+  /** Overlay status for `pid`, or the foreground game when omitted. */
+  overlayStatus: (pid?: number) => invoke<OverlayStatus>("overlay_status", { pid: pid ?? null }),
   setCloseToTray: (enabled: boolean) => invoke<void>("set_close_to_tray", { enabled }),
 };
 
@@ -299,4 +308,35 @@ export interface ForegroundInfo {
   pid: number;
   /** True when the foreground app is rendering frames (has recent presents). */
   isGame: boolean;
+}
+
+/** Graphics API detected for an overlay target (drives which Present is hooked).
+ *  Lowercased to match the backend's serde rename. */
+export type GraphicsApi = "dx12" | "dx11" | "dx10" | "dx9" | "vulkan" | "opengl" | "unknown";
+
+/** A target process classified for the in-game (injection) overlay. */
+export interface OverlayTarget {
+  pid: number;
+  api: GraphicsApi;
+  /** True when a known anti-cheat module is loaded — injection is refused. */
+  anticheat: boolean;
+  /** True iff the API is hookable AND no anti-cheat is present. */
+  injectable: boolean;
+}
+
+/** What the overlay does for a target:
+ *  - `inject`: the in-frame DLL overlay (premium path);
+ *  - `window`: the keep-alive window overlay (anti-cheat / unsupported API → safe);
+ *  - `none`: no usable target (no foreground game). */
+export type OverlayMode = "inject" | "window" | "none";
+
+/** Overlay status for a target: classification, chosen mode, and a localised
+ *  reason for the UI status line. */
+export interface OverlayStatus {
+  target: OverlayTarget;
+  mode: OverlayMode;
+  /** Localised explanation, e.g. "✅ 可注入（DX12）". */
+  reason: string;
+  /** Whether the injected overlay is currently attached to this exact PID. */
+  attached: boolean;
 }

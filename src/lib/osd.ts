@@ -91,6 +91,45 @@ export const OSD_METRIC_BY_KEY: Record<string, OsdMetricDef> = Object.fromEntrie
   OSD_METRICS.map((m) => [m.key, m]),
 );
 
+/**
+ * `show::*` layout-flag bits in `corepilot-osd-ipc` (the injected overlay reads
+ * these from the shared block to decide which metric ROWS to draw). Must stay in
+ * sync with the Rust `show` module.
+ */
+export const OSD_SHOW_FLAGS = {
+  fps: 1 << 0,
+  frametime: 1 << 1,
+  cpu: 1 << 2,
+  gpu: 1 << 3,
+  vram: 1 << 4,
+  ram: 1 << 5,
+  disk: 1 << 6,
+  net: 1 << 7,
+} as const;
+
+/**
+ * Derive the injected-overlay `layout_flags` bitfield from the user's selected
+ * metric keys. The in-frame overlay groups metrics into rows (FPS, frame-time,
+ * CPU, GPU, VRAM, RAM, disk, net), so any selected metric in a group lights that
+ * group's bit. Frame-time/lows share the FRAMETIME row; VRAM keys map to VRAM.
+ */
+export function layoutFlagsFromMetrics(metrics: readonly string[]): number {
+  let flags = 0;
+  for (const key of metrics) {
+    if (key === "fps") flags |= OSD_SHOW_FLAGS.fps;
+    else if (key === "fps.frametime" || key === "fps.low1" || key === "fps.low01")
+      flags |= OSD_SHOW_FLAGS.frametime;
+    else if (key.startsWith("cpu.")) flags |= OSD_SHOW_FLAGS.cpu;
+    else if (key === "gpu.vramPct" || key === "gpu.vramUsed" || key === "gpu.memClock")
+      flags |= OSD_SHOW_FLAGS.vram;
+    else if (key.startsWith("gpu.")) flags |= OSD_SHOW_FLAGS.gpu;
+    else if (key.startsWith("mem.")) flags |= OSD_SHOW_FLAGS.ram;
+    else if (key.startsWith("disk.")) flags |= OSD_SHOW_FLAGS.disk;
+    else if (key.startsWith("net.")) flags |= OSD_SHOW_FLAGS.net;
+  }
+  return flags;
+}
+
 export const OSD_CATEGORIES: { id: OsdCategory; label: string }[] = [
   { id: "fps", label: "FPS" },
   { id: "cpu", label: "CPU" },
