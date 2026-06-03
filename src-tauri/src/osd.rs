@@ -23,6 +23,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const OSD_LABEL: &str = "osd";
 
+/// Last logical size pushed to the overlay window, packed as `w << 32 | h`
+/// (rounded). Lets [`osd_set_bounds`] skip the costly resize + click-through
+/// re-assert on pure position moves — the per-frame churn that made the
+/// free-position slider's live follow stutter. On a move, only the lightweight
+/// `set_position` runs.
+static LAST_OSD_SIZE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// OR click-through + non-activating extended styles onto one window.
 unsafe fn set_through(hwnd: HWND) {
     let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
@@ -131,13 +138,23 @@ pub fn osd_set_visible(app: AppHandle, visible: bool) -> Result<(), String> {
 /// plate at the chosen corner / free position.
 #[tauri::command]
 pub fn osd_set_bounds(app: AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
     use tauri::{LogicalPosition, LogicalSize};
     if let Some(win) = app.get_webview_window(OSD_LABEL) {
-        let _ = win.set_size(LogicalSize::new(w.max(1.0), h.max(1.0)));
+        // Only resize — and re-assert click-through, which WebView2 resets on a
+        // *resize*, not a move — when the plate size actually changed. During a
+        // free-position slider drag the size is constant, so every frame does just
+        // the cheap `set_position`; that is what keeps the live follow smooth
+        // instead of churning a resize + EnumChildWindows 60×/s.
+        let wk = w.max(1.0).round() as u64;
+        let hk = h.max(1.0).round() as u64;
+        let key = (wk << 32) | (hk & 0xFFFF_FFFF);
+        if LAST_OSD_SIZE.swap(key, Ordering::Relaxed) != key {
+            let _ = win.set_size(LogicalSize::new(w.max(1.0), h.max(1.0)));
+            let _ = win.set_ignore_cursor_events(true);
+            force_click_through(hwnd_of(&win));
+        }
         let _ = win.set_position(LogicalPosition::new(x, y));
-        // Re-assert click-through (resize/move + WebView2 can reset it).
-        let _ = win.set_ignore_cursor_events(true);
-        force_click_through(hwnd_of(&win));
     }
     Ok(())
 }
@@ -177,79 +194,4 @@ pub fn osd_target_monitor(app: AppHandle) -> Option<(f64, f64, f64, f64)> {
         }
     }
     None
-}
-
-/// Remove the click-through + non-activating bits from one window's extended style.
-unsafe fn unset_through_one(hwnd: HWND) {
-    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    let want = ex & !(WS_EX_TRANSPARENT.0 as isize) & !(WS_EX_NOACTIVATE.0 as isize);
-    if ex != want {
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
-    }
-}
-
-unsafe extern "system" fn enum_child_unset(child: HWND, _: LPARAM) -> BOOL {
-    unset_through_one(child);
-    true.into()
-}
-
-/// Inverse of [`force_click_through`]: make the overlay + its WebView2 children
-/// interactive again (receive clicks + focus) — used by the fullscreen editor.
-fn unset_click_through(hwnd_raw: isize) {
-    if hwnd_raw == 0 {
-        return;
-    }
-    let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
-    unsafe {
-        unset_through_one(hwnd);
-        let _ = EnumChildWindows(Some(hwnd), Some(enum_child_unset), LPARAM(0));
-    }
-}
-
-/// Enter/leave the fullscreen **position editor**. On enter the overlay covers the
-/// foreground app's monitor (borderless full-screen) and becomes interactive, so
-/// the plate can be dragged directly over the real desktop. On leave, click-through
-/// is restored and the frontend's `osd_set_bounds` resumes content-sizing.
-///
-/// While editing, the frontend MUST NOT call `osd_set_bounds` — shrinking the
-/// window back to the plate mid-drag is exactly what made the overlay jitter.
-#[tauri::command]
-pub fn osd_position_mode(app: AppHandle, enter: bool) -> Result<(), String> {
-    let win = app.get_webview_window(OSD_LABEL).ok_or("no osd window")?;
-    if enter {
-        // Cover the monitor the foreground app (the one double-clicked from) is on,
-        // so the editor opens on the screen the user is actually looking at.
-        let fg = unsafe { GetForegroundWindow() };
-        let mut rect = RECT::default();
-        let target = if unsafe { GetWindowRect(fg, &mut rect) }.is_ok() {
-            let cx = (rect.left as i64 + rect.right as i64) / 2;
-            let cy = (rect.top as i64 + rect.bottom as i64) / 2;
-            win.available_monitors().ok().and_then(|ms| {
-                ms.into_iter().find(|m| {
-                    let p = m.position();
-                    let s = m.size();
-                    cx >= p.x as i64
-                        && cx < p.x as i64 + s.width as i64
-                        && cy >= p.y as i64
-                        && cy < p.y as i64 + s.height as i64
-                })
-            })
-        } else {
-            None
-        };
-        let target = target.or_else(|| win.primary_monitor().ok().flatten());
-        if let Some(m) = target {
-            let p = m.position();
-            let s = m.size();
-            let _ = win.set_position(tauri::PhysicalPosition::new(p.x, p.y));
-            let _ = win.set_size(tauri::PhysicalSize::new(s.width, s.height));
-        }
-        let _ = win.set_ignore_cursor_events(false);
-        unset_click_through(hwnd_of(&win));
-        let _ = win.set_focus();
-    } else {
-        let _ = win.set_ignore_cursor_events(true);
-        force_click_through(hwnd_of(&win));
-    }
-    Ok(())
 }

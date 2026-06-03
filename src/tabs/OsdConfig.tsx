@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { emit, listen } from "@tauri-apps/api/event";
+import { emit } from "@tauri-apps/api/event";
 import { Modal } from "../components/ui/Modal";
 import { Segmented } from "../components/ui/Segmented";
 import { Slider } from "../components/ui/Slider";
@@ -104,22 +104,32 @@ export function OsdConfig() {
   }, [needGpu, needFps]);
 
   // Push every default-config change to the live overlay window (no-op if closed).
-  useEffect(() => useOsd.subscribe((s) => void emit("osd:cfg", cfgOf(s))), []);
+  // The X/Y position sliders mutate the store far faster than the IPC can deliver,
+  // so coalesce to a trailing ~16 ms tick (latest config wins) — otherwise the
+  // emits pile up and the overlay's live follow stutters and lags behind.
+  useEffect(() => {
+    let timer: number | null = null;
+    let pending: OsdCfg | null = null;
+    const unsub = useOsd.subscribe((s) => {
+      pending = cfgOf(s);
+      if (timer != null) return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        const c = pending;
+        pending = null;
+        if (c) void emit("osd:cfg", c);
+      }, 16);
+    });
+    return () => {
+      unsub();
+      if (timer != null) clearTimeout(timer);
+    };
+  }, []);
   // Push every list change too, so the overlay re-resolves immediately.
   useEffect(
     () => useOsdTargets.subscribe((s) => void emit("osd:targets", { targets: s.targets })),
     [],
   );
-  // The fullscreen position editor (overlay window) reports the final dragged
-  // position back here, so the config + persisted store stay in sync.
-  useEffect(() => {
-    const un = listen<{ freeX: number; freeY: number }>("osd:position-result", (e) =>
-      useOsd
-        .getState()
-        .update({ freeX: e.payload.freeX, freeY: e.payload.freeY, position: "free" }),
-    );
-    return () => void un.then((f) => f());
-  }, []);
 
   function setEnabled(enabled: boolean) {
     osd.setEnabled(enabled);
@@ -156,33 +166,11 @@ export function OsdConfig() {
   }, []);
   const previewScale = Math.min(0.85, Math.max(0.5, boxW > 0 ? boxW / (window.screen?.width || 1920) : 0.5));
 
-  // Fullscreen position editor: double-click the preview to drag the plate at full
-  // size over a screen-shaped canvas that maps 1:1 to the real display.
-  const [posEditor, setPosEditor] = useState(false);
-  const modalBoxRef = useRef<HTMLDivElement>(null);
-  const [modalBoxW, setModalBoxW] = useState(0);
-  useEffect(() => {
-    if (!posEditor) return;
-    const el = modalBoxRef.current;
-    const measure = () => el && setModalBoxW(el.getBoundingClientRect().width);
-    measure();
-    const ro = new ResizeObserver(measure);
-    if (el) ro.observe(el);
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setPosEditor(false);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [posEditor]);
-  // Plate drawn to-scale (its real footprint on the monitor); the big modal box
-  // makes that readable while keeping the drag positionally exact.
-  const modalScale = modalBoxW > 0 ? modalBoxW / (window.screen?.width || 1920) : 0.3;
-
   // Free placement: drag the plate within the preview to set its normalized
   // top-left position (clamped to the box). The same coords drive the overlay.
-  function onFreeDragStart(e: React.PointerEvent<HTMLDivElement>, box: HTMLElement | null) {
+  function onFreeDragStart(e: React.PointerEvent<HTMLDivElement>) {
     e.preventDefault();
+    const box = previewRef.current;
     if (!box) return;
     const clamp = (v: number) => Math.min(1, Math.max(0, v));
     const move = (ev: PointerEvent) => {
@@ -306,17 +294,11 @@ export function OsdConfig() {
             />
           </div>
 
-          {/* Live preview = a short mini-monitor; double-click to open a fullscreen
-              position editor (drag the plate at full size on a screen-shaped canvas). */}
+          {/* Live preview = a short, centered mini-monitor at the display aspect
+              ratio (fixed height so it always fits the panel above the fold). */}
           <div
-            className="relative mx-auto cursor-zoom-in overflow-hidden rounded-xl border border-line"
+            className="relative mx-auto overflow-hidden rounded-xl border border-line"
             style={{ height: 170, width: 170 * screenAspect, maxWidth: "100%" }}
-            onDoubleClick={() => {
-              osd.update({ position: "free" });
-              api.osdPositionMode(true).catch(() => undefined);
-              void emit("osd:position-mode", true);
-            }}
-            title="双击在整个屏幕上拖动调整位置"
           >
             <div
               ref={previewRef}
@@ -344,7 +326,7 @@ export function OsdConfig() {
                 <div
                   className="absolute cursor-grab touch-none active:cursor-grabbing"
                   style={freePosStyle(previewCfg.freeX, previewCfg.freeY)}
-                  onPointerDown={(e) => onFreeDragStart(e, previewRef.current)}
+                  onPointerDown={onFreeDragStart}
                 >
                   <OsdPlate
                     metrics={previewCfg.metrics}
@@ -628,52 +610,6 @@ export function OsdConfig() {
           )}
         </div>
       </Modal>
-
-      {/* Fullscreen position editor — drag the plate at full size over a canvas
-          shaped like the display (maps 1:1 to the real screen). Esc / click-out saves. */}
-      {posEditor && (
-        <div
-          className="fixed inset-0 z-[70] flex flex-col items-center justify-center gap-3 bg-black/75 p-6 backdrop-blur-sm"
-          onClick={() => setPosEditor(false)}
-        >
-          <div className="text-[13px] font-medium text-white/85">
-            拖动叠加层到目标位置 · 点击空白处或按 Esc 完成
-          </div>
-          <div
-            ref={modalBoxRef}
-            className="relative overflow-hidden rounded-xl border border-white/15 shadow-2xl"
-            style={{
-              aspectRatio: screenAspect,
-              height: "78vh",
-              maxWidth: "92vw",
-              background:
-                "radial-gradient(120% 140% at 20% 0%, oklch(38% 0.08 250) 0%, oklch(16% 0.03 265) 60%), repeating-linear-gradient(135deg, oklch(20% 0.02 265) 0 22px, oklch(22% 0.02 265) 22px 44px)",
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div
-              className="absolute cursor-grab touch-none active:cursor-grabbing"
-              style={freePosStyle(previewCfg.freeX, previewCfg.freeY)}
-              onPointerDown={(e) => onFreeDragStart(e, modalBoxRef.current)}
-            >
-              <OsdPlate
-                metrics={previewCfg.metrics}
-                style={previewCfg.style}
-                scale={previewCfg.scale * modalScale}
-                opacity={previewCfg.opacity}
-                rounded={previewCfg.rounded}
-                data={data}
-              />
-            </div>
-          </div>
-          <button
-            onClick={() => setPosEditor(false)}
-            className="no-drag rounded-lg bg-accent/20 px-4 py-1.5 text-[13px] font-medium text-accent-bright hover:bg-accent/30"
-          >
-            完成
-          </button>
-        </div>
-      )}
     </>
   );
 }
@@ -815,6 +751,32 @@ function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
           ]}
         />
       </Row>
+      {cfg.position === "free" && (
+        <>
+          <div className="sm:col-span-1">
+            <Slider
+              label="水平位置 X"
+              value={Math.round((cfg.freeX ?? 0) * 100)}
+              min={0}
+              max={100}
+              step={1}
+              unit="%"
+              onChange={(v) => onChange({ freeX: v / 100 })}
+            />
+          </div>
+          <div className="sm:col-span-1">
+            <Slider
+              label="垂直位置 Y"
+              value={Math.round((cfg.freeY ?? 0) * 100)}
+              min={0}
+              max={100}
+              step={1}
+              unit="%"
+              onChange={(v) => onChange({ freeY: v / 100 })}
+            />
+          </div>
+        </>
+      )}
       <div className="sm:col-span-1">
         <Slider
           label="字体大小"
