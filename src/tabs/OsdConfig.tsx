@@ -124,16 +124,6 @@ export function OsdConfig() {
     if (selectedTarget) updateTargetConfig(selectedTarget.name, patch);
     else osd.update(patch);
   }
-
-  // Match the live preview to the user's actual monitor aspect ratio so dragging
-  // the plate (and the corner anchors) map 1:1 to where the OSD lands on screen.
-  // Falls back to 16:9. Applied to a WRAPPER below — never the flex drag surface.
-  const screenAspect = useMemo(() => {
-    const w = window.screen?.width ?? 0;
-    const h = window.screen?.height ?? 0;
-    return w > 0 && h > 0 ? w / h : 16 / 9;
-  }, []);
-
   // Free placement: drag the plate within the preview to set its normalized
   // top-left position (clamped to the box). The same coords drive the overlay.
   function onFreeDragStart(e: React.PointerEvent<HTMLDivElement>) {
@@ -262,16 +252,11 @@ export function OsdConfig() {
             />
           </div>
 
-          {/* Live preview over a faux game backdrop. Width-capped + centered so the
-              monitor-aspect box stays short enough to fit the panel (bottom-anchored
-              plates would otherwise fall below the fold in the taller 16:9 box). */}
-          <div
-            className="relative mx-auto w-full overflow-hidden rounded-xl border border-line"
-            style={{ aspectRatio: screenAspect, maxWidth: 380 }}
-          >
+          {/* Live preview over a faux game backdrop */}
+          <div className="relative overflow-hidden rounded-xl border border-line">
             <div
               ref={previewRef}
-              className="absolute inset-0 flex p-2"
+              className="relative flex min-h-[120px] p-2"
               style={{
                 background:
                   "radial-gradient(120% 140% at 20% 0%, oklch(38% 0.08 250) 0%, oklch(16% 0.03 265) 60%), repeating-linear-gradient(135deg, oklch(20% 0.02 265) 0 14px, oklch(22% 0.02 265) 14px 28px)",
