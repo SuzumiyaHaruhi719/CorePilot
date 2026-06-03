@@ -124,28 +124,6 @@ export function OsdConfig() {
     if (selectedTarget) updateTargetConfig(selectedTarget.name, patch);
     else osd.update(patch);
   }
-
-  // The preview is a true mini-monitor: the box is sized to the real display
-  // aspect ratio, and the plate is scaled to its REAL footprint on that monitor.
-  // A real plate is always smaller than the monitor, so the scaled plate ALWAYS
-  // fits the box (never clips/overflows) and marks the exact on-screen position.
-  const screenAspect = useMemo(() => {
-    const w = window.screen?.width ?? 0;
-    const h = window.screen?.height ?? 0;
-    return w > 0 && h > 0 ? w / h : 16 / 9;
-  }, []);
-  const [boxW, setBoxW] = useState(0);
-  useEffect(() => {
-    const el = previewRef.current;
-    if (!el) return;
-    const measure = () => setBoxW(el.getBoundingClientRect().width);
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  const previewScale = boxW > 0 ? boxW / (window.screen?.width || 1920) : 0.18;
-
   // Free placement: drag the plate within the preview to set its normalized
   // top-left position (clamped to the box). The same coords drive the overlay.
   function onFreeDragStart(e: React.PointerEvent<HTMLDivElement>) {
@@ -274,14 +252,11 @@ export function OsdConfig() {
             />
           </div>
 
-          {/* Live preview = a mini-monitor at the real display aspect ratio. */}
-          <div
-            className="relative mx-auto w-full overflow-hidden rounded-xl border border-line"
-            style={{ aspectRatio: screenAspect, maxWidth: 400 }}
-          >
+          {/* Live preview over a faux game backdrop */}
+          <div className="relative overflow-hidden rounded-xl border border-line">
             <div
               ref={previewRef}
-              className="absolute inset-0 flex p-2"
+              className="relative flex min-h-[120px] p-2"
               style={{
                 background:
                   "radial-gradient(120% 140% at 20% 0%, oklch(38% 0.08 250) 0%, oklch(16% 0.03 265) 60%), repeating-linear-gradient(135deg, oklch(20% 0.02 265) 0 14px, oklch(22% 0.02 265) 14px 28px)",
@@ -310,7 +285,7 @@ export function OsdConfig() {
                   <OsdPlate
                     metrics={previewCfg.metrics}
                     style={previewCfg.style}
-                    scale={previewCfg.scale * previewScale}
+                    scale={previewCfg.scale}
                     opacity={previewCfg.opacity}
                     rounded={previewCfg.rounded}
                     data={data}
@@ -320,7 +295,7 @@ export function OsdConfig() {
                 <OsdPlate
                   metrics={previewCfg.metrics}
                   style={previewCfg.style}
-                  scale={previewCfg.scale * previewScale}
+                  scale={previewCfg.scale}
                   opacity={previewCfg.opacity}
                   rounded={previewCfg.rounded}
                   data={data}
