@@ -10,6 +10,7 @@ pub mod optimize;
 pub mod osd;
 pub mod overlay;
 pub mod overlay_inject;
+pub mod perf_recorder;
 pub mod process;
 pub mod process_icon;
 pub mod sensors;
@@ -82,6 +83,14 @@ pub fn run() {
             // publishing metrics while a game is attached and idling otherwise.
             overlay_inject::start_sampler(app.handle().clone());
 
+            // Start the backend per-game performance recorder. This MOVES the
+            // perf-session recording off the main webview (which freezes when a
+            // GPU-heavy game holds the foreground, silently dropping ~1/3 of
+            // sessions) onto a native thread that is immune to that freeze. It
+            // samples while a recordable game runs and emits `perf://session` on
+            // game exit; the frontend persists + shows the report.
+            perf_recorder::start_recorder(app.handle().clone());
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -137,6 +146,7 @@ pub fn run() {
             overlay_inject::overlay_attach,
             overlay_inject::overlay_detach,
             overlay_inject::overlay_status,
+            perf_recorder::perf_recorder_config,
             tray::set_close_to_tray,
         ])
         .run(tauri::generate_context!())

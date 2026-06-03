@@ -10,6 +10,7 @@ import { useSettings, type PerfCard } from "../../store/settings";
 import { CoreGraphs } from "../charts/CoreGraphs";
 import { GpuDetail } from "./GpuDetail";
 import { Sparkline } from "../charts/Sparkline";
+import { DualSparkline } from "../charts/DualSparkline";
 import { AnimatedNumber } from "../ui/AnimatedNumber";
 
 const CARDS: { id: PerfCard; label: string }[] = [
@@ -68,7 +69,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 export function PerfView() {
   const { cpu, memPct, latest } = useMetricsHistory(60);
-  const { latest: sensors, gpuHist, diskHist, netHist } = useSensors(60);
+  const { latest: sensors, gpuHist, diskHist, netUpHist, netDownHist, powerHist } = useSensors(60);
   const [topo, setTopo] = useState<CpuTopology | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
   const [gpuOc, setGpuOc] = useState<GpuOcInfo | null>(null);
@@ -251,7 +252,14 @@ export function PerfView() {
               color="var(--color-accent-bright)"
             />
             <div className="my-2">
-              <Sparkline data={netHist} max={Math.max(...netHist, 1)} hue={224} height={70} />
+              <DualSparkline
+                up={netUpHist}
+                down={netDownHist}
+                upHue={75}
+                downHue={150}
+                format={fmtRate}
+                height={84}
+              />
             </div>
             <div className="mt-2 grid grid-cols-2 gap-3">
               <div className="flex items-center gap-2">
@@ -290,7 +298,11 @@ export function PerfView() {
               }
               color="var(--color-warn)"
             />
-            <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <div className="nums text-[11px] text-dim">CPU + GPU 实时功耗</div>
+            <div className="my-2">
+              <Sparkline data={powerHist} max={Math.max(...powerHist, 1)} hue={75} height={84} />
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
               <Stat label="CPU 功耗" value={sensors?.cpuPower != null ? `${sensors.cpuPower.toFixed(0)} W` : "—"} />
               <Stat label="GPU 功耗" value={sensors?.gpuPower != null ? `${sensors.gpuPower.toFixed(0)} W` : "—"} />
               <Stat label="CPU 温度" value={sensors?.cpuTemp != null ? `${sensors.cpuTemp.toFixed(0)} °C` : "—"} />

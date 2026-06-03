@@ -379,12 +379,12 @@ pub fn foreground_process() -> Option<String> {
 #[serde(rename_all = "camelCase")]
 pub struct ForegroundInfo {
     /// Lowercased exe name (e.g. "subnautica2-win64-shipping.exe"); null when unresolved.
-    exe: Option<String>,
+    pub exe: Option<String>,
     /// Foreground PID (0 when there is no foreground window).
-    pid: u32,
+    pub pid: u32,
     /// True when the foreground app is rendering frames (has recent ETW present
     /// events) — our driverless "is a game" signal (same source as FPS).
-    is_game: bool,
+    pub is_game: bool,
 }
 
 /// One call returning everything the OSD/recorder needs about the foreground app

@@ -1,11 +1,10 @@
-import { useEffect, useRef } from "react";
-import { api } from "../lib/ipc";
-import { fetchOsdData } from "../lib/osd";
+import { useEffect } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { api, type PerfSessionEvent } from "../lib/ipc";
 import {
   downsample,
   gameDisplayName,
   summarize,
-  type PerfSample,
   type PerfSession,
 } from "../lib/perf";
 import { usePerfHistory } from "../store/perfHistory";
@@ -20,43 +19,30 @@ import { useUi } from "../store/ui";
 import { useOsdTargets } from "../store/osd";
 import { useRecordTargets } from "../store/recordTargets";
 
-/** Sampling cadence — one ~1 Hz tick per second while a game is foregrounded. */
-const SAMPLE_INTERVAL_MS = 1000;
-
-/** Live recording state, held in a ref so ticks never trigger re-renders. */
-interface ActiveSession {
-  /** Lowercased exe name of the detected game. */
-  exe: string;
-  /** Foreground PID being tracked. */
-  pid: number;
-  /** Epoch ms when recording started (also the sample-`t` base). */
-  startedAt: number;
-  cpuName: string | null;
-  gpuName: string | null;
-  samples: PerfSample[];
-}
-
 /**
- * Per-game performance session recorder.
+ * Per-game performance session recorder — frontend half.
  *
- * A single ~1 Hz effect that, while a detected game holds the foreground, samples
- * the same metrics the OSD reads (FPS / frame time, CPU & GPU load / temp / power
- * / clock, VRAM & RAM usage) into an in-memory buffer. When the tracked game's
- * process exits — or the user switches to a different game — the buffered session
- * is summarized and persisted to history (store/perfHistory) for the Monitor → 历史
- * report. Alt-tabbing away from a still-running game pauses sampling without
- * finalizing.
+ * The actual sampling now lives in the **Rust backend** (`perf_recorder.rs`): a
+ * native thread is immune to the WebView2 renderer freeze that occurs when a
+ * GPU-heavy game holds the foreground (which silently dropped ~1 in 3 sessions
+ * when sampling ran here on a `setInterval`). This hook is now purely the
+ * persist + present half:
  *
- * The active session lives in a `useRef` (not state) so high-frequency sampling
- * never re-renders the app. A `running` guard ref ensures a slow tick (awaiting
- * IPC) can never overlap the next one. Every tick is wrapped in try/catch so a
- * transient IPC failure is swallowed rather than thrown — the recorder degrades
- * silently and can never crash the app.
+ *  1. **Push config to the backend.** On mount, and whenever the relevant stores
+ *     change (`settings.perfRecording`, the record white/black list, the OSD
+ *     whitelist), we send the flat, lowercased lists to the recorder thread via
+ *     `api.perfRecorderConfig`. The backend never parses the store itself.
+ *  2. **Listen for finished sessions.** The backend emits `perf://session` when a
+ *     recorded game exits. We build the full `PerfSession` (summarize + downsample
+ *     the samples), persist it to history, fire the game notification, and — when
+ *     "auto-show report" is on — surface the report.
+ *
+ * Why the popup timing still works: the listener lives in the MAIN window. When
+ * the game closes, the main window returns to the foreground and its renderer
+ * un-freezes, so any `perf://session` queued during the freeze is delivered right
+ * then — exactly when we want the report to appear.
  */
 export function usePerfRecorder(): void {
-  const active = useRef<ActiveSession | null>(null);
-  const running = useRef(false);
-
   useEffect(() => {
     /** Send a Windows system notification (permission-guarded; best-effort). */
     const notify = async (body: string) => {
@@ -99,164 +85,75 @@ export function usePerfRecorder(): void {
       }
     };
 
-    /** Summarize + persist a session, or discard it if it captured no samples. */
-    const finalize = (session: ActiveSession) => {
-      if (session.samples.length === 0) return; // nothing worth keeping
-      const endedAt = Date.now();
-      const report: PerfSession = {
+    /**
+     * Push the current recorder config to the backend. Reads the stores directly
+     * (so it's safe to call from a subscribe callback). The backend stores these
+     * and applies them on its next tick.
+     */
+    const pushConfig = () => {
+      const enabled = useSettings.getState().perfRecording;
+      const recTargets = useRecordTargets.getState().targets;
+      const osdTargets = useOsdTargets.getState().targets;
+      const white = recTargets.filter((t) => t.list === "white").map((t) => t.name);
+      const black = recTargets.filter((t) => t.list === "black").map((t) => t.name);
+      const osdWhite = osdTargets.filter((t) => t.list === "white").map((t) => t.name);
+      api.perfRecorderConfig({ enabled, white, black, osdWhite }).catch(() => undefined);
+    };
+
+    /**
+     * Persist + surface a finished session emitted by the backend. Builds the full
+     * `PerfSession` the report renders (id/name/refreshHz + summary + downsampled
+     * samples) from the backend payload, whose `samples` already match the
+     * frontend `PerfSample` shape.
+     */
+    const onSession = (payload: PerfSessionEvent) => {
+      if (!payload.samples || payload.samples.length === 0) return; // nothing to keep
+      const session: PerfSession = {
         id: crypto.randomUUID(),
-        exe: session.exe,
-        name: gameDisplayName(session.exe),
-        startedAt: session.startedAt,
-        endedAt,
-        durationSec: Math.round((endedAt - session.startedAt) / 1000),
-        cpuName: session.cpuName,
-        gpuName: session.gpuName,
+        exe: payload.exe,
+        name: gameDisplayName(payload.exe),
+        startedAt: payload.startedAt,
+        endedAt: payload.endedAt,
+        durationSec: payload.durationSec,
+        cpuName: payload.cpuName,
+        gpuName: payload.gpuName,
         refreshHz: null,
-        summary: summarize(session.samples),
-        samples: downsample(session.samples),
+        // Summarize from the FULL series, then downsample for storage (matches the
+        // old in-app recorder's finalize exactly).
+        summary: summarize(payload.samples),
+        samples: downsample(payload.samples),
       };
-      usePerfHistory.getState().addSession(report);
-      void notify(`${report.name} 性能报告已生成`);
-      if (useSettings.getState().autoShowReport) void surfaceReport(report.id);
+      usePerfHistory.getState().addSession(session);
+      void notify(`${session.name} 性能报告已生成`);
+      if (useSettings.getState().autoShowReport) void surfaceReport(session.id);
     };
 
-    /** Begin tracking a freshly-detected foreground game. */
-    const start = async (exe: string, pid: number) => {
-      const cpuName = await api
-        .getOverview()
-        .then((o) => o.cpuName)
-        .catch(() => null);
-      const gpuName = await api
-        .gpuOcInfo()
-        .then((g) => g.name)
-        .catch(() => null);
-      active.current = {
-        exe: exe.toLowerCase(),
-        pid,
-        startedAt: Date.now(),
-        cpuName,
-        gpuName,
-        samples: [],
-      };
-      void notify(`检测到游戏运行：${gameDisplayName(exe)} — 正在记录性能`);
-    };
+    // Push config now and keep the backend in sync with the three stores that
+    // affect recording. Each `subscribe` returns its own unsubscribe.
+    pushConfig();
+    const unsubSettings = useSettings.subscribe(pushConfig);
+    const unsubRecord = useRecordTargets.subscribe(pushConfig);
+    const unsubOsdTargets = useOsdTargets.subscribe(pushConfig);
 
-    /** Pull one OSD snapshot and append a sample to the active session. */
-    const sample = async (session: ActiveSession) => {
-      const d = await fetchOsdData(true, true);
-      const memUsed = d.metrics?.memUsed ?? 0;
-      const memTotal = d.metrics?.memTotal ?? 0;
-      const vramUsed = d.gpu?.memUsedBytes ?? 0;
-      const vramTotal = d.gpu?.memTotalBytes ?? 0;
-      const s: PerfSample = {
-        t: Date.now() - session.startedAt,
-        fps: d.fps?.fps ?? null,
-        frametimeMs: d.fps?.frametimeMs ?? null,
-        cpuLoad: d.metrics?.cpuOverall ?? null,
-        cpuTemp: d.sensors?.cpuTemp ?? null,
-        cpuPower: d.sensors?.cpuPower ?? null,
-        cpuClock: d.sensors?.cpuClock ?? null,
-        gpuLoad: d.gpu?.utilizationGpu ?? d.sensors?.gpuPct ?? null,
-        gpuTemp: d.gpu?.temperature ?? d.sensors?.gpuTemp ?? null,
-        gpuPower: d.gpu?.powerUsageW ?? d.sensors?.gpuPower ?? null,
-        gpuClock: d.gpu?.graphicsClock ?? null,
-        vramLoad: vramTotal > 0 ? (vramUsed / vramTotal) * 100 : null,
-        memLoad: memTotal > 0 ? (memUsed / memTotal) * 100 : null,
-      };
-      session.samples.push(s);
-    };
+    // Listen for finished sessions from the backend recorder. `listen` resolves to
+    // an unlisten fn asynchronously. Guard the mount/cleanup race (React 18/19
+    // StrictMode double-invokes effects in dev): if cleanup runs before the
+    // promise resolves, `unlisten` is still undefined, so the late-resolved
+    // listener would leak — and every `perf://session` would be handled twice,
+    // persisting duplicate sessions. The `disposed` flag detaches it immediately.
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void listen<PerfSessionEvent>("perf://session", (e) => onSession(e.payload)).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
 
-    const tick = async () => {
-      if (running.current) return; // a previous (slow) tick is still in flight
-      running.current = true;
-      try {
-        const fg = await api.foregroundInfo();
-        const cur = active.current;
-
-        // Recording disabled in Settings — finalize any active session and stop.
-        if (!useSettings.getState().perfRecording) {
-          if (cur) {
-            finalize(cur);
-            active.current = null;
-          }
-          return;
-        }
-
-        // Finalize-on-exit / switch: the foreground PID no longer matches the
-        // session we're tracking.
-        if (cur && fg.pid !== cur.pid) {
-          const alive = await api.pidAlive(cur.pid);
-          if (!alive) {
-            // The game process exited — close out the report.
-            finalize(cur);
-            active.current = null;
-          } else {
-            // Still running, just alt-tabbed away — pause without finalizing.
-            return;
-          }
-        }
-
-        // Start: decide whether to record this foreground app.
-        //
-        // The dedicated record white/black list (useRecordTargets) takes
-        // precedence over auto-detection:
-        //   - recBlack → NEVER record (skip entirely, even if auto-detected as a
-        //     game) so the user can kill any false-positive.
-        //   - recWhite → force-record (even if NOT auto-detected as a game).
-        // The OSD whitelist also force-records, kept for back-compat so an
-        // existing OSD-whitelist setup (e.g. furmark) keeps recording.
-        const exeLc = fg.exe ? fg.exe.trim().toLowerCase() : null;
-        const recTargets = useRecordTargets.getState().targets;
-        const recBlack = !!exeLc && recTargets.some((t) => t.list === "black" && t.name === exeLc);
-        const recWhite = !!exeLc && recTargets.some((t) => t.list === "white" && t.name === exeLc);
-        const osdWhitelisted =
-          !!exeLc &&
-          useOsdTargets.getState().targets.some((t) => t.list === "white" && t.name === exeLc);
-        // Blacklist precedence: if the foreground app is blacklisted, finalize
-        // any session we're recording for it and stop — so toggling a live
-        // false-positive to 黑名单 takes effect immediately.
-        if (recBlack) {
-          const existing = active.current;
-          if (existing && fg.pid === existing.pid) {
-            finalize(existing);
-            active.current = null;
-          }
-          return;
-        }
-        if ((fg.isGame || recWhite || osdWhitelisted) && fg.exe) {
-          const exe = fg.exe.toLowerCase();
-          const existing = active.current;
-          if (!existing || existing.exe !== exe) {
-            if (existing) {
-              // Different game took over — finalize the old session first.
-              finalize(existing);
-              active.current = null;
-            }
-            await start(fg.exe, fg.pid);
-          }
-        }
-
-        // Sample: append a data point for the live session.
-        const live = active.current;
-        if (live && fg.pid === live.pid) {
-          await sample(live);
-        }
-      } catch {
-        /* transient IPC failure — skip this tick, never throw */
-      } finally {
-        running.current = false;
-      }
-    };
-
-    void tick();
-    const id = window.setInterval(() => void tick(), SAMPLE_INTERVAL_MS);
     return () => {
-      window.clearInterval(id);
-      if (active.current) {
-        finalize(active.current);
-        active.current = null;
-      }
+      unsubSettings();
+      unsubRecord();
+      unsubOsdTargets();
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 }

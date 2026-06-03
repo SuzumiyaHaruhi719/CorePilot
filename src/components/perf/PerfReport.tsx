@@ -1,5 +1,5 @@
 import { motion } from "motion/react";
-import { Activity, Cpu, Database, Gauge, Leaf, MonitorPlay, Timer, Zap } from "lucide-react";
+import { Activity, ChevronDown, Cpu, Database, Gauge, Leaf, MonitorPlay, Timer, Zap } from "lucide-react";
 import { useCallback, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { formatBytes } from "../../lib/format";
 import {
@@ -10,6 +10,7 @@ import {
   type PerfSummary,
 } from "../../lib/perf";
 import { TimeSeriesChart, type RefLine } from "./TimeSeriesChart";
+import { DualAxisChart } from "./DualAxisChart";
 
 /**
  * GamePP-style report for one finished perf session.
@@ -204,6 +205,7 @@ const CHARTS: ChartDef[] = [
   { key: "gpuLoad", title: "GPU 占用", icon: <MonitorPlay size={15} />, hue: 158, unit: "%", digits: 0, pick: (s) => s.gpuLoad, refs: { avg: "avgGpuLoad" }, zeroFloor: true },
   { key: "gpuTemp", title: "GPU 温度", icon: <MonitorPlay size={15} />, hue: 184, unit: "°C", digits: 0, pick: (s) => s.gpuTemp, refs: { avg: "avgGpuTemp", max: "maxGpuTemp" } },
   { key: "gpuPower", title: "GPU 功耗", icon: <MonitorPlay size={15} />, hue: 75, unit: " W", digits: 0, pick: (s) => s.gpuPower, refs: { avg: "avgGpuPower", max: "maxGpuPower" }, zeroFloor: true },
+  { key: "totalPower", title: "总功耗 (CPU+GPU)", icon: <Zap size={15} />, hue: 50, unit: " W", digits: 0, pick: (s) => totalPower(s), zeroFloor: true },
   { key: "gpuClock", title: "GPU 核心频率", icon: <MonitorPlay size={15} />, hue: 262, unit: " MHz", digits: 0, pick: (s) => s.gpuClock, refs: { avg: "avgGpuClock" } },
   { key: "gpuMemClock", title: "显存频率", icon: <Database size={15} />, hue: 300, unit: " MHz", digits: 0, pick: (s) => s.gpuMemClock ?? null },
   { key: "gpuMemCtrl", title: "显存控制器占用", icon: <Database size={15} />, hue: 300, unit: "%", digits: 0, pick: (s) => s.gpuMemCtrlLoad ?? null, zeroFloor: true },
@@ -212,13 +214,21 @@ const CHARTS: ChartDef[] = [
   { key: "mem", title: "内存占用", icon: <Database size={15} />, hue: 330, unit: "%", digits: 0, pick: (s) => s.memLoad, refs: { avg: "avgMemLoad" }, zeroFloor: true },
   { key: "disk", title: "磁盘活动", icon: <Activity size={15} />, hue: 50, unit: "%", digits: 0, pick: (s) => s.diskLoad ?? null, zeroFloor: true },
   { key: "diskRW", title: "磁盘读写", icon: <Activity size={15} />, hue: 50, unit: "", digits: 0, pick: (s) => maxNullable(s.diskRead, s.diskWrite), zeroFloor: true, fmt: rate },
-  { key: "net", title: "网络下载", icon: <Activity size={15} />, hue: 224, unit: "", digits: 0, pick: (s) => s.netDown ?? null, zeroFloor: true, fmt: rate },
 ];
 
 /** Larger of two nullable values (for the combined disk R/W chart). */
 function maxNullable(a: number | null | undefined, b: number | null | undefined): number | null {
   const xs = [a, b].filter(isNum);
   return xs.length ? Math.max(...xs) : null;
+}
+
+/** Total system power for a sample = CPU + GPU watts. Null only when BOTH are
+ *  missing; if one is present the other counts as 0 (matches the live 总功耗 card). */
+function totalPower(s: PerfSample): number | null {
+  const c = isNum(s.cpuPower) ? s.cpuPower : null;
+  const g = isNum(s.gpuPower) ? s.gpuPower : null;
+  if (c == null && g == null) return null;
+  return (c ?? 0) + (g ?? 0);
 }
 
 /** Build avg/min/max reference lines for a chart from the session summary. */
@@ -262,6 +272,150 @@ function ChartPanel({ def, timesSec, values, refLines, syncKey, onHover }: Chart
   );
 }
 
+// ── Featured (big) chart with metric switcher ────────────────────────────────
+
+/** avg / min / max for a metric series (null samples skipped). */
+function seriesStats(values: Array<number | null>): {
+  avg: number | null;
+  min: number | null;
+  max: number | null;
+} {
+  let sum = 0;
+  let n = 0;
+  let mn = Infinity;
+  let mx = -Infinity;
+  for (const v of values) {
+    if (!isNum(v)) continue;
+    sum += v;
+    n += 1;
+    if (v < mn) mn = v;
+    if (v > mx) mx = v;
+  }
+  if (n === 0) return { avg: null, min: null, max: null };
+  return { avg: sum / n, min: mn, max: mx };
+}
+
+/** One labelled readout in the featured chart's side panel. */
+function FeaturedStat({ label, value, hue }: { label: string; value: string; hue: number }) {
+  const empty = value === DASH;
+  return (
+    <div className="flex items-baseline justify-between gap-2 rounded-lg border border-line bg-surface2/40 px-2.5 py-1.5 lg:flex-col lg:items-start lg:gap-0.5">
+      <span className="text-[10px] uppercase tracking-wide text-dim">{label}</span>
+      <span
+        className="nums text-[15px] font-semibold leading-none"
+        style={{ color: empty ? "var(--color-dim)" : `oklch(82% 0.13 ${hue})` }}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+interface FeaturedChartProps {
+  /** Pre-extracted per-metric series (same objects the small grid renders). */
+  series: Array<{ def: ChartDef; values: Array<number | null>; hasData: boolean }>;
+  summary: PerfSummary;
+  timesSec: number[];
+  syncKey: string;
+  onHover: (idx: number | null) => void;
+  /** The currently hovered sample (drives the live headline value), or null. */
+  hovered: PerfSample | null;
+}
+
+/**
+ * GamePP-style headline chart: one large time-series the user switches between
+ * metrics via a dropdown. Reuses the shared `CHARTS` catalog, joins the same
+ * synced-cursor group as the small grid (so the crosshair tracks across all
+ * charts), and shows a live "当前" value while hovering (else the average). The
+ * side panel lists avg/max/min — plus 1% / 0.1% lows for FPS.
+ */
+function FeaturedChart({ series, summary, timesSec, syncKey, onHover, hovered }: FeaturedChartProps) {
+  // Only metrics that actually captured data are selectable.
+  const selectable = useMemo(() => series.filter((s) => s.hasData), [series]);
+  const [key, setKey] = useState<string>("fps");
+  // Resolve the selection; fall back to the first available metric if the chosen
+  // one (default "fps") has no data this session.
+  const cur = selectable.find((s) => s.def.key === key) ?? selectable[0];
+  const values = cur?.values ?? [];
+  const stats = useMemo(() => seriesStats(values), [values]);
+
+  if (!cur) return null; // nothing captured at all
+  const def = cur.def;
+  const fmt = def.fmt ?? ((v: number) => `${v.toFixed(def.digits)}${def.unit}`);
+  const fmtOrDash = (v: number | null) => (isNum(v) ? fmt(v) : DASH);
+
+  // Headline reflects the cursor while hovering, else the session average.
+  const hoverVal = hovered ? def.pick(hovered) : null;
+  const live = isNum(hoverVal);
+  const headlineVal = live ? hoverVal : stats.avg;
+  const isFps = def.key === "fps";
+
+  return (
+    <div className="glass hairline rounded-2xl p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="relative">
+          <select
+            value={def.key}
+            onChange={(e) => setKey(e.target.value)}
+            style={{ colorScheme: "dark" }}
+            className="appearance-none rounded-lg border border-line bg-surface2 py-1.5 pl-3 pr-9 text-[13px] font-semibold text-ink outline-none transition-colors hover:border-line-strong focus:border-accent"
+          >
+            {selectable.map((s) => (
+              <option key={s.def.key} value={s.def.key}>
+                {s.def.title}
+              </option>
+            ))}
+          </select>
+          <ChevronDown
+            size={15}
+            className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-dim"
+          />
+        </div>
+        <div className="nums flex items-baseline gap-1.5">
+          <span className="text-[10px] uppercase tracking-wide text-dim">{live ? "当前" : "平均"}</span>
+          <span
+            className="text-[26px] font-semibold leading-none"
+            style={{ color: `oklch(84% 0.13 ${def.hue})` }}
+          >
+            {fmtOrDash(headlineVal)}
+          </span>
+        </div>
+      </div>
+
+      {/* Grid (not flex) so the chart column is `minmax(0,1fr)` — a constrained,
+          shrinkable width. uPlot sizes its canvas to an explicit pixel width, which
+          would blow out a flex-1 column (canvas overflow feeds back into layout);
+          the minmax track pins it the way the small-chart grid + host layout do. */}
+      <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_10rem]">
+        <div className="min-w-0">
+          <TimeSeriesChart
+            timesSec={timesSec}
+            values={values}
+            hue={def.hue}
+            format={fmt}
+            refLines={buildRefs(summary, def)}
+            zeroFloor={def.zeroFloor}
+            height={280}
+            syncKey={syncKey}
+            onHover={onHover}
+          />
+        </div>
+        <div className="flex flex-row flex-wrap gap-2 lg:flex-col">
+          <FeaturedStat label="平均" value={fmtOrDash(stats.avg)} hue={def.hue} />
+          <FeaturedStat label="最高" value={fmtOrDash(stats.max)} hue={22} />
+          <FeaturedStat label="最低" value={fmtOrDash(stats.min)} hue={200} />
+          {isFps && (
+            <>
+              <FeaturedStat label="1% Low" value={fmtOrDash(summary.low1)} hue={85} />
+              <FeaturedStat label="0.1% Low" value={fmtOrDash(summary.low01)} hue={60} />
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Hover tooltip ────────────────────────────────────────────────────────────
 
 /** Rows shown in the floating tooltip — same catalog as the charts, plus the
@@ -282,6 +436,7 @@ const TOOLTIP_ROWS: TooltipRow[] = [
   { label: "GPU 占用", hue: 158, fmt: (s) => (isNum(s.gpuLoad) ? `${s.gpuLoad.toFixed(0)}%` : null) },
   { label: "GPU 温度", hue: 184, fmt: (s) => (isNum(s.gpuTemp) ? `${s.gpuTemp.toFixed(0)}°C` : null) },
   { label: "GPU 功耗", hue: 75, fmt: (s) => (isNum(s.gpuPower) ? `${s.gpuPower.toFixed(0)} W` : null) },
+  { label: "总功耗", hue: 50, fmt: (s) => { const v = totalPower(s); return isNum(v) ? `${v.toFixed(0)} W` : null; } },
   { label: "GPU 频率", hue: 262, fmt: (s) => (isNum(s.gpuClock) ? `${s.gpuClock} MHz` : null) },
   { label: "显存频率", hue: 300, fmt: (s) => (isNum(s.gpuMemClock) ? `${s.gpuMemClock} MHz` : null) },
   { label: "显存控制器", hue: 300, fmt: (s) => (isNum(s.gpuMemCtrlLoad) ? `${s.gpuMemCtrlLoad.toFixed(0)}%` : null) },
@@ -322,6 +477,12 @@ export function PerfReport({ session }: { session: PerfSession }) {
       }),
     [samples],
   );
+
+  // Network up/down as separate series for the dual-axis 网络 panel (it shows two
+  // scales in one chart, so it isn't part of the single-series CHARTS catalog).
+  const netUp = useMemo(() => samples.map((s) => s.netUp ?? null), [samples]);
+  const netDown = useMemo(() => samples.map((s) => s.netDown ?? null), [samples]);
+  const hasNet = useMemo(() => netUp.some(isNum) || netDown.some(isNum), [netUp, netDown]);
 
   const onHover = useCallback((idx: number | null) => setHoverIdx(idx), []);
 
@@ -408,6 +569,16 @@ export function PerfReport({ session }: { session: PerfSession }) {
         </div>
       </div>
 
+      {/* Featured big chart — user switches which metric it shows */}
+      <FeaturedChart
+        series={series}
+        summary={summary}
+        timesSec={timesSec}
+        syncKey={syncKey}
+        onHover={onHover}
+        hovered={hovered}
+      />
+
       {/* Time-series charts (shared synced cursor + floating tooltip) */}
       <div
         ref={wrapRef}
@@ -428,6 +599,29 @@ export function PerfReport({ session }: { session: PerfSession }) {
               onHover={onHover}
             />
           ))}
+
+        {hasNet && (
+          <div className="rounded-2xl border border-line bg-surface2/40 p-4 lg:col-span-2">
+            <div className="mb-2 flex items-center gap-2 text-[12.5px] font-semibold text-muted">
+              <Activity size={15} style={{ color: "oklch(80% 0.13 224)" }} /> 网络上传 / 下载
+              <span className="nums ml-1 text-[10.5px] font-normal">
+                <span style={{ color: "oklch(80% 0.13 75)" }}>↑ 上传</span>
+                <span className="text-dim"> · </span>
+                <span style={{ color: "oklch(80% 0.13 224)" }}>↓ 下载</span>
+              </span>
+            </div>
+            <DualAxisChart
+              timesSec={timesSec}
+              up={netUp}
+              down={netDown}
+              upHue={75}
+              downHue={224}
+              format={rate}
+              syncKey={syncKey}
+              onHover={onHover}
+            />
+          </div>
+        )}
 
         {hovered && cursor && (
           <HoverTooltip sample={hovered} cursor={cursor} container={wrapRef.current} />

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { PerfSample } from "./perf";
 
 export interface Overview {
   cpuName: string;
@@ -288,8 +289,42 @@ export const api = {
   overlayDetach: (pid: number) => invoke<void>("overlay_detach", { pid }),
   /** Overlay status for `pid`, or the foreground game when omitted. */
   overlayStatus: (pid?: number) => invoke<OverlayStatus>("overlay_status", { pid: pid ?? null }),
+  /**
+   * Push perf-recorder config to the backend recorder thread (which does the
+   * actual sampling). Called on mount and whenever the relevant stores change.
+   * `white`/`black` are the record white/black list exe names; `osdWhite` is the
+   * OSD whitelist (also force-records, for back-compat). All lowercased.
+   */
+  perfRecorderConfig: (cfg: {
+    enabled: boolean;
+    white: string[];
+    black: string[];
+    osdWhite: string[];
+  }) =>
+    invoke<void>("perf_recorder_config", {
+      enabled: cfg.enabled,
+      white: cfg.white,
+      black: cfg.black,
+      osdWhite: cfg.osdWhite,
+    }),
   setCloseToTray: (enabled: boolean) => invoke<void>("set_close_to_tray", { enabled }),
 };
+
+/**
+ * Payload of the backend `perf://session` event (emitted when a recorded game
+ * exits). Mirrors the Rust `SessionPayload` (camelCase). `samples` are the full
+ * (pre-downsample) `PerfSample` series; the frontend summarizes + downsamples
+ * them when building the persisted `PerfSession`.
+ */
+export interface PerfSessionEvent {
+  exe: string;
+  startedAt: number;
+  endedAt: number;
+  durationSec: number;
+  cpuName: string | null;
+  gpuName: string | null;
+  samples: PerfSample[];
+}
 
 /** Frame-pacing stats for the in-game OSD, derived from the ETW present stream.
  *  All fields are null when FPS data is unavailable (no game / no privilege). */
