@@ -64,6 +64,9 @@ export function OsdOverlay() {
   });
   // OLED anti burn-in step (advances on a slow timer when enabled).
   const [shiftIdx, setShiftIdx] = useState(0);
+  // Logical bounds [x, y, w, h] of the monitor the foreground game is on, so the
+  // overlay follows the game across monitors instead of staying on the primary.
+  const [mon, setMon] = useState<[number, number, number, number] | null>(null);
   // The plate element — measured each render to size/position the native window.
   const plateRef = useRef<HTMLDivElement>(null);
 
@@ -123,6 +126,10 @@ export function OsdOverlay() {
       const info = await api.foregroundInfo().catch(() => null);
       if (!alive) return;
       setFg(info ? { exe: info.exe, isGame: info.isGame } : { exe: null, isGame: false });
+      // Track the foreground app's monitor so the overlay sits on the game's
+      // screen (cheap; falls back to the primary when it can't be resolved).
+      const m = await api.osdTargetMonitor().catch(() => null);
+      if (alive) setMon(m);
       if (show) {
         const d = await fetchOsdData(needGpu, needFps);
         if (alive) setData(d);
@@ -158,8 +165,9 @@ export function OsdOverlay() {
     const r = el.getBoundingClientRect();
     const w = Math.max(1, Math.ceil(r.width));
     const h = Math.max(1, Math.ceil(r.height));
-    const sw = window.screen.availWidth;
-    const sh = window.screen.availHeight;
+    // Place relative to the monitor the game is on (origin mx,my + size mw,mh);
+    // fall back to the primary monitor's work area when it can't be resolved.
+    const [mx, my, mw, mh] = mon ?? [0, 0, window.screen.availWidth, window.screen.availHeight];
     // OLED nudge offsets (small, inward from the corner).
     const [ox, oy] = cfg.oledShift ? OLED_OFFSETS[shiftIdx % OLED_OFFSETS.length] : [0, 0];
     const top = cfg.position === "tl" || cfg.position === "tr" || cfg.position === "tc";
@@ -168,18 +176,18 @@ export function OsdOverlay() {
     let x: number;
     let y: number;
     if (cfg.position === "free") {
-      x = Math.min(Math.max(cfg.freeX * sw, 0), Math.max(0, sw - w));
-      y = Math.min(Math.max(cfg.freeY * sh, 0), Math.max(0, sh - h));
+      x = mx + Math.min(Math.max(cfg.freeX * mw, 0), Math.max(0, mw - w));
+      y = my + Math.min(Math.max(cfg.freeY * mh, 0), Math.max(0, mh - h));
     } else {
       x = center
-        ? Math.min(Math.max((sw - w) / 2 + ox, 0), Math.max(0, sw - w))
+        ? mx + Math.min(Math.max((mw - w) / 2 + ox, 0), Math.max(0, mw - w))
         : left
-          ? margin + ox
-          : sw - w - margin - ox;
-      y = top ? margin + oy : sh - h - margin - oy;
+          ? mx + margin + ox
+          : mx + mw - w - margin - ox;
+      y = top ? my + margin + oy : my + mh - h - margin - oy;
     }
     api.osdSetBounds(x, y, w, h).catch(() => {});
-  }, [show, cfg, data, shownMetrics, shiftIdx]);
+  }, [show, cfg, data, shownMetrics, shiftIdx, mon]);
 
   // Keep the component mounted even when hidden so the layout effect can run and
   // park the window off-screen. The window itself is positioned at the corner, so
