@@ -15,10 +15,10 @@
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use windows::core::BOOL;
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW,
-    GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
+    EnumChildWindows, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+    WS_EX_TRANSPARENT,
 };
 
 const OSD_LABEL: &str = "osd";
@@ -140,37 +140,4 @@ pub fn osd_set_bounds(app: AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<
         force_click_through(hwnd_of(&win));
     }
     Ok(())
-}
-
-/// Logical (DPI-scaled) bounds `(x, y, w, h)` of the monitor the FOREGROUND
-/// window (the game) currently sits on, so the overlay can place itself on the
-/// game's monitor instead of always the primary one. `None` if it can't be
-/// resolved (no foreground window, or it isn't on a known monitor).
-#[tauri::command]
-pub fn osd_target_monitor(app: AppHandle) -> Option<(f64, f64, f64, f64)> {
-    let hwnd = unsafe { GetForegroundWindow() };
-    let mut rect = RECT::default();
-    if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
-        return None;
-    }
-    // Center of the foreground window, in physical (device) pixels.
-    let cx = (rect.left as i64 + rect.right as i64) / 2;
-    let cy = (rect.top as i64 + rect.bottom as i64) / 2;
-    let win = app.get_webview_window(OSD_LABEL)?;
-    for m in win.available_monitors().ok()? {
-        let p = m.position();
-        let s = m.size();
-        let (mx, my) = (p.x as i64, p.y as i64);
-        let (mw, mh) = (s.width as i64, s.height as i64);
-        if cx >= mx && cx < mx + mw && cy >= my && cy < my + mh {
-            let scale = m.scale_factor();
-            return Some((
-                p.x as f64 / scale,
-                p.y as f64 / scale,
-                s.width as f64 / scale,
-                s.height as f64 / scale,
-            ));
-        }
-    }
-    None
 }

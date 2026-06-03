@@ -277,10 +277,6 @@ export const api = {
   osdSetVisible: (visible: boolean) => invoke<void>("osd_set_visible", { visible }),
   osdSetBounds: (x: number, y: number, w: number, h: number) =>
     invoke<void>("osd_set_bounds", { x, y, w, h }),
-  /** Logical bounds [x, y, w, h] of the monitor the foreground game is on, so the
-   *  overlay can place itself there instead of always on the primary monitor. */
-  osdTargetMonitor: () =>
-    invoke<[number, number, number, number] | null>("osd_target_monitor"),
   osdFps: () => invoke<number | null>("osd_fps"),
   osdFpsStats: () => invoke<OsdFpsStats>("osd_fps_stats"),
   foregroundProcess: () => invoke<string | null>("foreground_process"),
