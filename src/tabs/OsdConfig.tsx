@@ -146,11 +146,33 @@ export function OsdConfig() {
   }, []);
   const previewScale = Math.min(0.85, Math.max(0.5, boxW > 0 ? boxW / (window.screen?.width || 1920) : 0.5));
 
+  // Fullscreen position editor: double-click the preview to drag the plate at full
+  // size over a screen-shaped canvas that maps 1:1 to the real display.
+  const [posEditor, setPosEditor] = useState(false);
+  const modalBoxRef = useRef<HTMLDivElement>(null);
+  const [modalBoxW, setModalBoxW] = useState(0);
+  useEffect(() => {
+    if (!posEditor) return;
+    const el = modalBoxRef.current;
+    const measure = () => el && setModalBoxW(el.getBoundingClientRect().width);
+    measure();
+    const ro = new ResizeObserver(measure);
+    if (el) ro.observe(el);
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setPosEditor(false);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [posEditor]);
+  // Plate drawn to-scale (its real footprint on the monitor); the big modal box
+  // makes that readable while keeping the drag positionally exact.
+  const modalScale = modalBoxW > 0 ? modalBoxW / (window.screen?.width || 1920) : 0.3;
+
   // Free placement: drag the plate within the preview to set its normalized
   // top-left position (clamped to the box). The same coords drive the overlay.
-  function onFreeDragStart(e: React.PointerEvent<HTMLDivElement>) {
+  function onFreeDragStart(e: React.PointerEvent<HTMLDivElement>, box: HTMLElement | null) {
     e.preventDefault();
-    const box = previewRef.current;
     if (!box) return;
     const clamp = (v: number) => Math.min(1, Math.max(0, v));
     const move = (ev: PointerEvent) => {
@@ -274,11 +296,16 @@ export function OsdConfig() {
             />
           </div>
 
-          {/* Live preview = a short, centered mini-monitor at the display aspect
-              ratio (fixed height so it always fits the panel above the fold). */}
+          {/* Live preview = a short mini-monitor; double-click to open a fullscreen
+              position editor (drag the plate at full size on a screen-shaped canvas). */}
           <div
-            className="relative mx-auto overflow-hidden rounded-xl border border-line"
+            className="relative mx-auto cursor-zoom-in overflow-hidden rounded-xl border border-line"
             style={{ height: 170, width: 170 * screenAspect, maxWidth: "100%" }}
+            onDoubleClick={() => {
+              applyPatch({ position: "free" });
+              setPosEditor(true);
+            }}
+            title="双击放大调整位置"
           >
             <div
               ref={previewRef}
@@ -306,7 +333,7 @@ export function OsdConfig() {
                 <div
                   className="absolute cursor-grab touch-none active:cursor-grabbing"
                   style={freePosStyle(previewCfg.freeX, previewCfg.freeY)}
-                  onPointerDown={onFreeDragStart}
+                  onPointerDown={(e) => onFreeDragStart(e, previewRef.current)}
                 >
                   <OsdPlate
                     metrics={previewCfg.metrics}
@@ -590,6 +617,52 @@ export function OsdConfig() {
           )}
         </div>
       </Modal>
+
+      {/* Fullscreen position editor — drag the plate at full size over a canvas
+          shaped like the display (maps 1:1 to the real screen). Esc / click-out saves. */}
+      {posEditor && (
+        <div
+          className="fixed inset-0 z-[70] flex flex-col items-center justify-center gap-3 bg-black/75 p-6 backdrop-blur-sm"
+          onClick={() => setPosEditor(false)}
+        >
+          <div className="text-[13px] font-medium text-white/85">
+            拖动叠加层到目标位置 · 点击空白处或按 Esc 完成
+          </div>
+          <div
+            ref={modalBoxRef}
+            className="relative overflow-hidden rounded-xl border border-white/15 shadow-2xl"
+            style={{
+              aspectRatio: screenAspect,
+              height: "78vh",
+              maxWidth: "92vw",
+              background:
+                "radial-gradient(120% 140% at 20% 0%, oklch(38% 0.08 250) 0%, oklch(16% 0.03 265) 60%), repeating-linear-gradient(135deg, oklch(20% 0.02 265) 0 22px, oklch(22% 0.02 265) 22px 44px)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              className="absolute cursor-grab touch-none active:cursor-grabbing"
+              style={freePosStyle(previewCfg.freeX, previewCfg.freeY)}
+              onPointerDown={(e) => onFreeDragStart(e, modalBoxRef.current)}
+            >
+              <OsdPlate
+                metrics={previewCfg.metrics}
+                style={previewCfg.style}
+                scale={previewCfg.scale * modalScale}
+                opacity={previewCfg.opacity}
+                rounded={previewCfg.rounded}
+                data={data}
+              />
+            </div>
+          </div>
+          <button
+            onClick={() => setPosEditor(false)}
+            className="no-drag rounded-lg bg-accent/20 px-4 py-1.5 text-[13px] font-medium text-accent-bright hover:bg-accent/30"
+          >
+            完成
+          </button>
+        </div>
+      )}
     </>
   );
 }

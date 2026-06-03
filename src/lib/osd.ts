@@ -159,9 +159,15 @@ export async function fetchOsdData(needGpu: boolean, needFps: boolean): Promise<
  *  used in the config preview and the live overlay so they stay consistent. */
 export function freePosStyle(x: number, y: number): CSSProperties {
   const clamp = (v: number) => Math.min(1, Math.max(0, v));
+  const cx = clamp(x);
+  const cy = clamp(y);
   return {
     position: "absolute",
-    left: `${clamp(x) * 100}%`,
-    top: `${clamp(y) * 100}%`,
+    left: `${cx * 100}%`,
+    top: `${cy * 100}%`,
+    // Anchor proportionally so the plate stays fully inside the canvas at the
+    // edges (plate-left = freeX·(boxW − plateW)) — matching how the live overlay
+    // clamps freeX·monitorW into [0, monitorW − plateW].
+    transform: `translate(${-cx * 100}%, ${-cy * 100}%)`,
   };
 }
