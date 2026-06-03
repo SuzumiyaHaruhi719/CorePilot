@@ -262,10 +262,12 @@ export function OsdConfig() {
             />
           </div>
 
-          {/* Live preview over a faux game backdrop */}
+          {/* Live preview over a faux game backdrop. Width-capped + centered so the
+              monitor-aspect box stays short enough to fit the panel (bottom-anchored
+              plates would otherwise fall below the fold in the taller 16:9 box). */}
           <div
-            className="relative overflow-hidden rounded-xl border border-line"
-            style={{ aspectRatio: screenAspect }}
+            className="relative mx-auto w-full overflow-hidden rounded-xl border border-line"
+            style={{ aspectRatio: screenAspect, maxWidth: 380 }}
           >
             <div
               ref={previewRef}
