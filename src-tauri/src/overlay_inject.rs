@@ -422,7 +422,9 @@ pub fn overlay_attach(app: AppHandle, pid: u32, layout_flags: Option<u32>) -> Re
             // Sampler starts publishing for this PID on its next tick.
             STATE.lock().target_pid = Some(pid);
             Ok(OverlayStatus {
-                reason: reason_for(&target, mode),
+                // Distinct from the probe's "可注入": the DLL is now injected and
+                // drawing in the game's own frame (so it follows the game window).
+                reason: format!("✅ 已注入（{}）", api_label(target.api)),
                 target,
                 mode,
                 attached: true,
