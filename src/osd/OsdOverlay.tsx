@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { api } from "../lib/ipc";
-import { fetchOsdData, type OsdData } from "../lib/osd";
+import { fetchOsdData, freePosStyle, type OsdData } from "../lib/osd";
 import {
   resolveOsd,
   useOsd,
@@ -70,6 +70,38 @@ export function OsdOverlay() {
   const [mon, setMon] = useState<[number, number, number, number] | null>(null);
   // The plate element — measured each render to size/position the native window.
   const plateRef = useRef<HTMLDivElement>(null);
+  // Fullscreen position editor (driven by the config panel via `osd:position-mode`):
+  // the backend makes THIS window cover the desktop + interactive; we render a drag
+  // canvas, SKIP `osd_set_bounds` (no content-resize → no jitter), and set freeX/freeY
+  // by dragging the plate over the real screen (1:1).
+  const [posEdit, setPosEdit] = useState(false);
+  const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+  const dragRef = useRef<{ x: number; y: number } | null>(null);
+  function exitPosEdit() {
+    setPosEdit(false);
+    setDragPos(null);
+    dragRef.current = null;
+    void api.osdPositionMode(false);
+    const s = useOsd.getState();
+    void emit("osd:position-result", { freeX: s.freeX, freeY: s.freeY });
+  }
+  function startPosDrag(e: React.PointerEvent) {
+    e.preventDefault();
+    const move = (ev: PointerEvent) => {
+      const x = Math.min(1, Math.max(0, ev.clientX / window.innerWidth));
+      const y = Math.min(1, Math.max(0, ev.clientY / window.innerHeight));
+      dragRef.current = { x, y };
+      setDragPos({ x, y });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      const p = dragRef.current;
+      if (p) useOsd.setState({ freeX: p.x, freeY: p.y, position: "free" });
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
 
   // Live config push from the main window's config panel (separate webview), so
   // edits in the panel reflect on the overlay without a reload.
@@ -80,9 +112,11 @@ export function OsdOverlay() {
     const unTargets = listen<{ targets: OsdTarget[] }>("osd:targets", (e) =>
       useOsdTargets.setState({ targets: e.payload.targets }),
     );
+    const unPos = listen<boolean>("osd:position-mode", (e) => setPosEdit(e.payload));
     return () => {
       void unCfg.then((f) => f());
       void unTargets.then((f) => f());
+      void unPos.then((f) => f());
     };
   }, []);
 
@@ -158,11 +192,25 @@ export function OsdOverlay() {
     return () => window.clearInterval(id);
   }, [show, cfg.oledShift]);
 
+  // Esc exits the fullscreen position editor (same as the 完成 button).
+  useEffect(() => {
+    if (!posEdit) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") exitPosEdit();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [posEdit]);
+
   // Drive the native window's size + position from the rendered plate. The window
   // (not CSS) is what sits at the chosen corner now, so we measure the plate and
   // place a content-sized window there. When hidden, park a 1×1 window off-screen.
   useLayoutEffect(() => {
     const margin = 8;
+    // The editor owns the window geometry (fullscreen) while active — never resize
+    // it, or the content-sizing would fight the drag and the overlay would jitter.
+    if (posEdit) return;
     if (!show) {
       api.osdSetBounds(-200, -200, 1, 1).catch(() => {});
       return;
@@ -194,7 +242,41 @@ export function OsdOverlay() {
       y = top ? my + margin + oy : my + mh - h - margin - oy;
     }
     api.osdSetBounds(x, y, w, h).catch(() => {});
-  }, [show, cfg, data, shownMetrics, shiftIdx, mon]);
+  }, [show, cfg, data, shownMetrics, shiftIdx, mon, posEdit]);
+
+  // Fullscreen position editor: the window covers the desktop (set by the backend),
+  // so we dim it and draw the plate at its REAL size; dragging maps 1:1 to the screen.
+  if (posEdit) {
+    const fx = dragPos?.x ?? global.freeX;
+    const fy = dragPos?.y ?? global.freeY;
+    return (
+      <div className="fixed inset-0 select-none" style={{ background: "rgba(0,0,0,0.32)" }}>
+        <div className="pointer-events-none fixed left-1/2 top-7 -translate-x-1/2 rounded-lg bg-black/75 px-4 py-2 text-[13px] font-medium text-white/90 shadow-lg">
+          拖动叠加层到目标位置 · 按 Esc 或点击「完成」保存
+        </div>
+        <div
+          className="absolute cursor-grab touch-none active:cursor-grabbing"
+          style={freePosStyle(fx, fy)}
+          onPointerDown={startPosDrag}
+        >
+          <OsdPlate
+            metrics={global.metrics}
+            style={global.style}
+            scale={global.scale}
+            opacity={global.opacity}
+            rounded={global.rounded}
+            data={data}
+          />
+        </div>
+        <button
+          onClick={exitPosEdit}
+          className="no-drag fixed bottom-9 left-1/2 -translate-x-1/2 rounded-xl bg-accent px-6 py-2.5 text-[14px] font-semibold text-white shadow-xl"
+        >
+          完成
+        </button>
+      </div>
+    );
+  }
 
   // Keep the component mounted even when hidden so the layout effect can run and
   // park the window off-screen. The window itself is positioned at the corner, so

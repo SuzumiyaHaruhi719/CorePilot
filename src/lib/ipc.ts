@@ -281,6 +281,9 @@ export const api = {
    *  unresolved), so the overlay can follow the game across monitors. */
   osdTargetMonitor: () =>
     invoke<[number, number, number, number] | null>("osd_target_monitor"),
+  /** Enter/leave the fullscreen position editor (overlay covers the desktop +
+   *  becomes interactive so the plate can be dragged over the real screen). */
+  osdPositionMode: (enter: boolean) => invoke<void>("osd_position_mode", { enter }),
   osdFps: () => invoke<number | null>("osd_fps"),
   osdFpsStats: () => invoke<OsdFpsStats>("osd_fps_stats"),
   foregroundProcess: () => invoke<string | null>("foreground_process"),

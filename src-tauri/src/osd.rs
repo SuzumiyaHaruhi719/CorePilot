@@ -178,3 +178,78 @@ pub fn osd_target_monitor(app: AppHandle) -> Option<(f64, f64, f64, f64)> {
     }
     None
 }
+
+/// Remove the click-through + non-activating bits from one window's extended style.
+unsafe fn unset_through_one(hwnd: HWND) {
+    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    let want = ex & !(WS_EX_TRANSPARENT.0 as isize) & !(WS_EX_NOACTIVATE.0 as isize);
+    if ex != want {
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
+    }
+}
+
+unsafe extern "system" fn enum_child_unset(child: HWND, _: LPARAM) -> BOOL {
+    unset_through_one(child);
+    true.into()
+}
+
+/// Inverse of [`force_click_through`]: make the overlay + its WebView2 children
+/// interactive again (receive clicks + focus) — used by the fullscreen editor.
+fn unset_click_through(hwnd_raw: isize) {
+    if hwnd_raw == 0 {
+        return;
+    }
+    let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+    unsafe {
+        unset_through_one(hwnd);
+        let _ = EnumChildWindows(Some(hwnd), Some(enum_child_unset), LPARAM(0));
+    }
+}
+
+/// Enter/leave the fullscreen **position editor**. On enter the overlay covers the
+/// foreground app's monitor (borderless full-screen) and becomes interactive, so
+/// the plate can be dragged directly over the real desktop. On leave, click-through
+/// is restored and the frontend's `osd_set_bounds` resumes content-sizing.
+///
+/// While editing, the frontend MUST NOT call `osd_set_bounds` — shrinking the
+/// window back to the plate mid-drag is exactly what made the overlay jitter.
+#[tauri::command]
+pub fn osd_position_mode(app: AppHandle, enter: bool) -> Result<(), String> {
+    let win = app.get_webview_window(OSD_LABEL).ok_or("no osd window")?;
+    if enter {
+        // Cover the monitor the foreground app (the one double-clicked from) is on,
+        // so the editor opens on the screen the user is actually looking at.
+        let fg = unsafe { GetForegroundWindow() };
+        let mut rect = RECT::default();
+        let target = if unsafe { GetWindowRect(fg, &mut rect) }.is_ok() {
+            let cx = (rect.left as i64 + rect.right as i64) / 2;
+            let cy = (rect.top as i64 + rect.bottom as i64) / 2;
+            win.available_monitors().ok().and_then(|ms| {
+                ms.into_iter().find(|m| {
+                    let p = m.position();
+                    let s = m.size();
+                    cx >= p.x as i64
+                        && cx < p.x as i64 + s.width as i64
+                        && cy >= p.y as i64
+                        && cy < p.y as i64 + s.height as i64
+                })
+            })
+        } else {
+            None
+        };
+        let target = target.or_else(|| win.primary_monitor().ok().flatten());
+        if let Some(m) = target {
+            let p = m.position();
+            let s = m.size();
+            let _ = win.set_position(tauri::PhysicalPosition::new(p.x, p.y));
+            let _ = win.set_size(tauri::PhysicalSize::new(s.width, s.height));
+        }
+        let _ = win.set_ignore_cursor_events(false);
+        unset_click_through(hwnd_of(&win));
+        let _ = win.set_focus();
+    } else {
+        let _ = win.set_ignore_cursor_events(true);
+        force_click_through(hwnd_of(&win));
+    }
+    Ok(())
+}

@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { Modal } from "../components/ui/Modal";
 import { Segmented } from "../components/ui/Segmented";
 import { Slider } from "../components/ui/Slider";
@@ -110,6 +110,16 @@ export function OsdConfig() {
     () => useOsdTargets.subscribe((s) => void emit("osd:targets", { targets: s.targets })),
     [],
   );
+  // The fullscreen position editor (overlay window) reports the final dragged
+  // position back here, so the config + persisted store stay in sync.
+  useEffect(() => {
+    const un = listen<{ freeX: number; freeY: number }>("osd:position-result", (e) =>
+      useOsd
+        .getState()
+        .update({ freeX: e.payload.freeX, freeY: e.payload.freeY, position: "free" }),
+    );
+    return () => void un.then((f) => f());
+  }, []);
 
   function setEnabled(enabled: boolean) {
     osd.setEnabled(enabled);
@@ -302,10 +312,11 @@ export function OsdConfig() {
             className="relative mx-auto cursor-zoom-in overflow-hidden rounded-xl border border-line"
             style={{ height: 170, width: 170 * screenAspect, maxWidth: "100%" }}
             onDoubleClick={() => {
-              applyPatch({ position: "free" });
-              setPosEditor(true);
+              osd.update({ position: "free" });
+              api.osdPositionMode(true).catch(() => undefined);
+              void emit("osd:position-mode", true);
             }}
-            title="双击放大调整位置"
+            title="双击在整个屏幕上拖动调整位置"
           >
             <div
               ref={previewRef}

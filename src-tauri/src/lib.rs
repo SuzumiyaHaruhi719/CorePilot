@@ -139,6 +139,7 @@ pub fn run() {
             osd::osd_set_visible,
             osd::osd_set_bounds,
             osd::osd_target_monitor,
+            osd::osd_position_mode,
             fps::osd_fps,
             fps::osd_fps_stats,
             fps::foreground_process,
