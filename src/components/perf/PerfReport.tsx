@@ -550,7 +550,11 @@ export function PerfReport({ session }: { session: PerfSession }) {
         </div>
 
         <div className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-line pt-3.5 sm:grid-cols-4">
-          <MetaItem icon={<Database size={14} />} label="数据点" value={`${samples.length}`} />
+          <MetaItem
+            icon={<Database size={14} />}
+            label="采样间隔"
+            value={samples.length > 0 ? `${(session.durationSec / samples.length).toFixed(1)}s` : DASH}
+          />
           <MetaItem icon={<Cpu size={14} />} label="CPU" value={session.cpuName ?? DASH} />
           <MetaItem icon={<MonitorPlay size={14} />} label="GPU" value={session.gpuName ?? DASH} />
           <MetaItem
