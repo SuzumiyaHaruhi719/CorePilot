@@ -126,9 +126,11 @@ export function OsdOverlay() {
       const info = await api.foregroundInfo().catch(() => null);
       if (!alive) return;
       setFg(info ? { exe: info.exe, isGame: info.isGame } : { exe: null, isGame: false });
-      // Track the foreground app's monitor so the overlay sits on the game's
-      // screen (cheap; falls back to the primary when it can't be resolved).
-      const m = await api.osdTargetMonitor().catch(() => null);
+      // Follow the game across monitors — but ONLY for an actual game. In desktop
+      // mode the foreground is an ordinary window (often CorePilot itself, maybe on
+      // another monitor); chasing it made the desktop OSD hop screens / disappear.
+      // So there we leave mon = null and fall back to the primary monitor below.
+      const m = info?.isGame ? await api.osdTargetMonitor().catch(() => null) : null;
       if (alive) setMon(m);
       if (show) {
         const d = await fetchOsdData(needGpu, needFps);
