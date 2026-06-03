@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import { tauriStorage } from "../lib/persist";
+import type { OverlayStatus } from "../lib/ipc";
 
 export type OsdStyle = "horizontal" | "vertical";
 export type OsdPosition = "tl" | "tr" | "tc" | "bl" | "br" | "bc" | "free";
@@ -91,6 +92,19 @@ export const useOsd = create<OsdStore>()(
     { name: "corepilot-osd", version: 1, storage: createJSONStorage(() => tauriStorage) },
   ),
 );
+
+/** Live in-game (injection) overlay status, published by the app-level
+ *  `useOverlayInjection` driver and read by the OSD config panel's status line.
+ *  Not persisted — it reflects the current foreground app's inject/window state. */
+interface OverlayStatusStore {
+  status: OverlayStatus | null;
+  setStatus: (status: OverlayStatus | null) => void;
+}
+
+export const useOverlayStatus = create<OverlayStatusStore>((set) => ({
+  status: null,
+  setStatus: (status) => set({ status }),
+}));
 
 /** Appearance/metric fields of an OsdConfig (everything except `enabled`, which
  *  is the master switch and never part of a per-game override). */

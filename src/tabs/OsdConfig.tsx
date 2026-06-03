@@ -11,7 +11,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { Modal } from "../components/ui/Modal";
 import { Segmented } from "../components/ui/Segmented";
@@ -25,7 +25,6 @@ import {
   OSD_METRICS,
   fetchOsdData,
   freePosStyle,
-  layoutFlagsFromMetrics,
   type OsdCategory,
   type OsdData,
 } from "../lib/osd";
@@ -33,6 +32,7 @@ import {
   effectiveConfig,
   useOsd,
   useOsdTargets,
+  useOverlayStatus,
   type OsdAppearance,
   type OsdConfig as OsdCfg,
 } from "../store/osd";
@@ -314,7 +314,7 @@ export function OsdConfig() {
         </div>
 
         {/* In-frame injection overlay (true fullscreen) + anti-cheat-safe hybrid */}
-        <InjectionOverlaySection metrics={previewCfg.metrics} />
+        <InjectionOverlaySection />
 
         {/* Per-game white / black list */}
         <div className="glass hairline rounded-2xl p-4">
@@ -568,14 +568,6 @@ export function OsdConfig() {
   );
 }
 
-interface InjectionOverlaySectionProps {
-  /** The currently-previewed metric selection — drives which rows the injected
-   *  overlay draws (mapped to `layout_flags`). */
-  metrics: readonly string[];
-}
-
-/** How often we re-check the foreground app + (re)attach while injection is on. */
-const INJECT_POLL_MS = 1500;
 
 /**
  * "游戏内叠加（注入）" — the MSI-Afterburner-style in-frame overlay that draws
@@ -586,82 +578,14 @@ const INJECT_POLL_MS = 1500;
  * status line explains exactly what happened, so a user never gets silently
  * nothing (or, worse, a ban).
  */
-function InjectionOverlaySection({ metrics }: InjectionOverlaySectionProps) {
-  // Master switch is persisted in the OSD store so it survives tab switches
-  // (it used to be local state that reset to off — and detached — on unmount).
+function InjectionOverlaySection() {
+  // The attach/detach loop now runs app-wide in `useOverlayInjection` (<App>), so
+  // injection works on any tab / while gaming in the background — not only while
+  // this tab is open. This panel is just the persisted toggle + the live status
+  // that driver publishes to `useOverlayStatus`.
   const enabled = useOsd((s) => s.inject);
   const updateOsd = useOsd((s) => s.update);
-  const [status, setStatus] = useState<OverlayStatus | null>(null);
-  // PID we currently have the injected overlay attached to (0 = none). A ref so
-  // the poll loop can detach the previous game when the foreground changes
-  // without re-subscribing the interval on every attach.
-  const attachedPid = useRef(0);
-
-  // Keep the latest layout flags in a ref so the steady-state poll uses the
-  // user's current metric selection without restarting the interval.
-  const layoutFlags = useMemo(() => layoutFlagsFromMetrics(metrics), [metrics]);
-  const flagsRef = useRef(layoutFlags);
-  flagsRef.current = layoutFlags;
-
-  const detachCurrent = useCallback(async () => {
-    const pid = attachedPid.current;
-    if (pid !== 0) {
-      attachedPid.current = 0;
-      await api.overlayDetach(pid).catch(() => undefined);
-    }
-  }, []);
-
-  // While enabled: poll the foreground app; inject when it's an injectable game
-  // (detaching any previously-attached game first), else show the explanatory
-  // status (the backend has already fallen back to the window overlay).
-  useEffect(() => {
-    if (!enabled) {
-      // Turning off: detach whatever we attached.
-      void detachCurrent();
-      setStatus(null);
-      return;
-    }
-    let alive = true;
-    const tick = async () => {
-      try {
-        const st = await api.overlayStatus();
-        if (!alive) return;
-        if (st.mode === "inject") {
-          // Re-attach when the foreground game changed; (re)attaching the same
-          // pid is cheap and keeps the layout flags current.
-          if (attachedPid.current !== st.target.pid) {
-            if (attachedPid.current !== 0) await detachCurrent();
-            const attached = await api.overlayAttach(st.target.pid, flagsRef.current);
-            attachedPid.current = st.target.pid;
-            if (alive) setStatus(attached);
-          } else {
-            // Refresh the layout flags on the live target.
-            const attached = await api.overlayAttach(st.target.pid, flagsRef.current);
-            if (alive) setStatus(attached);
-          }
-        } else {
-          // Not injectable (anti-cheat / unsupported / no game): drop any prior
-          // attach and surface the reason. The backend already chose the window
-          // fallback when appropriate.
-          if (attachedPid.current !== 0) await detachCurrent();
-          if (alive) setStatus(st);
-        }
-      } catch {
-        if (alive) setStatus(null);
-      }
-    };
-    void tick();
-    const id = window.setInterval(() => void tick(), INJECT_POLL_MS);
-    return () => {
-      alive = false;
-      window.clearInterval(id);
-    };
-  }, [enabled, detachCurrent]);
-
-  // NOTE: intentionally NOT detaching on unmount. The master switch is persisted
-  // (osd.inject), so the injected overlay must survive leaving the OSD tab —
-  // detaching on unmount is what made the in-game overlay vanish on every tab
-  // switch (and look like it was never injected).
+  const status = useOverlayStatus((s) => s.status);
 
   return (
     <div className="glass hairline rounded-2xl p-4">
