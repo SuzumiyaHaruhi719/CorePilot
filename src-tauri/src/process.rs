@@ -28,7 +28,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
 };
 use windows::Win32::System::Performance::{
-    PdhAddEnglishCounterW, PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhOpenQueryW,
+    PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
+    PdhOpenQueryW,
     PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA,
 };
 
@@ -471,6 +472,64 @@ pub fn thread_counts() -> CoreResult<HashMap<u32, u32>> {
     Ok(map)
 }
 
+/// Per-process dedicated VRAM (bytes) keyed by PID, via the PDH
+/// `\GPU Process Memory(*)\Dedicated Usage` counter — the same source Windows
+/// Task Manager uses. NVML does NOT report per-process VRAM on consumer (WDDM)
+/// GPUs, so PDH is the portable path. Dedicated Usage is a raw gauge (not a rate),
+/// so a single collection suffices; we open + close a short-lived query per
+/// snapshot. Returns an empty map on any failure (the column then shows "—").
+fn gpu_vram_map() -> HashMap<u32, u64> {
+    let mut map: HashMap<u32, u64> = HashMap::new();
+    unsafe {
+        let mut query = PDH_HQUERY::default();
+        if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != PDH_SUCCESS {
+            return map;
+        }
+        let path: Vec<u16> = r"\GPU Process Memory(*)\Dedicated Usage"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut ctr = PDH_HCOUNTER::default();
+        if PdhAddEnglishCounterW(query, PCWSTR(path.as_ptr()), 0, &mut ctr) != PDH_SUCCESS {
+            let _ = PdhCloseQuery(query);
+            return map;
+        }
+        if PdhCollectQueryData(query) != PDH_SUCCESS {
+            let _ = PdhCloseQuery(query);
+            return map;
+        }
+        let mut size: u32 = 0;
+        let mut count: u32 = 0;
+        let rc = PdhGetFormattedCounterArrayW(ctr, PDH_FMT_DOUBLE, &mut size, &mut count, None);
+        if rc == PDH_MORE_DATA && size > 0 {
+            let mut buf = vec![0u8; size as usize];
+            let items_ptr = buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
+            if PdhGetFormattedCounterArrayW(ctr, PDH_FMT_DOUBLE, &mut size, &mut count, Some(items_ptr))
+                == PDH_SUCCESS
+            {
+                let items = std::slice::from_raw_parts(items_ptr, count as usize);
+                for item in items {
+                    if item.FmtValue.CStatus != PDH_SUCCESS || item.szName.is_null() {
+                        continue;
+                    }
+                    let value = item.FmtValue.Anonymous.doubleValue;
+                    if !value.is_finite() || value <= 0.0 {
+                        continue;
+                    }
+                    let Ok(name) = item.szName.to_string() else {
+                        continue;
+                    };
+                    if let Some(pid) = parse_pid(&name) {
+                        *map.entry(pid).or_insert(0) += value as u64;
+                    }
+                }
+            }
+        }
+        let _ = PdhCloseQuery(query);
+    }
+    map
+}
+
 /// Refresh and snapshot all processes. `logical` is the logical-CPU count
 /// used to normalize sysinfo's per-core CPU% into a Task-Manager-style total%.
 pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<ProcInfo> {
@@ -478,8 +537,9 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
     // Per-process GPU utilization + engine/adapter attribution, collected once
     // for this snapshot.
     let gpu = gpu_map();
-    // Per-process VRAM (NVML), collected once for this snapshot.
-    let gpu_mem_map = crate::gpu::gpu_process_memory();
+    // Per-process dedicated VRAM via PDH (\GPU Process Memory) — same source as
+    // Windows Task Manager; NVML doesn't expose it on consumer WDDM GPUs.
+    let gpu_vram = gpu_vram_map();
     // PIDs seen this refresh, used afterwards to prune the detail cache.
     let mut live_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let out: Vec<ProcInfo> = sys
@@ -519,7 +579,7 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
                 mem: process.memory(),
                 threads: threads.get(&id).copied().unwrap_or(0),
                 gpu: gpu_pct,
-                gpu_mem: gpu_mem_map.get(&id).copied(),
+                gpu_mem: gpu_vram.get(&id).copied(),
                 power,
                 affinity: details.affinity,
                 user: details.user,

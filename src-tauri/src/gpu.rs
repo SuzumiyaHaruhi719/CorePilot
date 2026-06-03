@@ -166,39 +166,6 @@ fn init_device() -> Result<(Nvml, Device<'static>), String> {
     Ok((nvml, device))
 }
 
-/// Per-process GPU memory (VRAM) usage in bytes, keyed by PID, via NVML's running
-/// graphics + compute process lists. Empty when NVML is unavailable or the driver
-/// doesn't report per-process memory. NVIDIA-only (this app's GPU support is NVML).
-pub fn gpu_process_memory() -> std::collections::HashMap<u32, u64> {
-    use std::collections::HashMap;
-    let mut map: HashMap<u32, u64> = HashMap::new();
-    if !*NVML_PRESENT {
-        return map;
-    }
-    let Ok((_nvml, device)) = init_device() else {
-        return map;
-    };
-    // Graphics + compute process lists; `flatten()` drops the Err arms, leaving
-    // the Vec of processes from each successful query (element type inferred from
-    // the NVML method's return, so no need to name the wrapper struct).
-    let lists = [
-        device.running_graphics_processes(),
-        device.running_compute_processes(),
-    ];
-    for list in lists.into_iter().flatten() {
-        for p in list {
-            if let nvml_wrapper::enums::device::UsedGpuMemory::Used(bytes) = p.used_gpu_memory {
-                if bytes > 0 {
-                    map.entry(p.pid)
-                        .and_modify(|m| *m = (*m).max(bytes))
-                        .or_insert(bytes);
-                }
-            }
-        }
-    }
-    map
-}
-
 /// Cached "is there an NVIDIA GPU" probe so the telemetry sampler doesn't retry
 /// NVML init every poll on non-NVIDIA systems.
 static NVML_PRESENT: Lazy<bool> = Lazy::new(|| Nvml::init().is_ok());
