@@ -21,6 +21,8 @@ interface SettingsState {
   accent: AccentName;
   glow: GlowLevel;
   acrylic: boolean;
+  /** Whole-window opacity, 30–100 (%). Applied via the backend on change. */
+  windowOpacity: number;
   reduceMotion: boolean;
   language: Language;
   pollMs: number;
@@ -46,6 +48,7 @@ export const useSettings = create<SettingsState>()(
       accent: "violet",
       glow: "intense",
       acrylic: true,
+      windowOpacity: 100,
       reduceMotion: false,
       language: "zh",
       pollMs: 1500,

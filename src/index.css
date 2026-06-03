@@ -126,6 +126,38 @@
     box-shadow: inset 0 0 0 1px var(--color-line);
   }
 
+  /* ── "亚克力模糊" — in-app layered frosted glass (Warp-style) ───────────────
+     True DWM acrylic/mica does NOT composite through a transparent WebView2 on
+     Win11 24H2 (it just shows the windows behind, unblurred), so the window
+     stays opaque and we render the frost in-app: a soft colourful field sits
+     behind the UI; translucent panels backdrop-blur it, and nested surfaces blur
+     again for depth. Text/controls sit ON TOP of the blurred surfaces — so only
+     the background is blurred, never the content. */
+  html[data-acrylic="true"] body {
+    background:
+      radial-gradient(72% 60% at 14% -4%, color-mix(in oklch, var(--color-accent) 16%, transparent), transparent 60%),
+      radial-gradient(64% 58% at 104% 104%, oklch(78% 0.10 224 / 0.12), transparent 62%),
+      var(--color-base);
+  }
+  /* Layer 1 — cards: translucent, blur the field behind, with a fine top
+     glass-edge highlight + soft drop for depth. Text sits above → stays sharp. */
+  html[data-acrylic="true"] .glass {
+    background: color-mix(in oklch, var(--color-surface) 62%, transparent);
+    backdrop-filter: blur(28px) saturate(150%);
+    -webkit-backdrop-filter: blur(28px) saturate(150%);
+    box-shadow:
+      inset 0 1px 0 oklch(100% 0 0 / 0.06),
+      0 1px 2px oklch(0% 0 0 / 0.22),
+      0 16px 40px -20px oklch(0% 0 0 / 0.55);
+  }
+  /* Layer 2 — inner surfaces frost layer 1 again, lighter blur → visible depth. */
+  html[data-acrylic="true"] .glass-2,
+  html[data-acrylic="true"] .glass .glass {
+    background: color-mix(in oklch, var(--color-surface2) 54%, transparent);
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+  }
+
   /* Soft glow — defaults to the live accent so it recolors with the theme. */
   .glow {
     --glow: var(--color-accent);

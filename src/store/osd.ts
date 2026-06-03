@@ -25,6 +25,9 @@ export interface OsdConfig {
   /** Desktop mode: also show the OSD when no game is in the foreground (on the
    *  desktop / regular apps); FPS metrics are hidden there (no game → no FPS). */
   desktopMode: boolean;
+  /** In-game (injection) overlay master switch. Persisted so it survives tab
+   *  switches; the attach/detach loop runs from the OSD config panel. */
+  inject: boolean;
   /** Enabled metric keys (see OSD_METRICS), in display order. */
   metrics: string[];
 }
@@ -74,6 +77,7 @@ export const useOsd = create<OsdStore>()(
       rounded: true,
       oledShift: false,
       desktopMode: false,
+      inject: false,
       metrics: DEFAULT_METRICS,
       setEnabled: (enabled) => set({ enabled }),
       update: (patch) => set(patch),

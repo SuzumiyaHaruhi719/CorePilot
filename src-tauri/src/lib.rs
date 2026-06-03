@@ -148,6 +148,8 @@ pub fn run() {
             overlay_inject::overlay_status,
             perf_recorder::perf_recorder_config,
             tray::set_close_to_tray,
+            commands::set_acrylic,
+            commands::set_window_opacity,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

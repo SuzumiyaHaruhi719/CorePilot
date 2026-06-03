@@ -52,6 +52,7 @@ function cfgOf(s: OsdCfg): OsdCfg {
     rounded: s.rounded,
     oledShift: s.oledShift,
     desktopMode: s.desktopMode,
+    inject: s.inject,
     metrics: s.metrics,
   };
 }
@@ -586,7 +587,10 @@ const INJECT_POLL_MS = 1500;
  * nothing (or, worse, a ban).
  */
 function InjectionOverlaySection({ metrics }: InjectionOverlaySectionProps) {
-  const [enabled, setEnabled] = useState(false);
+  // Master switch is persisted in the OSD store so it survives tab switches
+  // (it used to be local state that reset to off — and detached — on unmount).
+  const enabled = useOsd((s) => s.inject);
+  const updateOsd = useOsd((s) => s.update);
   const [status, setStatus] = useState<OverlayStatus | null>(null);
   // PID we currently have the injected overlay attached to (0 = none). A ref so
   // the poll loop can detach the previous game when the foreground changes
@@ -654,8 +658,10 @@ function InjectionOverlaySection({ metrics }: InjectionOverlaySectionProps) {
     };
   }, [enabled, detachCurrent]);
 
-  // Detach on unmount (leaving the tab) so we never leave a stale injection.
-  useEffect(() => () => void detachCurrent(), [detachCurrent]);
+  // NOTE: intentionally NOT detaching on unmount. The master switch is persisted
+  // (osd.inject), so the injected overlay must survive leaving the OSD tab —
+  // detaching on unmount is what made the in-game overlay vanish on every tab
+  // switch (and look like it was never injected).
 
   return (
     <div className="glass hairline rounded-2xl p-4">
@@ -669,7 +675,7 @@ function InjectionOverlaySection({ metrics }: InjectionOverlaySectionProps) {
             </div>
           </div>
         </div>
-        <Toggle checked={enabled} onChange={setEnabled} />
+        <Toggle checked={enabled} onChange={(v) => updateOsd({ inject: v })} />
       </div>
 
       {/* Anti-cheat safety note — always visible so the guarantee is explicit. */}

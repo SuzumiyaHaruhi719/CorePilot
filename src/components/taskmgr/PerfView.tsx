@@ -132,7 +132,7 @@ export function PerfView() {
         ))}
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid items-start gap-4 lg:grid-cols-2">
         {perfCards.cpu && (
           <Card>
             <CardHead
@@ -222,7 +222,7 @@ export function PerfView() {
               color="var(--color-freq)"
             />
             <div className="my-2">
-              <Sparkline data={diskHist} max={Math.max(...diskHist, 1)} hue={70} height={70} />
+              <Sparkline data={diskHist} max={Math.max(...diskHist, 1)} hue={70} height={84} />
             </div>
             <div className="mt-2 grid grid-cols-2 gap-3">
               <div className="flex items-center gap-2">
@@ -257,7 +257,6 @@ export function PerfView() {
                 down={netDownHist}
                 upHue={75}
                 downHue={150}
-                format={fmtRate}
                 height={84}
               />
             </div>

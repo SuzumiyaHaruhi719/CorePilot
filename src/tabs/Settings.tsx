@@ -15,7 +15,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
 import { Segmented } from "../components/ui/Segmented";
@@ -560,6 +560,24 @@ export function Settings() {
 
           <SettingRow title="亚克力模糊" desc="Windows 11 acrylic 背景效果">
             <Toggle checked={settings.acrylic} onChange={(value) => settings.update({ acrylic: value })} />
+          </SettingRow>
+
+          <SettingRow title="窗口不透明度" desc="整个窗口的不透明度（亚克力开启时可透出背景）">
+            <div className="flex items-center gap-3">
+              <div className="w-40">
+                <input
+                  type="range"
+                  min={30}
+                  max={100}
+                  step={1}
+                  value={settings.windowOpacity}
+                  onChange={(e) => settings.update({ windowOpacity: Number(e.target.value) })}
+                  className="cp-slider"
+                  style={{ "--pct": `${((settings.windowOpacity - 30) / 70) * 100}%` } as CSSProperties}
+                />
+              </div>
+              <span className="nums w-9 text-right text-[13px] text-ink">{settings.windowOpacity}%</span>
+            </div>
           </SettingRow>
 
           <SettingRow title="减弱动画" desc="降低动效以提升无障碍体验">

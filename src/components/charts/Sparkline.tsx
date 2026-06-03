@@ -4,7 +4,8 @@ interface SparklineProps {
   data: number[];
   max: number;
   hue: number;
-  height?: number;
+  /** Pixel height, or a CSS length like "100%" to fill a flex parent. */
+  height?: number | string;
 }
 
 /** Lightweight SVG area sparkline (stretches to container width). */

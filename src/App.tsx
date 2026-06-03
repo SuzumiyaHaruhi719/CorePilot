@@ -33,6 +33,7 @@ function App() {
   const tab = useUi((s) => s.tab);
   const accent = useSettings((s) => s.accent);
   const acrylic = useSettings((s) => s.acrylic);
+  const windowOpacity = useSettings((s) => s.windowOpacity);
   const glow = useSettings((s) => s.glow);
   const reduceMotion = useSettings((s) => s.reduceMotion);
   const closeToTray = useSettings((s) => s.closeToTray);
@@ -84,7 +85,15 @@ function App() {
 
   useEffect(() => {
     document.documentElement.dataset.acrylic = String(acrylic);
+    // Apply/clear the real Win11 acrylic backdrop on the native window so the
+    // toggle does something (the CSS below only frosts the page when it's on).
+    api.setAcrylic(acrylic).catch(() => undefined);
   }, [acrylic]);
+
+  useEffect(() => {
+    // Whole-window opacity (%). Persisted in settings; applied natively.
+    api.setWindowOpacity(windowOpacity).catch(() => undefined);
+  }, [windowOpacity]);
 
   useEffect(() => {
     document.documentElement.dataset.glow = glow;

@@ -339,6 +339,22 @@ function FeaturedChart({ series, summary, timesSec, syncKey, onHover, hovered }:
   const values = cur?.values ?? [];
   const stats = useMemo(() => seriesStats(values), [values]);
 
+  // Pointer tracking for THIS chart so it shows the same full-metric tooltip the
+  // small grid charts do — it lives outside their hover container, so it needs
+  // its own. Positioned relative to the whole featured card (taller → fits).
+  const featRef = useRef<HTMLDivElement>(null);
+  const [featCur, setFeatCur] = useState<{ x: number; y: number } | null>(null);
+  const onChartMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const el = featRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setFeatCur({ x: e.clientX - r.left, y: e.clientY - r.top });
+  }, []);
+  const onChartLeave = useCallback(() => {
+    setFeatCur(null);
+    onHover(null);
+  }, [onHover]);
+
   if (!cur) return null; // nothing captured at all
   const def = cur.def;
   const fmt = def.fmt ?? ((v: number) => `${v.toFixed(def.digits)}${def.unit}`);
@@ -351,7 +367,7 @@ function FeaturedChart({ series, summary, timesSec, syncKey, onHover, hovered }:
   const isFps = def.key === "fps";
 
   return (
-    <div className="glass hairline rounded-2xl p-4">
+    <div ref={featRef} className="glass hairline relative rounded-2xl p-4">
       <div className="flex items-center justify-between gap-3">
         <div className="relative">
           <select
@@ -387,7 +403,7 @@ function FeaturedChart({ series, summary, timesSec, syncKey, onHover, hovered }:
           would blow out a flex-1 column (canvas overflow feeds back into layout);
           the minmax track pins it the way the small-chart grid + host layout do. */}
       <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_10rem]">
-        <div className="min-w-0">
+        <div className="min-w-0" onPointerMove={onChartMove} onPointerLeave={onChartLeave}>
           <TimeSeriesChart
             timesSec={timesSec}
             values={values}
@@ -412,6 +428,9 @@ function FeaturedChart({ series, summary, timesSec, syncKey, onHover, hovered }:
           )}
         </div>
       </div>
+      {hovered && featCur && (
+        <HoverTooltip sample={hovered} cursor={featCur} container={featRef.current} />
+      )}
     </div>
   );
 }
@@ -522,6 +541,11 @@ export function PerfReport({ session }: { session: PerfSession }) {
             <p className="nums mt-0.5 text-[12px] text-muted">
               {fmtDateTime(session.startedAt)} → {fmtDateTime(session.endedAt)} · {fmtDuration(session.durationSec)}
             </p>
+            {session.path && (
+              <p className="mt-0.5 truncate text-[11px] text-dim" title={session.path}>
+                {session.path}
+              </p>
+            )}
           </div>
         </div>
 

@@ -115,6 +115,9 @@ struct PerfSampleOut {
 struct SessionPayload {
     /// Lowercased exe, e.g. "subnautica2-win64-shipping.exe".
     exe: String,
+    /// Full executable path (for the report's path display + the real exe icon
+    /// on the history cards), or null when it couldn't be resolved.
+    path: Option<String>,
     /// Epoch ms when recording started.
     started_at: f64,
     /// Epoch ms when the session finalized.
@@ -133,6 +136,8 @@ struct SessionPayload {
 struct ActiveSession {
     /// Lowercased exe name of the detected game.
     exe: String,
+    /// Full executable path, resolved once at session start (icon + path display).
+    path: Option<String>,
     /// Foreground PID being tracked.
     pid: u32,
     /// Epoch ms when recording started (also the sample-`t` base).
@@ -191,6 +196,21 @@ fn gpu_name() -> Option<String> {
     } else {
         None
     }
+}
+
+/// Resolve the full executable path for `pid`. Targeted-refreshes just this pid
+/// in the shared `System` (so it doesn't depend on when the process list was last
+/// refreshed), then reads its image path. `None` when the process is already gone
+/// or exposes no accessible path.
+fn exe_path(app: &AppHandle, pid: u32) -> Option<String> {
+    let state = app.state::<AppState>();
+    let mut sys = state.sys.lock();
+    let p = sysinfo::Pid::from_u32(pid);
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[p]), false);
+    sys.process(p)
+        .and_then(|proc| proc.exe())
+        .map(|path| path.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Pull one metric snapshot for `pid` and build a [`PerfSampleOut`].
@@ -298,6 +318,7 @@ fn finalize(app: &AppHandle, session: ActiveSession) {
     let ended_at = now_epoch_ms();
     let payload = SessionPayload {
         exe: session.exe,
+        path: session.path,
         started_at: session.started_at,
         ended_at,
         duration_sec: ((ended_at - session.started_at) / 1000.0).round().max(0.0) as u64,
@@ -315,6 +336,7 @@ fn finalize(app: &AppHandle, session: ActiveSession) {
 fn start(app: &AppHandle, exe: &str, pid: u32) -> ActiveSession {
     ActiveSession {
         exe: exe.to_lowercase(),
+        path: exe_path(app, pid),
         pid,
         started_at: now_epoch_ms(),
         cpu_name: cpu_name(app),
@@ -355,14 +377,12 @@ fn tick(app: &AppHandle, active: &mut Option<ActiveSession>) {
         return;
     }
 
-    // 2. Finalize-on-exit / switch: the foreground PID no longer matches the
-    //    session we're tracking.
+    // 2. Finalize ONLY when the recorded game's process exits — never on focus
+    //    loss. A backgrounded (alt-tabbed) game is still running and must keep
+    //    being recorded; pausing when it isn't the foreground is what punched
+    //    gaps into the time series.
     if let Some(cur) = active.as_ref() {
-        if fg.pid != cur.pid {
-            if crate::fps::pid_alive(cur.pid) {
-                // Still running, just alt-tabbed away — pause without finalizing.
-                return;
-            }
+        if !crate::fps::pid_alive(cur.pid) {
             // The game process exited — close out the report.
             let cur = active.take().expect("checked Some above");
             finalize(app, cur);
@@ -381,9 +401,10 @@ fn tick(app: &AppHandle, active: &mut Option<ActiveSession>) {
     let rec_white = exe_lc.as_ref().is_some_and(|e| white.iter().any(|n| n == e));
     let osd_whitelisted = exe_lc.as_ref().is_some_and(|e| osd_white.iter().any(|n| n == e));
 
-    // 3. Blacklist precedence: if the foreground app is blacklisted, finalize any
-    //    session we're recording for it and stop — so toggling a live
-    //    false-positive to the blacklist takes effect immediately.
+    // 3. Blacklist: never start recording a blacklisted foreground app; if we
+    //    were recording IT, finalize. We do NOT bail out here — a *different*
+    //    active game must keep being sampled below (don't gap it just because a
+    //    blacklisted app grabbed focus).
     if rec_black {
         if let Some(existing) = active.as_ref() {
             if fg.pid == existing.pid {
@@ -391,11 +412,11 @@ fn tick(app: &AppHandle, active: &mut Option<ActiveSession>) {
                 finalize(app, existing);
             }
         }
-        return;
-    }
-
-    // 4. Start: decide whether to record this foreground app.
-    if (fg.is_game || rec_white || osd_whitelisted) && fg.exe.is_some() {
+    } else if (fg.is_game || rec_white || osd_whitelisted) && fg.exe.is_some() {
+        // 4. Start / switch: record this foreground game (finalizing a previous,
+        //    different one first). While a game is already active and alive it
+        //    keeps recording even in the background (step 2 only ends on exit),
+        //    so this just picks up the *next* game once the foreground changes.
         let exe = exe_lc.clone().expect("fg.exe is Some");
         let is_new = match active.as_ref() {
             None => true,
@@ -403,20 +424,19 @@ fn tick(app: &AppHandle, active: &mut Option<ActiveSession>) {
         };
         if is_new {
             if let Some(existing) = active.take() {
-                // Different game took over — finalize the old session first.
                 finalize(app, existing);
             }
             *active = Some(start(app, &exe, fg.pid));
         }
     }
 
-    // 5. Sample: append a data point for the live session.
+    // 5. Sample: append a data point for the live session — foreground OR
+    //    background. As long as its process is alive we keep sampling, so
+    //    alt-tabbing out no longer leaves a hole in the data.
     if let Some(live) = active.as_ref() {
-        if fg.pid == live.pid {
-            let s = build_sample(app, live, live.pid);
-            if let Some(live) = active.as_mut() {
-                live.samples.push(s);
-            }
+        let s = build_sample(app, live, live.pid);
+        if let Some(live) = active.as_mut() {
+            live.samples.push(s);
         }
     }
 }

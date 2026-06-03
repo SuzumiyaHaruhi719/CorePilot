@@ -13,6 +13,59 @@ use serde::Serialize;
 use sysinfo::System;
 use tauri::State;
 
+/// Retained no-op for the "亚克力模糊" toggle. The acrylic effect is rendered
+/// IN-APP as layered CSS frosted glass (see `[data-acrylic]` in `index.css`):
+/// true DWM acrylic/mica does NOT composite through a transparent WebView2 on
+/// Win11 24H2 — it shows the windows behind unblurred — so the window stays
+/// opaque and the frost is drawn by the page. The frontend still calls this so a
+/// future native backdrop could hook in here without changing the IPC contract.
+#[tauri::command]
+pub fn set_acrylic(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
+    let _ = (&window, enabled);
+    Ok(())
+}
+
+/// Set the whole-window opacity (30–100%). On Windows this toggles WS_EX_LAYERED
+/// and applies a constant alpha via SetLayeredWindowAttributes, fading the entire
+/// DWM-composited window (content + acrylic backdrop). At 100% the layered style
+/// is removed so the window renders exactly as the (transparent/acrylic)
+/// compositor intends; values are clamped so it can never become invisible.
+#[tauri::command]
+pub fn set_window_opacity(window: tauri::WebviewWindow, percent: u8) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::{COLORREF, HWND};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE,
+            LWA_ALPHA, WS_EX_LAYERED,
+        };
+        let raw = window.hwnd().map_err(|e| e.to_string())?.0 as isize;
+        if raw != 0 {
+            let hwnd = HWND(raw as *mut core::ffi::c_void);
+            let pct = percent.clamp(30, 100);
+            let layered = WS_EX_LAYERED.0 as isize;
+            unsafe {
+                let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                if pct >= 100 {
+                    if ex & layered != 0 {
+                        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex & !layered);
+                    }
+                } else {
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | layered);
+                    let alpha = (pct as u32 * 255 / 100) as u8;
+                    SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (&window, percent);
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Overview {

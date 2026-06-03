@@ -7,11 +7,7 @@ interface DualSparklineProps {
   down: number[];
   upHue: number;
   downHue: number;
-  /** Formats the per-axis max labels (e.g. a byte-rate formatter). */
-  format: (v: number) => string;
   height?: number;
-  upLabel?: string;
-  downLabel?: string;
 }
 
 /**
@@ -29,10 +25,7 @@ export function DualSparkline({
   down,
   upHue,
   downHue,
-  format,
   height = 84,
-  upLabel = "上传",
-  downLabel = "下载",
 }: DualSparklineProps) {
   const upId = useId();
   const downId = useId();
@@ -89,20 +82,6 @@ export function DualSparkline({
           style={{ filter: `drop-shadow(0 0 3px ${upColor})` }}
         />
       </svg>
-      {/* Dual-axis max labels (HTML overlay — SVG text would distort under the
-          non-uniform scale). Left = upload axis, right = download axis. */}
-      <div
-        className="nums pointer-events-none absolute left-1 top-0.5 text-[9.5px] font-medium"
-        style={{ color: upColor }}
-      >
-        {upLabel} {format(upMax)}
-      </div>
-      <div
-        className="nums pointer-events-none absolute right-1 top-0.5 text-[9.5px] font-medium"
-        style={{ color: downColor }}
-      >
-        {downLabel} {format(downMax)}
-      </div>
     </div>
   );
 }

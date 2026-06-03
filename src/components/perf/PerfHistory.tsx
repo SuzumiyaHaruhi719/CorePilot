@@ -8,6 +8,7 @@ import { usePerfHistory } from "../../store/perfHistory";
 import { Button } from "../ui/Button";
 import { Modal } from "../ui/Modal";
 import { PerfReport } from "./PerfReport";
+import { ProcIcon } from "../taskmgr/ProcIcon";
 
 const DASH = "—";
 
@@ -70,11 +71,11 @@ function SessionCard({ session, active, onSelect, onDelete }: SessionCardProps) 
       <div className="flex items-start gap-2.5">
         <span
           className={cn(
-            "mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg",
+            "mt-0.5 grid h-8 w-8 shrink-0 place-items-center overflow-hidden rounded-lg",
             active ? "bg-accent/20 text-accent-bright" : "bg-surface3 text-dim",
           )}
         >
-          <Gamepad2 size={16} />
+          {session.path ? <ProcIcon exePath={session.path} size={18} /> : <Gamepad2 size={16} />}
         </span>
         <div className="min-w-0 flex-1">
           <div className="truncate pr-5 text-[12.5px] font-medium text-ink" title={gameDisplayName(session.exe)}>

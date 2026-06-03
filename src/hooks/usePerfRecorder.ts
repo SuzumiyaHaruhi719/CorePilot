@@ -111,6 +111,7 @@ export function usePerfRecorder(): void {
       const session: PerfSession = {
         id: crypto.randomUUID(),
         exe: payload.exe,
+        path: payload.path,
         name: gameDisplayName(payload.exe),
         startedAt: payload.startedAt,
         endedAt: payload.endedAt,

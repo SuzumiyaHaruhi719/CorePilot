@@ -83,6 +83,8 @@ export interface PerfSession {
   exe: string;
   /** Friendly display name (exe without extension). */
   name: string;
+  /** Full executable path (history-card icon + report path display), or null. */
+  path: string | null;
   /** Epoch ms. */
   startedAt: number;
   endedAt: number;

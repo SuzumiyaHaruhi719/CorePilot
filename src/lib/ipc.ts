@@ -308,6 +308,10 @@ export const api = {
       osdWhite: cfg.osdWhite,
     }),
   setCloseToTray: (enabled: boolean) => invoke<void>("set_close_to_tray", { enabled }),
+  /** Apply/clear the Windows 11 acrylic window backdrop on the main window. */
+  setAcrylic: (enabled: boolean) => invoke<void>("set_acrylic", { enabled }),
+  /** Set whole-window opacity (30–100%). Auto-applied on change + persisted. */
+  setWindowOpacity: (percent: number) => invoke<void>("set_window_opacity", { percent }),
 };
 
 /**
@@ -318,6 +322,8 @@ export const api = {
  */
 export interface PerfSessionEvent {
   exe: string;
+  /** Full exe path (report path display + history-card icon), or null. */
+  path: string | null;
   startedAt: number;
   endedAt: number;
   durationSec: number;
