@@ -19,7 +19,7 @@ import { Slider } from "../components/ui/Slider";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
-import { api, type OverlayStatus, type ProcInfo } from "../lib/ipc";
+import { api, type GameEntry, type OverlayStatus, type ProcInfo } from "../lib/ipc";
 import {
   OSD_CATEGORIES,
   OSD_METRICS,
@@ -164,6 +164,13 @@ export function OsdConfig() {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+  // Auto-discovered installed-game library (Steam/Epic/GOG) — read-only; the
+  // backend matches foreground EXEs against these install roots to detect games.
+  const [gameLibrary, setGameLibrary] = useState<GameEntry[]>([]);
+  useEffect(() => {
+    api.gameLibraryList().then(setGameLibrary).catch(() => undefined);
+  }, []);
+
   const previewScale = Math.min(0.85, Math.max(0.5, boxW > 0 ? boxW / (window.screen?.width || 1920) : 0.5));
 
   // Free placement: drag the plate within the preview to set its normalized
@@ -361,6 +368,40 @@ export function OsdConfig() {
 
         {/* In-frame injection overlay (true fullscreen) + anti-cheat-safe hybrid */}
         <InjectionOverlaySection />
+
+        {/* Auto-discovered installed-game library (read-only) */}
+        <div className="glass hairline rounded-2xl p-4">
+          <div className="mb-2 flex items-center gap-2">
+            <Gamepad2 size={15} className="text-accent-bright" />
+            <span className="text-[13.5px] font-semibold text-ink">已识别的游戏库</span>
+            <span className="text-[11px] text-dim">Steam · Epic · GOG · 共 {gameLibrary.length} 款</span>
+          </div>
+          <div className="mb-3 text-[11.5px] leading-relaxed text-dim">
+            自动扫描各启动器安装目录;运行其中任意一款都会被判定为游戏(无需手动加白名单)。
+          </div>
+          {gameLibrary.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-line/70 px-3 py-3 text-center text-[12px] text-dim">
+              未扫描到已安装游戏（未安装 Steam/Epic/GOG，或装在非默认位置）。
+            </div>
+          ) : (
+            <div className="max-h-44 space-y-1 overflow-y-auto pr-1">
+              {gameLibrary.map((g) => (
+                <div
+                  key={`${g.source}:${g.path}`}
+                  className="flex items-center gap-2 rounded-lg border border-line bg-surface2 px-3 py-1.5 text-[12px]"
+                >
+                  <MonitorPlay size={12} className="shrink-0 text-dim" />
+                  <span className="flex-1 truncate text-muted" title={g.path}>
+                    {g.name}
+                  </span>
+                  <span className="shrink-0 rounded bg-black/20 px-1.5 py-0.5 text-[10px] text-dim">
+                    {g.source}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* Per-game white / black list */}
         <div className="glass hairline rounded-2xl p-4">

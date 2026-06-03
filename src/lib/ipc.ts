@@ -286,6 +286,8 @@ export const api = {
   foregroundProcess: () => invoke<string | null>("foreground_process"),
   foregroundInfo: () => invoke<ForegroundInfo>("foreground_info"),
   pidAlive: (pid: number) => invoke<boolean>("pid_alive", { pid }),
+  /** Installed games discovered from Steam / Epic / GOG (read-only display). */
+  gameLibraryList: () => invoke<GameEntry[]>("game_library_list"),
   /** Attach the in-game (injection) overlay to `pid` — or, when the target is
    *  anti-cheat-protected / unsupported, transparently fall back to the window
    *  overlay. `layoutFlags` is the `show::*` bitfield of metric rows to draw. */
@@ -357,6 +359,15 @@ export interface ForegroundInfo {
   pid: number;
   /** True when the foreground app is rendering frames (has recent presents). */
   isGame: boolean;
+}
+
+/** One installed game discovered from a storefront library (Steam/Epic/GOG). */
+export interface GameEntry {
+  name: string;
+  /** Install directory (lowercased) the detector prefix-matches EXE paths against. */
+  path: string;
+  /** "Steam" | "Epic" | "GOG". */
+  source: string;
 }
 
 /** Graphics API detected for an overlay target (drives which Present is hooked).

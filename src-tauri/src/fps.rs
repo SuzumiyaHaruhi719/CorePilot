@@ -34,12 +34,18 @@ use std::time::{Duration, Instant};
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, HWND};
+use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::System::Threading::{
     GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_RUNNING_D3D_FULL_SCREEN};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
+};
 
 /// Microsoft-Windows-DxgKrnl provider GUID (PresentMon's primary present source).
 const DXGKRNL_GUID: &str = "802ec45a-1e99-4b83-9920-87c98277ba9d";
@@ -331,9 +337,10 @@ pub fn stats_for_pid(pid: u32) -> FpsStats {
     stats_for(pid)
 }
 
-/// Resolve a PID's executable file name (e.g. `"cyberpunk2077.exe"`), lowercased.
-/// `None` when the process can't be opened or queried. Never panics.
-fn process_image_name(pid: u32) -> Option<String> {
+/// Resolve a PID's full executable path, lowercased (e.g.
+/// `r"c:\program files (x86)\steam\steamapps\common\foo\foo.exe"`). `None` when
+/// the process can't be opened or queried. Never panics.
+fn process_image_path(pid: u32) -> Option<String> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false.into(), pid).ok()?;
         // QueryFullProcessImageNameW writes the full image path; `len` is in/out
@@ -351,18 +358,24 @@ fn process_image_name(pid: u32) -> Option<String> {
         if !ok || len == 0 {
             return None;
         }
-        let path = String::from_utf16_lossy(&buf[..len as usize]);
-        // Take just the file name (after the last path separator).
-        let name = path
-            .rsplit(['\\', '/'])
-            .next()
-            .unwrap_or(&path)
-            .to_lowercase();
-        if name.is_empty() {
+        let path = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
+        if path.is_empty() {
             None
         } else {
-            Some(name)
+            Some(path)
         }
+    }
+}
+
+/// Resolve a PID's executable file name (e.g. `"cyberpunk2077.exe"`), lowercased.
+/// `None` when the process can't be opened or queried. Never panics.
+fn process_image_name(pid: u32) -> Option<String> {
+    let path = process_image_path(pid)?;
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
     }
 }
 
@@ -427,20 +440,83 @@ fn is_non_game(exe: &str) -> bool {
 /// via the OSD whitelist (which force-records regardless of FPS).
 const GAME_FPS_MIN: f64 = 20.0;
 
+/// True when the foreground window covers its ENTIRE monitor (including the strip
+/// the taskbar occupies) — i.e. exclusive- or borderless-fullscreen. A *maximised*
+/// window only fills the work area (taskbar still visible), so it fails this and
+/// is NOT treated as a game — that's what keeps a maximised Paint / browser /
+/// Photos out of auto-detection.
+fn foreground_is_fullscreen() -> bool {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return false;
+        }
+        let mut wr = RECT::default();
+        if GetWindowRect(hwnd, &mut wr).is_err() {
+            return false;
+        }
+        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            return false;
+        }
+        let m = mi.rcMonitor;
+        const TOL: i32 = 2; // a couple px of slop
+        wr.left <= m.left + TOL
+            && wr.top <= m.top + TOL
+            && wr.right >= m.right - TOL
+            && wr.bottom >= m.bottom - TOL
+    }
+}
+
+/// True when Windows reports a Direct3D application is running full-screen — a
+/// strong "a game is in front" hint. Cheap shell query; it's global (not per-PID),
+/// so we only ever use it as a positive signal alongside the foreground checks.
+fn d3d_fullscreen_active() -> bool {
+    unsafe {
+        SHQueryUserNotificationState()
+            .map(|s| s == QUNS_RUNNING_D3D_FULL_SCREEN)
+            .unwrap_or(false)
+    }
+}
+
 #[tauri::command]
 pub fn foreground_info() -> ForegroundInfo {
     match foreground_pid() {
         Some(pid) => {
-            let exe = process_image_name(pid);
-            // A process counts as a game only if it (a) isn't a known shell/system
-            // presenter, and (b) is presenting at a sustained, game-like rate.
-            // Both guards stop UI apps that merely redraw from being misdetected as
-            // games and auto-triggering a perf report. Unresolved exe → non-game.
+            // One process query; derive both the lowercased name and full path.
+            let path = process_image_path(pid);
+            let exe = path
+                .as_deref()
+                .map(|p| p.rsplit(['\\', '/']).next().unwrap_or(p).to_string());
+            // Never a game if it's a known shell/system presenter (or unresolved).
             let not_shell = exe.as_deref().map(|e| !is_non_game(e)).unwrap_or(false);
-            let is_game = not_shell && fps_for(pid).is_some_and(|fps| fps >= GAME_FPS_MIN);
+
+            // (C) Authoritative: the EXE lives under a known installed-game root
+            // (Steam / Epic / GOG) — counts as a game even at a menu / 0 FPS.
+            let in_library = path
+                .as_deref()
+                .map(crate::game_library::is_game_path)
+                .unwrap_or(false);
+            // Heuristic fallback for unrecognised apps: presenting at a sustained,
+            // game-like rate AND either (A) the window covers its whole monitor
+            // (exclusive- or borderless-fullscreen) or (B) Windows reports a D3D
+            // full-screen app. The fullscreen guard is what stops a merely-redrawing
+            // UI app (e.g. Paint while you draw) from being misdetected as a game.
+            let presenting = fps_for(pid).is_some_and(|fps| fps >= GAME_FPS_MIN);
+            let heuristic = presenting && (foreground_is_fullscreen() || d3d_fullscreen_active());
+
+            let is_game = not_shell && (in_library || heuristic);
             ForegroundInfo { exe, pid, is_game }
         }
-        None => ForegroundInfo { exe: None, pid: 0, is_game: false },
+        None => ForegroundInfo {
+            exe: None,
+            pid: 0,
+            is_game: false,
+        },
     }
 }
 

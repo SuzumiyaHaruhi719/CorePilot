@@ -2,6 +2,7 @@ pub mod affinity;
 pub mod commands;
 pub mod error;
 pub mod fps;
+pub mod game_library;
 pub mod gpu;
 pub mod inject;
 pub mod netfix;
@@ -144,6 +145,7 @@ pub fn run() {
             fps::foreground_process,
             fps::foreground_info,
             fps::pid_alive,
+            game_library::game_library_list,
             overlay_inject::overlay_attach,
             overlay_inject::overlay_detach,
             overlay_inject::overlay_status,
