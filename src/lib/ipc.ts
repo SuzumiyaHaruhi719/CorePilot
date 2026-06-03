@@ -55,6 +55,8 @@ export interface ProcInfo {
   mem: number;
   threads: number;
   gpu: number;
+  /** Per-process GPU memory (VRAM) in bytes, or null/absent when unavailable. */
+  gpuMem?: number | null;
   power: number;
   /** CPU affinity mask (allowed logical CPUs); 0 if inaccessible. `bigint` so
    *  all 64 bits are exact; the backend sends it as a decimal string. */

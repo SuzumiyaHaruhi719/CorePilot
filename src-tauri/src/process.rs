@@ -41,6 +41,9 @@ pub struct ProcInfo {
     pub mem: u64,
     pub threads: u32,
     pub gpu: f32,
+    /// Per-process GPU memory (VRAM) in bytes from NVML, or `None` when the
+    /// driver/GPU doesn't report it. Serialized as `gpuMem`.
+    pub gpu_mem: Option<u64>,
     pub power: f32,
     /// Process CPU affinity mask (allowed logical CPUs); 0 when inaccessible.
     /// Serialized as a decimal string so bits ≥ 53 survive the JS-number (f64)
@@ -475,6 +478,8 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
     // Per-process GPU utilization + engine/adapter attribution, collected once
     // for this snapshot.
     let gpu = gpu_map();
+    // Per-process VRAM (NVML), collected once for this snapshot.
+    let gpu_mem_map = crate::gpu::gpu_process_memory();
     // PIDs seen this refresh, used afterwards to prune the detail cache.
     let mut live_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let out: Vec<ProcInfo> = sys
@@ -514,6 +519,7 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
                 mem: process.memory(),
                 threads: threads.get(&id).copied().unwrap_or(0),
                 gpu: gpu_pct,
+                gpu_mem: gpu_mem_map.get(&id).copied(),
                 power,
                 affinity: details.affinity,
                 user: details.user,

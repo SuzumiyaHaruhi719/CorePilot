@@ -45,6 +45,9 @@ export function ProcessView({ detailed }: ProcessViewProps) {
         case "gpu":
           r = a.gpu - b.gpu;
           break;
+        case "gpuMem":
+          r = (a.gpuMem ?? 0) - (b.gpuMem ?? 0);
+          break;
         case "power":
           r = a.power - b.power;
           break;

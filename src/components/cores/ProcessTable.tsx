@@ -7,7 +7,7 @@ import { formatBytes } from "../../lib/format";
 import type { CpuTopology, ProcInfo } from "../../lib/ipc";
 import { groupForProcess, useGroups } from "../../store/groups";
 
-export type SortKey = "name" | "group" | "threads" | "cpu" | "gpu" | "mem" | "power";
+export type SortKey = "name" | "group" | "threads" | "cpu" | "gpu" | "gpuMem" | "mem" | "power";
 
 interface ProcessTableProps {
   processes: ProcInfo[];

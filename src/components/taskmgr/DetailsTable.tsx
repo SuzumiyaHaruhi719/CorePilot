@@ -15,7 +15,7 @@ interface DetailsTableProps {
 }
 
 const COLS =
-  "grid-cols-[minmax(0,1fr)_50px_84px_64px_74px_78px_54px_46px_50px_34px]";
+  "grid-cols-[minmax(0,1fr)_50px_84px_64px_74px_78px_74px_54px_46px_50px_34px]";
 
 function Head({
   k,
@@ -58,6 +58,7 @@ export function DetailsTable({ processes, sortKey, sortDir, onSort, onEndTask, o
         <Head k="cpu" label="CPU" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <span className="text-right text-[11.5px] font-medium text-muted">CPU时间</span>
         <Head k="mem" label="内存" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+        <Head k="gpuMem" label="显存" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <span className="text-right text-[11.5px] font-medium text-muted">句柄</span>
         <Head k="threads" label="线程" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <span className="text-right text-[11.5px] font-medium text-muted">平台</span>
@@ -81,6 +82,7 @@ export function DetailsTable({ processes, sortKey, sortDir, onSort, onEndTask, o
             <span className="nums text-right text-ink">{p.cpu.toFixed(1)}</span>
             <span className="nums text-right text-muted">{formatDuration(p.cpuTime ?? 0)}</span>
             <span className="nums text-right text-muted">{formatBytes(p.mem, 0)}</span>
+            <span className="nums text-right text-muted">{p.gpuMem ? formatBytes(p.gpuMem, 0) : "—"}</span>
             <span className="nums text-right text-dim">{p.handles ? p.handles : "—"}</span>
             <span className="nums text-right text-muted">{p.threads || "—"}</span>
             <span className="text-right text-[11px] text-dim">{p.platform ?? "—"}</span>
