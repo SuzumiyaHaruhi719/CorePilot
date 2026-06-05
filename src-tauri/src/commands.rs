@@ -187,6 +187,27 @@ pub fn get_sensors() -> crate::error::CoreResult<crate::sensors::SensorSample> {
     Ok(crate::sensors::sample())
 }
 
+/// Reveal a file in Windows Explorer (opens its folder and selects it). Used by
+/// the Task Manager "打开文件位置" context action. Best-effort: `explorer` often
+/// returns a non-zero exit code even on success, so we only fail if it can't be
+/// spawned at all.
+#[tauri::command]
+pub fn reveal_in_explorer(path: String) -> CoreResult<()> {
+    use std::os::windows::process::CommandExt;
+    let p = path.trim();
+    if p.is_empty() {
+        return Err("该进程没有可用的文件路径（受保护/系统进程）".into());
+    }
+    // `explorer /select,"<full path>"` — pass verbatim via raw_arg so the path
+    // (which may contain spaces) is quoted correctly for explorer's parser.
+    std::process::Command::new("explorer.exe")
+        .raw_arg(format!("/select,\"{p}\""))
+        .creation_flags(0x0800_0000)
+        .spawn()
+        .map_err(|e| crate::error::CoreError::Msg(format!("打开资源管理器失败: {e}")))?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn get_power_plan() -> CoreResult<String> {
     optimize::get_power_plan()

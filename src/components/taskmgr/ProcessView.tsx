@@ -1,4 +1,4 @@
-import { ChevronsUp, Copy, MonitorPlay, Search, X } from "lucide-react";
+import { ChevronsUp, Copy, FolderOpen, MonitorPlay, Search, X } from "lucide-react";
 import { useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useProcesses } from "../../hooks/useProcesses";
 import { PRIORITY, api, type ProcInfo } from "../../lib/ipc";
@@ -94,6 +94,29 @@ export function ProcessView({ detailed }: ProcessViewProps) {
           onClick: () => {
             addOsdTarget(proc.name);
             setStatus(`已将 ${proc.name} 加入游戏内覆盖名单`);
+          },
+        },
+        {
+          label: "打开文件位置",
+          icon: FolderOpen,
+          disabled: !proc.exePath,
+          onClick: () => {
+            if (!proc.exePath) return;
+            void api
+              .revealInExplorer(proc.exePath)
+              .then(() => setStatus(`已在资源管理器中定位 ${proc.name}`))
+              .catch((e: unknown) => setStatus(typeof e === "string" ? e : "打开文件位置失败"));
+          },
+        },
+        {
+          label: "复制应用路径",
+          icon: Copy,
+          disabled: !proc.exePath,
+          onClick: () => {
+            if (proc.exePath) {
+              void navigator.clipboard.writeText(proc.exePath);
+              setStatus(`已复制路径：${proc.exePath}`);
+            }
           },
         },
         { label: "复制名称", icon: Copy, onClick: () => void navigator.clipboard.writeText(proc.name) },

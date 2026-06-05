@@ -311,6 +311,8 @@ export const api = {
   flushDns: () => invoke<void>("flush_dns"),
   endTask: (pid: number) => invoke<void>("end_task", { pid }),
   getSensors: () => invoke<Sensors>("get_sensors"),
+  /** Reveal a file in Windows Explorer (open its folder + select it). */
+  revealInExplorer: (path: string) => invoke<void>("reveal_in_explorer", { path }),
   getPowerPlan: () => invoke<string>("get_power_plan"),
   setPowerPlan: (plan: string) => invoke<void>("set_power_plan", { plan }),
   listServices: () => invoke<ServiceItem[]>("list_services"),

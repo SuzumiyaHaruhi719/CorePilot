@@ -132,6 +132,7 @@ pub fn run() {
             commands::flush_dns,
             commands::end_task,
             commands::get_sensors,
+            commands::reveal_in_explorer,
             commands::get_power_plan,
             commands::set_power_plan,
             commands::list_services,
