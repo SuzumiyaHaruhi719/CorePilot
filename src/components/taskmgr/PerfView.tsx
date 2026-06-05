@@ -51,7 +51,7 @@ function CardHead({ icon, label, value, color }: { icon: ReactNode; label: strin
       <div className="flex items-center gap-2 text-[12.5px] font-semibold text-muted">
         {icon} {label}
       </div>
-      <div className="nums text-[20px] font-semibold" style={{ color }}>
+      <div className="nums display text-[22px] font-semibold glow-text" style={{ color }}>
         {value}
       </div>
     </div>
@@ -61,7 +61,7 @@ function CardHead({ icon, label, value, color }: { icon: ReactNode; label: strin
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="text-[10.5px] uppercase tracking-wider text-dim">{label}</div>
+      <div className="hud-label text-[9px] text-dim">{label}</div>
       <div className="nums truncate text-[13px] font-medium text-ink">{value}</div>
     </div>
   );
@@ -115,16 +115,16 @@ export function PerfView() {
   return (
     <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="mr-1 text-[11.5px] text-dim">显示</span>
+        <span className="hud-label mr-1 text-[9.5px] text-dim">显示</span>
         {CARDS.map((c) => (
           <button
             key={c.id}
             onClick={() => togglePerfCard(c.id)}
             className={cn(
-              "no-drag rounded-lg border px-2.5 py-1 text-[11.5px] transition-colors",
+              "no-drag cursor-pointer rounded-lg border px-2.5 py-1 text-[11.5px] transition-[background-color,border-color,color] duration-150 active:scale-[0.97]",
               perfCards[c.id]
                 ? "border-accent/40 bg-accent/15 text-ink"
-                : "border-line bg-surface2 text-dim hover:text-muted",
+                : "border-line bg-surface2 text-dim hover:border-line-strong hover:text-muted",
             )}
           >
             {c.label}
@@ -320,7 +320,7 @@ export function PerfView() {
         <Card>
           <div className="mb-3 flex items-center gap-2 text-[12.5px] font-semibold text-muted">
             <Cpu size={15} className="text-accent" /> 逻辑处理器利用率
-            <span className="text-[11px] font-normal text-dim">
+            <span className="nums text-[11px] font-normal text-dim">
               ({overview ? `${overview.logicalCpus} 线程` : "—"})
             </span>
           </div>

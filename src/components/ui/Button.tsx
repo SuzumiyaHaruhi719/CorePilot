@@ -35,7 +35,7 @@ export function Button({ children, onClick, variant = "ghost", disabled, classNa
       className={cn(
         "no-drag relative inline-flex items-center justify-center gap-1.5 overflow-hidden rounded-lg px-3 py-1.5 text-[12.5px] font-medium transition-[background-color,border-color,color,filter,box-shadow] duration-200",
         VARIANTS[variant],
-        disabled && "cursor-not-allowed opacity-40",
+        disabled ? "cursor-not-allowed opacity-40" : "cursor-pointer",
         className,
       )}
     >

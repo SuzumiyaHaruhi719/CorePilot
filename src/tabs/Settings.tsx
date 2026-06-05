@@ -1,10 +1,12 @@
 import {
+  Activity,
   Check,
   CheckCircle2,
   FolderOpen,
   ListPlus,
   Loader2,
   MonitorPlay,
+  Palette,
   Plus,
   Search,
   Settings as SettingsIcon,
@@ -14,6 +16,7 @@ import {
   X,
   XCircle,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Button } from "../components/ui/Button";
@@ -48,6 +51,17 @@ function SettingRow({ title, desc, children }: SettingRowProps) {
         {desc && <div className="text-[12px] text-dim">{desc}</div>}
       </div>
       <div className="no-drag shrink-0">{children}</div>
+    </div>
+  );
+}
+
+/** Uppercase HUD section header that sits at the top of a settings group. */
+function SectionHeader({ icon: Icon, label }: { icon: LucideIcon; label: string }) {
+  return (
+    <div className="flex items-center gap-2 border-b border-line/60 py-3">
+      <Icon size={13} className="text-accent-bright" />
+      <span className="hud-label text-[10.5px] text-dim">{label}</span>
+      <span className="h-px flex-1 bg-line/50" />
     </div>
   );
 }
@@ -220,7 +234,7 @@ function NetworkCard() {
                     isOn
                       ? "border-accent/50 bg-accent/15 text-ink glow-sm"
                       : "border-line bg-surface2 text-muted hover:border-line-strong hover:text-ink",
-                    busy && "cursor-not-allowed opacity-50",
+                    busy ? "cursor-not-allowed opacity-50" : "cursor-pointer",
                   )}
                 >
                   <span
@@ -408,19 +422,19 @@ function PerfRecordTargetsCard() {
         <button
           onClick={submitAdd}
           disabled={!addName.trim()}
-          className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          className="no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
         >
           <Plus size={13} /> 添加
         </button>
         <button
           onClick={() => void openProcessPicker()}
-          className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+          className="no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
         >
           <ListPlus size={13} /> 从运行中的进程选择
         </button>
         <button
           onClick={() => void pickFromFile()}
-          className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+          className="no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
         >
           <FolderOpen size={13} /> 从文件选择
         </button>
@@ -451,7 +465,7 @@ function PerfRecordTargetsCard() {
               />
               <button
                 onClick={() => removeTarget(t.name)}
-                className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-dim transition-colors hover:bg-danger/15 hover:text-danger"
+                className="grid h-7 w-7 shrink-0 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-danger/15 hover:text-danger"
                 title="移除"
               >
                 <Trash2 size={13} />
@@ -491,7 +505,7 @@ function PerfRecordTargetsCard() {
                   <button
                     key={p.name.toLowerCase()}
                     onClick={() => pickProcess(p.name)}
-                    className="no-drag flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[12.5px] text-muted transition-colors hover:bg-accent/10 hover:text-ink"
+                    className="no-drag flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-[12.5px] text-muted transition-colors hover:bg-accent/10 hover:text-ink"
                   >
                     <MonitorPlay size={13} className="shrink-0 text-dim" />
                     <span className="flex-1 truncate">{p.name}</span>
@@ -527,21 +541,28 @@ export function Settings() {
           transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
           className="glass hairline mx-auto max-w-2xl rounded-2xl px-5 py-2"
         >
+          <SectionHeader icon={Palette} label="外观 · APPEARANCE" />
           <SettingRow title="强调色" desc="主题主色调，实时应用">
             <div className="flex gap-2">
-              {ACCENTS.map((accent) => (
-                <motion.button
-                  key={accent}
-                  whileHover={{ scale: 1.15 }}
-                  whileTap={{ scale: 0.9 }}
-                  onClick={() => settings.update({ accent })}
-                  className={cn(
-                    "h-7 w-7 rounded-full border-2 transition",
-                    settings.accent === accent ? "border-ink glow" : "border-transparent",
-                  )}
-                  style={{ background: `oklch(72% 0.16 ${ACCENT_HUE[accent]})` }}
-                />
-              ))}
+              {ACCENTS.map((accent) => {
+                const active = settings.accent === accent;
+                return (
+                  <motion.button
+                    key={accent}
+                    title={accent}
+                    whileHover={{ scale: 1.15 }}
+                    whileTap={{ scale: 0.9 }}
+                    onClick={() => settings.update({ accent })}
+                    className={cn(
+                      "grid h-7 w-7 cursor-pointer place-items-center rounded-full border-2 transition",
+                      active ? "border-ink glow" : "border-transparent hover:border-line-strong",
+                    )}
+                    style={{ background: `oklch(72% 0.16 ${ACCENT_HUE[accent]})` }}
+                  >
+                    {active && <Check size={13} strokeWidth={3} className="text-white drop-shadow" />}
+                  </motion.button>
+                );
+              })}
             </div>
           </SettingRow>
 
@@ -576,7 +597,7 @@ export function Settings() {
                   style={{ "--pct": `${((settings.windowOpacity - 30) / 70) * 100}%` } as CSSProperties}
                 />
               </div>
-              <span className="nums w-9 text-right text-[13px] text-ink">{settings.windowOpacity}%</span>
+              <span className="nums w-11 text-right text-[13px] text-ink">{settings.windowOpacity}%</span>
             </div>
           </SettingRow>
 
@@ -630,9 +651,7 @@ export function Settings() {
           transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1], delay: 0.03 }}
           className="glass hairline mx-auto mt-4 max-w-2xl rounded-2xl px-5 py-2"
         >
-          <div className="border-b border-line/60 py-3 text-[12px] font-semibold uppercase tracking-wider text-muted">
-            性能与监控
-          </div>
+          <SectionHeader icon={Activity} label="性能与监控 · PERFORMANCE" />
           <SettingRow
             title="游戏性能记录"
             desc="检测到游戏运行时自动采样性能；游戏关闭后在 监控 → 历史 生成报告"

@@ -39,7 +39,7 @@ function SortHead({
     <button
       onClick={onClick}
       className={cn(
-        "no-drag flex items-center gap-1 text-[11.5px] font-medium transition-colors hover:text-ink",
+        "hud-label no-drag flex cursor-pointer items-center gap-1 text-[9.5px] transition-colors hover:text-ink",
         align === "right" ? "justify-end" : "justify-start",
         active ? "text-accent" : "text-muted",
       )}
@@ -120,7 +120,7 @@ export function ServicesView() {
         <button
           onClick={() => void load()}
           title="刷新"
-          className="no-drag grid h-7 w-7 place-items-center rounded-lg text-dim transition-colors hover:bg-surface3 hover:text-ink"
+          className="no-drag grid h-7 w-7 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-surface3 hover:text-ink"
         >
           <RotateCw size={13} />
         </button>
@@ -128,19 +128,19 @@ export function ServicesView() {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/50">
-        <div className={cn("grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2 text-[11.5px] font-medium text-muted", COLS)}>
+        <div className={cn("grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2.5", COLS)}>
           <SortHead label="服务名" active={sortKey === "display"} dir={sortDir} onClick={() => sort("display")} />
-          <span className="text-[11.5px] font-medium text-muted">PID</span>
-          <span className="text-[11.5px] font-medium text-muted">描述</span>
+          <span className="hud-label text-[9.5px] text-muted">PID</span>
+          <span className="hud-label text-[9.5px] text-muted">描述</span>
           <SortHead label="状态" active={sortKey === "status"} dir={sortDir} onClick={() => sort("status")} />
-          <span className="text-[11.5px] font-medium text-muted">组</span>
-          <span className="text-right text-[11.5px] font-medium text-muted">操作</span>
+          <span className="hud-label text-[9.5px] text-muted">组</span>
+          <span className="hud-label text-right text-[9.5px] text-muted">操作</span>
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
           {visible.map((svc) => (
             <div
               key={svc.name}
-              className={cn("grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] hover:bg-surface2/50", COLS)}
+              className={cn("grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] transition-colors hover:bg-surface2/50", COLS)}
             >
               <span className="truncate text-ink" title={svc.display || svc.name}>
                 {svc.name}
@@ -149,7 +149,8 @@ export function ServicesView() {
               <span className="truncate text-[11.5px] text-muted" title={svc.description || svc.display}>
                 {svc.description || svc.display || "—"}
               </span>
-              <span className={cn("text-[12px]", STATUS_STYLE[svc.status] ?? "text-dim")}>
+              <span className={cn("flex items-center gap-1.5 text-[12px]", STATUS_STYLE[svc.status] ?? "text-dim")}>
+                {svc.status === "running" && <span className="h-1.5 w-1.5 rounded-full bg-ok glow-sm" />}
                 {STATUS_LABEL[svc.status] ?? svc.status}
               </span>
               <span className="truncate text-[11px] text-dim" title={svc.group}>
@@ -162,7 +163,7 @@ export function ServicesView() {
                       disabled={busy === svc.name}
                       onClick={() => control(svc, "stop")}
                       title="停止"
-                      className="no-drag grid h-6 w-6 place-items-center rounded-md text-dim transition hover:bg-danger hover:text-white disabled:opacity-40"
+                      className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim transition hover:bg-danger hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       <Square size={12} />
                     </button>
@@ -170,7 +171,7 @@ export function ServicesView() {
                       disabled={busy === svc.name}
                       onClick={() => control(svc, "restart")}
                       title="重启"
-                      className="no-drag grid h-6 w-6 place-items-center rounded-md text-dim transition hover:bg-surface3 hover:text-ink disabled:opacity-40"
+                      className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim transition hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       <RotateCw size={12} />
                     </button>
@@ -180,7 +181,7 @@ export function ServicesView() {
                     disabled={busy === svc.name}
                     onClick={() => control(svc, "start")}
                     title="启动"
-                    className="no-drag grid h-6 w-6 place-items-center rounded-md text-dim transition hover:bg-ok hover:text-white disabled:opacity-40"
+                    className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim transition hover:bg-ok hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <Play size={12} />
                   </button>
@@ -188,7 +189,12 @@ export function ServicesView() {
               </div>
             </div>
           ))}
-          {visible.length === 0 && <div className="py-10 text-center text-[12.5px] text-dim">没有匹配的服务</div>}
+          {visible.length === 0 && (
+            <div className="flex flex-col items-center gap-1.5 py-12 text-center">
+              <span className="hud-label text-[10px] text-dim">NO SERVICES</span>
+              <span className="text-[12.5px] text-dim">没有匹配的服务</span>
+            </div>
+          )}
         </div>
       </div>
     </div>

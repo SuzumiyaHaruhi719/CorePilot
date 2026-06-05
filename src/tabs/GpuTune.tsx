@@ -47,30 +47,49 @@ interface TileProps {
   value: string;
   sub?: string;
   hue: number;
+  live?: boolean;
 }
 
-function StatTile({ icon: Icon, label, value, sub, hue }: TileProps) {
+function StatTile({ icon: Icon, label, value, sub, hue, live = true }: TileProps) {
+  const tint = `oklch(80% 0.14 ${hue})`;
+  const dim = value === "—";
   return (
-    <div className="glass hairline flex min-w-0 items-center gap-3 rounded-xl p-3">
+    <motion.div
+      whileHover={{ y: -2 }}
+      transition={hoverPop}
+      className="hud-frame glass hairline group relative min-w-0 overflow-hidden rounded-xl p-3"
+      style={{ "--glow": tint, "--color-accent": tint } as CSSProperties}
+    >
+      {/* edge accent rail */}
       <span
-        className="grid h-9 w-9 shrink-0 place-items-center rounded-lg"
-        style={
-          {
-            background: `oklch(70% 0.14 ${hue} / 0.16)`,
-            color: `oklch(80% 0.14 ${hue})`,
-          } as CSSProperties
-        }
-      >
-        <Icon size={17} />
-      </span>
-      <div className="min-w-0">
-        <div className="text-[10px] uppercase tracking-wide text-dim">{label}</div>
-        <div className="nums truncate text-[15px] font-semibold text-ink">
-          {value}
-          {sub && <span className="ml-1 text-[11px] font-normal text-dim">{sub}</span>}
-        </div>
+        className="pointer-events-none absolute inset-y-0 left-0 w-[2px]"
+        style={{ background: tint, opacity: dim ? 0.25 : 0.7 }}
+      />
+      <div className="mb-2 flex items-center gap-2">
+        <span
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-lg"
+          style={{ background: `color-mix(in oklch, ${tint} 16%, transparent)`, color: tint } as CSSProperties}
+        >
+          <Icon size={15} />
+        </span>
+        <span className="hud-label truncate text-[9.5px] text-dim">{label}</span>
+        {live && !dim && (
+          <span
+            className="ml-auto h-1.5 w-1.5 shrink-0 animate-pulse rounded-full"
+            style={{ background: tint, boxShadow: `0 0 6px ${tint}` }}
+          />
+        )}
       </div>
-    </div>
+      <div className="nums flex items-baseline gap-1 truncate">
+        <span
+          className={cn("text-[22px] font-semibold leading-none", dim ? "text-dim" : "text-ink")}
+          style={dim ? undefined : ({ color: tint, textShadow: `0 0 12px color-mix(in oklch, ${tint} 36%, transparent)` } as CSSProperties)}
+        >
+          {value}
+        </span>
+        {sub && <span className="truncate text-[10.5px] font-normal text-dim">{sub}</span>}
+      </div>
+    </motion.div>
   );
 }
 
@@ -85,12 +104,19 @@ interface ControlCardProps {
 
 function ControlCard({ icon: Icon, iconClass, title, supported, right, children }: ControlCardProps) {
   return (
-    <div className={cn("rounded-xl border border-line bg-surface2/40 p-3.5", !supported && "opacity-45")}>
-      <div className="mb-2.5 flex items-center justify-between">
+    <div
+      className={cn(
+        "rounded-xl border border-line bg-surface2/40 p-3.5 transition-colors duration-200",
+        supported ? "hover:border-line-strong" : "opacity-45",
+      )}
+    >
+      <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Icon size={14} className={iconClass} />
+          <span className={cn("grid h-6 w-6 place-items-center rounded-md bg-surface3", iconClass)}>
+            <Icon size={13} />
+          </span>
           <span className="text-[12.5px] font-medium text-ink">{title}</span>
-          {!supported && <span className="text-[10.5px] text-dim">· 不支持</span>}
+          {!supported && <span className="hud-label text-[9px] text-dim">不支持</span>}
         </div>
         {right}
       </div>
@@ -231,6 +257,8 @@ export function GpuTune() {
     void applySettings(p.settings, `已应用配置「${p.name}」`);
   }
 
+  const isErrorStatus = status != null && !status.startsWith("已");
+
   return (
     <>
       <TabHeader
@@ -253,45 +281,55 @@ export function GpuTune() {
         </div>
       ) : (
         <div className="min-h-0 flex-1 space-y-4 overflow-auto px-6 pb-6">
-          {/* Live readout */}
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-            <StatTile icon={Cpu} label="核心频率" value={info ? String(info.graphicsClock) : "—"} sub="MHz" hue={274} />
-            <StatTile icon={MemoryStick} label="显存频率" value={info ? String(info.memClock) : "—"} sub="MHz" hue={224} />
-            <StatTile
-              icon={Thermometer}
-              label="温度"
-              value={info ? String(info.temperature) : "—"}
-              sub="°C"
-              hue={info ? tempHue(info.temperature) : 158}
-            />
-            <StatTile
-              icon={Zap}
-              label="功耗"
-              value={info ? info.powerUsageW.toFixed(0) : "—"}
-              sub={info ? `/ ${info.powerLimitW.toFixed(0)} W` : "W"}
-              hue={75}
-            />
-            <StatTile icon={Gauge} label="GPU 占用" value={info ? String(info.utilizationGpu) : "—"} sub="%" hue={158} />
-            <StatTile icon={Fan} label="风扇" value={info ? String(info.fanSpeedPct) : "—"} sub="%" hue={200} />
-            <StatTile
-              icon={MemoryStick}
-              label="显存"
-              value={info ? formatBytes(info.memUsedBytes, 1) : "—"}
-              sub={info ? `/ ${formatBytes(info.memTotalBytes, 0)}` : ""}
-              hue={280}
-            />
-            <StatTile
-              icon={Cpu}
-              label="显卡"
-              value={info ? info.name.replace(/NVIDIA GeForce /i, "") : "—"}
-              hue={262}
-            />
+          {/* Live readout — instrument cluster */}
+          <div>
+            <div className="mb-2.5 flex items-center gap-2">
+              <Gauge size={13} className="text-accent" />
+              <span className="hud-label text-[10px] text-dim">实时遥测</span>
+              <span className="h-px flex-1 bg-line" />
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+              <StatTile icon={Cpu} label="核心频率" value={info ? String(info.graphicsClock) : "—"} sub="MHz" hue={274} />
+              <StatTile icon={MemoryStick} label="显存频率" value={info ? String(info.memClock) : "—"} sub="MHz" hue={224} />
+              <StatTile
+                icon={Thermometer}
+                label="温度"
+                value={info ? String(info.temperature) : "—"}
+                sub="°C"
+                hue={info ? tempHue(info.temperature) : 158}
+              />
+              <StatTile
+                icon={Zap}
+                label="功耗"
+                value={info ? info.powerUsageW.toFixed(0) : "—"}
+                sub={info ? `/ ${info.powerLimitW.toFixed(0)} W` : "W"}
+                hue={75}
+              />
+              <StatTile icon={Gauge} label="GPU 占用" value={info ? String(info.utilizationGpu) : "—"} sub="%" hue={158} />
+              <StatTile icon={Fan} label="风扇" value={info ? String(info.fanSpeedPct) : "—"} sub="%" hue={200} />
+              <StatTile
+                icon={MemoryStick}
+                label="显存"
+                value={info ? formatBytes(info.memUsedBytes, 1) : "—"}
+                sub={info ? `/ ${formatBytes(info.memTotalBytes, 0)}` : ""}
+                hue={280}
+              />
+              <StatTile
+                icon={Cpu}
+                label="显卡"
+                value={info ? info.name.replace(/NVIDIA GeForce /i, "") : "—"}
+                hue={262}
+                live={false}
+              />
+            </div>
           </div>
 
           {/* Tuning */}
           <div className="glass hairline space-y-3.5 rounded-2xl p-4">
-            <div className="flex items-center gap-2 text-[12.5px] font-semibold text-muted">
-              <Gauge size={15} className="text-accent" /> 调优控制
+            <div className="flex items-center gap-2">
+              <Gauge size={13} className="text-accent" />
+              <span className="hud-label text-[10px] text-dim">调优控制</span>
+              <span className="h-px flex-1 bg-line" />
             </div>
 
             <ControlCard
@@ -411,25 +449,30 @@ export function GpuTune() {
               />
             </ControlCard>
 
-            <div className="flex flex-wrap items-center gap-2 pt-1">
+            <div className="flex flex-wrap items-center gap-2 border-t border-line pt-3.5">
               <Button variant="primary" onClick={() => void applySettings(draftToSettings(), "已应用调优设置")} disabled={applying}>
-                {applying ? <Loader2 size={14} className="animate-spin" /> : <Rocket size={14} />} 应用
+                {applying ? <Loader2 size={14} className="animate-spin" /> : <Rocket size={14} />} {applying ? "应用中…" : "应用"}
               </Button>
-              <Button onClick={() => void reset()} disabled={applying}>
-                <RotateCcw size={14} /> 恢复默认
-              </Button>
-              <Button onClick={() => setShowSave(true)}>
+              <Button variant="subtle" onClick={() => setShowSave(true)} disabled={applying}>
                 <Save size={14} /> 保存为配置
               </Button>
-              <AnimatePresence>
+              <Button variant="subtle" onClick={() => void reset()} disabled={applying} title="清零所有偏移并恢复固件默认">
+                <RotateCcw size={14} /> 恢复默认
+              </Button>
+              <AnimatePresence mode="wait">
                 {status && (
                   <motion.span
+                    key={status}
                     initial={{ opacity: 0, x: -6 }}
                     animate={{ opacity: 1, x: 0 }}
                     exit={{ opacity: 0 }}
-                    className="ml-1 flex items-center gap-1.5 text-[12px] font-medium text-ok"
+                    transition={hoverPop}
+                    className={cn(
+                      "ml-auto flex items-center gap-1.5 text-[12px] font-medium",
+                      isErrorStatus ? "text-danger" : "text-ok glow-text",
+                    )}
                   >
-                    <Check size={13} /> {status}
+                    {isErrorStatus ? <AlertTriangle size={13} /> : <Check size={13} />} {status}
                   </motion.span>
                 )}
               </AnimatePresence>
@@ -438,18 +481,20 @@ export function GpuTune() {
 
           {/* Profiles */}
           <div className="glass hairline space-y-3 rounded-2xl p-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-[12.5px] font-semibold text-muted">
-                <Save size={15} className="text-accent" /> 超频配置
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Save size={13} className="text-accent" />
+                <span className="hud-label text-[10px] text-dim">超频配置</span>
+                {profiles.length > 0 && <span className="nums text-[10px] text-dim">· {profiles.length}</span>}
               </div>
-              <label className="flex items-center gap-2 text-[11.5px] text-muted">
+              <label className="flex cursor-pointer items-center gap-2 text-[11.5px] text-muted">
                 启动时自动应用
                 <Toggle checked={applyOnStartup} onChange={setApplyOnStartup} />
               </label>
             </div>
 
             {profiles.length === 0 ? (
-              <p className="text-[11.5px] leading-relaxed text-dim">
+              <p className="rounded-xl border border-dashed border-line bg-surface2/30 px-3.5 py-3 text-[11.5px] leading-relaxed text-dim">
                 还没有保存的配置。调好参数后点「保存为配置」，即可一键随时切换；开启「启动时自动应用」后，CorePilot 启动会自动套用所选配置。
               </p>
             ) : (
@@ -473,9 +518,14 @@ export function GpuTune() {
                           active ? "border-accent/50 bg-accent/10 glow-sm" : "border-line bg-surface2/50 hover:bg-surface3",
                         )}
                       >
-                        <Rocket size={14} className={active ? "text-accent-bright" : "text-dim"} />
+                        <span className={cn("grid h-7 w-7 shrink-0 place-items-center rounded-lg", active ? "bg-accent/20 text-accent-bright" : "bg-surface3 text-dim")}>
+                          <Rocket size={14} />
+                        </span>
                         <div>
-                          <div className="text-[12.5px] font-medium text-ink">{p.name}</div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[12.5px] font-medium text-ink">{p.name}</span>
+                            {active && <span className="hud-label text-[8px] text-accent-bright glow-text">已应用</span>}
+                          </div>
                           <div className="nums text-[10px] text-dim">
                             {[
                               p.settings.powerLimitW != null && `${Math.round(p.settings.powerLimitW)}W`,
@@ -497,7 +547,8 @@ export function GpuTune() {
                             e.stopPropagation();
                             deleteProfile(p.id);
                           }}
-                          className="ml-1 grid h-5 w-5 place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white group-hover:opacity-100"
+                          className="no-drag ml-1 grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition-colors duration-150 hover:bg-danger hover:text-white group-hover:opacity-100"
+                          title="删除配置"
                         >
                           <Trash2 size={12} />
                         </span>

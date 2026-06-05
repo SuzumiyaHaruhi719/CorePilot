@@ -31,6 +31,7 @@ function ActionCard({ icon: Icon, title, desc, hue, onRun }: ActionCardProps) {
   const [result, setResult] = useState<string | null>(null);
 
   async function run() {
+    if (busy) return;
     setBusy(true);
     setResult(null);
     try {
@@ -42,33 +43,50 @@ function ActionCard({ icon: Icon, title, desc, hue, onRun }: ActionCardProps) {
     }
   }
 
+  const tint = `oklch(72% 0.16 ${hue})`;
+
   return (
     <motion.button
       onClick={run}
       whileHover={{ scale: 1.02, y: -3 }}
       whileTap={{ scale: 0.98 }}
       transition={hoverPop}
-      className="glass hairline group relative flex flex-col items-start gap-3 overflow-hidden rounded-2xl p-4 text-left"
+      className="hud-frame glass hairline group relative flex min-h-[150px] cursor-pointer flex-col items-start gap-3 overflow-hidden rounded-2xl p-4 text-left transition-[box-shadow] duration-200"
+      style={{ "--glow": tint } as CSSProperties}
     >
+      {/* Faint telemetry tint that lights up on hover. */}
       <span
-        className="grid h-10 w-10 place-items-center rounded-xl text-white glow-sm"
-        style={{ background: `oklch(70% 0.15 ${hue})`, "--glow": `oklch(70% 0.15 ${hue})` } as CSSProperties}
+        className="pointer-events-none absolute inset-x-0 top-0 h-px opacity-60"
+        style={{ background: `linear-gradient(90deg, transparent, ${tint}, transparent)` }}
+      />
+      <span
+        className="grid h-10 w-10 place-items-center rounded-xl text-white transition-shadow duration-200 glow-sm group-hover:glow"
+        style={{ background: tint, "--glow": tint } as CSSProperties}
       >
         {busy ? <Loader2 size={19} className="animate-spin" /> : <Icon size={19} />}
       </span>
-      <div>
+      <div className="flex-1">
         <div className="text-[13.5px] font-semibold text-ink">{title}</div>
         <div className="mt-0.5 text-[11.5px] leading-relaxed text-dim">{desc}</div>
       </div>
-      <AnimatePresence>
-        {result && (
+      <AnimatePresence mode="wait">
+        {result ? (
           <motion.div
+            key="result"
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
-            className="flex items-center gap-1.5 text-[11.5px] font-medium text-ok"
+            className="flex items-center gap-1.5 text-[11.5px] font-medium text-ok glow-text"
           >
-            <Check size={13} /> {result}
+            <Check size={13} /> <span className="nums">{result}</span>
+          </motion.div>
+        ) : (
+          <motion.div
+            key="cta"
+            initial={false}
+            className="hud-label text-[10px] text-dim transition-colors group-hover:text-muted"
+          >
+            {busy ? "执行中…" : "点击执行"}
           </motion.div>
         )}
       </AnimatePresence>
@@ -176,16 +194,18 @@ export function Optimize() {
   return (
     <>
       <TabHeader icon={Zap} title="优化" subtitle="释放内存、清理缓存 — 一键提升游戏性能" />
-      <div className="min-h-0 flex-1 space-y-4 overflow-auto px-6 pb-6">
+      <div className="min-h-0 flex-1 space-y-5 overflow-auto px-6 pb-6">
         {/* Memory panel */}
-        <div className="glass hairline rounded-2xl p-4">
+        <div className="hud-frame glass hairline rounded-2xl p-4">
           <div className="mb-3 flex items-center justify-between">
-            <div className="flex items-center gap-2 text-[12.5px] font-semibold text-muted">
-              <MemoryStick size={15} className="text-cyan" /> 物理内存
+            <div className="flex items-center gap-2">
+              <MemoryStick size={15} className="text-cyan" />
+              <span className="hud-label text-[10.5px] text-dim">物理内存 · MEMORY</span>
             </div>
             <button
               onClick={() => void refresh()}
-              className="no-drag grid h-7 w-7 place-items-center rounded-lg text-dim transition-colors hover:bg-surface3 hover:text-ink"
+              title="刷新"
+              className="no-drag grid h-7 w-7 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-surface3 hover:text-ink"
             >
               <RefreshCw size={13} />
             </button>
@@ -212,9 +232,9 @@ export function Optimize() {
         </div>
 
         {/* Power plan */}
-        <div className="glass hairline flex items-center justify-between rounded-2xl p-4">
+        <div className="glass hairline flex items-center justify-between gap-4 rounded-2xl p-4">
           <div className="flex items-center gap-2.5">
-            <span className="grid h-9 w-9 place-items-center rounded-xl bg-warn/15 text-warn">
+            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-warn/15 text-warn">
               <Power size={17} />
             </span>
             <div>
@@ -233,19 +253,23 @@ export function Optimize() {
           />
         </div>
 
-        {/* Hero one-click */}
+        {/* Hero one-click — the single primary CTA of this view. */}
         <motion.button
           onClick={runAll}
-          whileHover={{ y: -2, scale: 1.012 }}
-          whileTap={{ scale: 0.99 }}
+          disabled={heroBusy}
+          whileHover={heroBusy ? undefined : { y: -2, scale: 1.012 }}
+          whileTap={heroBusy ? undefined : { scale: 0.99 }}
           transition={hoverPop}
-          className="relative flex w-full items-center gap-4 overflow-hidden rounded-2xl grad-accent p-4 text-left text-white glow"
+          className={cn(
+            "chamfer relative flex w-full items-center gap-4 overflow-hidden rounded-2xl grad-accent p-4 text-left text-white glow transition-[filter] duration-200",
+            heroBusy ? "cursor-wait opacity-95" : "cursor-pointer hover:brightness-110",
+          )}
         >
           <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-white/15">
             {heroBusy ? <Loader2 size={24} className="animate-spin" /> : <Wand2 size={24} />}
           </span>
           <div className="flex-1">
-            <div className="text-[15px] font-bold">一键优化</div>
+            <div className="display text-[15px] font-bold uppercase tracking-[0.06em]">一键优化</div>
             <div className="text-[12px] text-white/80">释放内存 + 清理缓存 + 清理临时文件 + 刷新 DNS</div>
             <AnimatePresence>
               {heroResult && (
@@ -255,7 +279,7 @@ export function Optimize() {
                   exit={{ opacity: 0 }}
                   className="mt-1 flex items-center gap-1.5 text-[12px] font-medium text-white"
                 >
-                  <Check size={14} /> {heroResult}
+                  <Check size={14} /> <span className="nums">{heroResult}</span>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -263,30 +287,36 @@ export function Optimize() {
           <ClickRipple />
         </motion.button>
 
-        {/* Action grid */}
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <ActionCard
-            icon={MemoryStick}
-            title="释放内存"
-            desc="清空所有进程的工作集，回收驻留内存"
-            hue={274}
-            onRun={runFree}
-          />
-          <ActionCard
-            icon={Trash2}
-            title="清理缓存"
-            desc="清除 standby list，释放被缓存占用的内存"
-            hue={182}
-            onRun={runPurge}
-          />
-          <ActionCard
-            icon={Trash2}
-            title="清理临时文件"
-            desc="删除用户与系统临时目录中的文件"
-            hue={75}
-            onRun={runClean}
-          />
-          <ActionCard icon={Globe} title="刷新 DNS" desc="清空 DNS 解析缓存" hue={220} onRun={runDns} />
+        {/* Action grid — individual "mission control" actions, subordinate to the hero. */}
+        <div>
+          <div className="mb-2.5 flex items-center gap-2">
+            <span className="hud-label text-[10.5px] text-dim">单项操作 · ACTIONS</span>
+            <span className="h-px flex-1 bg-line/70" />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <ActionCard
+              icon={MemoryStick}
+              title="释放内存"
+              desc="清空所有进程的工作集，回收驻留内存"
+              hue={274}
+              onRun={runFree}
+            />
+            <ActionCard
+              icon={Trash2}
+              title="清理缓存"
+              desc="清除 standby list，释放被缓存占用的内存"
+              hue={182}
+              onRun={runPurge}
+            />
+            <ActionCard
+              icon={Trash2}
+              title="清理临时文件"
+              desc="删除用户与系统临时目录中的文件"
+              hue={75}
+              onRun={runClean}
+            />
+            <ActionCard icon={Globe} title="刷新 DNS" desc="清空 DNS 解析缓存" hue={220} onRun={runDns} />
+          </div>
         </div>
 
         <p className={cn("text-[11px] leading-relaxed text-dim")}>

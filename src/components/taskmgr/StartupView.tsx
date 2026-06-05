@@ -31,7 +31,7 @@ function SortHead({
     <button
       onClick={onClick}
       className={cn(
-        "no-drag flex items-center gap-1 text-[11.5px] font-medium transition-colors hover:text-ink",
+        "hud-label no-drag flex cursor-pointer items-center gap-1 text-[9.5px] transition-colors hover:text-ink",
         align === "right" ? "justify-end" : "justify-start",
         active ? "text-accent" : "text-muted",
       )}
@@ -96,7 +96,7 @@ export function StartupView() {
         <button
           onClick={() => void load()}
           title="刷新"
-          className="no-drag grid h-7 w-7 place-items-center rounded-lg text-dim transition-colors hover:bg-surface3 hover:text-ink"
+          className="no-drag grid h-7 w-7 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-surface3 hover:text-ink"
         >
           <RotateCw size={13} />
         </button>
@@ -104,9 +104,9 @@ export function StartupView() {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/50">
-        <div className={cn("grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2", COLS)}>
+        <div className={cn("grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2.5", COLS)}>
           <SortHead label="名称" active={sortKey === "name"} dir={sortDir} onClick={() => sort("name")} />
-          <span className="text-[11.5px] font-medium text-muted">命令</span>
+          <span className="hud-label text-[9.5px] text-muted">命令</span>
           <SortHead label="位置" active={sortKey === "location"} dir={sortDir} onClick={() => sort("location")} />
           <SortHead
             label="启用"
@@ -120,7 +120,7 @@ export function StartupView() {
           {visible.map((item) => (
             <div
               key={`${item.location}:${item.name}`}
-              className={cn("grid items-center gap-2 border-b border-line/40 px-3 py-2 text-[12.5px] hover:bg-surface2/50", COLS)}
+              className={cn("grid items-center gap-2 border-b border-line/40 px-3 py-2 text-[12.5px] transition-colors hover:bg-surface2/50", COLS)}
             >
               <span className={cn("truncate", item.enabled ? "text-ink" : "text-dim")} title={item.name}>
                 {item.name}
@@ -134,7 +134,12 @@ export function StartupView() {
               </div>
             </div>
           ))}
-          {visible.length === 0 && <div className="py-10 text-center text-[12.5px] text-dim">没有启动项</div>}
+          {visible.length === 0 && (
+            <div className="flex flex-col items-center gap-1.5 py-12 text-center">
+              <span className="hud-label text-[10px] text-dim">NO STARTUP ITEMS</span>
+              <span className="text-[12.5px] text-dim">没有启动项</span>
+            </div>
+          )}
         </div>
       </div>
     </div>

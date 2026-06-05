@@ -1,44 +1,51 @@
+/* Gaming-HUD type: Orbitron (display) + JetBrains Mono (telemetry) + Inter (body).
+   Loaded from Google Fonts (CSP is disabled in tauri.conf) with system fallbacks. */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Orbitron:wght@500;600;700;800;900&display=swap");
 @import "tailwindcss";
 
 /* ============================================================
-   CorePilot design tokens — opaque dark "cockpit" palette.
-   Solid surfaces (no acrylic/blur for now), one violet accent,
-   fixed CCD identity hues (V-Cache teal / Frequency amber).
+   CorePilot design tokens — "Premium Gaming HUD".
+   Deep indigo-black OLED surfaces, neon-violet primary + rose
+   energy accent, telemetry hues (GPU cyan / V-Cache teal /
+   freq amber), restrained neon glow. See design-system/MASTER.md.
    ============================================================ */
 @theme {
-  /* Surfaces — opaque, blue-charcoal, clear elevation hierarchy */
-  --color-base: oklch(15% 0.014 265);
-  --color-surface: oklch(19% 0.018 265);
-  --color-surface2: oklch(23% 0.02 265);
-  --color-surface3: oklch(28.5% 0.022 265);
-  --color-elevated: oklch(21% 0.02 265);
+  /* Surfaces — deep indigo-black, clear elevation hierarchy */
+  --color-base: oklch(13.5% 0.028 285);
+  --color-surface: oklch(18% 0.034 287);
+  --color-surface2: oklch(23% 0.042 288);
+  --color-surface3: oklch(29% 0.05 289);
+  --color-elevated: oklch(20.5% 0.04 288);
 
   /* Lines */
   --color-line: oklch(100% 0 0 / 0.08);
-  --color-line-strong: oklch(100% 0 0 / 0.14);
+  --color-line-strong: oklch(80% 0.06 290 / 0.22);
 
   /* Ink */
-  --color-ink: oklch(96% 0.006 265);
-  --color-muted: oklch(71% 0.018 265);
-  --color-dim: oklch(54% 0.018 265);
+  --color-ink: oklch(96% 0.008 285);
+  --color-muted: oklch(72% 0.025 285);
+  --color-dim: oklch(55% 0.03 285);
 
-  /* Accent + signals */
-  --color-accent: oklch(67% 0.185 280);
-  --color-accent-bright: oklch(77% 0.16 280);
-  --color-cyan: oklch(78% 0.12 224);
-  --color-vcache: oklch(80% 0.12 184);
-  --color-freq: oklch(80% 0.13 70);
-  --color-ok: oklch(78% 0.15 158);
-  --color-warn: oklch(82% 0.15 85);
-  --color-danger: oklch(66% 0.19 22);
+  /* Accent + signals — neon violet primary, rose energy accent */
+  --color-accent: oklch(62% 0.225 293);
+  --color-accent-bright: oklch(73% 0.2 295);
+  --color-rose: oklch(66% 0.225 12);
+  --color-rose-bright: oklch(74% 0.2 14);
+  --color-cyan: oklch(80% 0.13 218);
+  --color-vcache: oklch(82% 0.13 184);
+  --color-freq: oklch(81% 0.14 70);
+  --color-ok: oklch(80% 0.17 152);
+  --color-warn: oklch(83% 0.16 85);
+  --color-danger: oklch(66% 0.21 18);
 
-  /* Type — Microsoft YaHei / PingFang per request */
-  --font-sans: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "PingFang SC", "Microsoft YaHei UI", "Cascadia Mono", ui-monospace, monospace;
+  /* Type — Orbitron display / JetBrains Mono telemetry / Inter + YaHei body */
+  --font-display: "Orbitron", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
+  --font-sans: "Inter", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", ui-monospace, "PingFang SC", "Microsoft YaHei UI", monospace;
 
   /* Radii */
-  --radius-xl: 18px;
-  --radius-2xl: 22px;
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
 
   /* Motion */
   --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
@@ -86,7 +93,7 @@
     background: transparent !important;
   }
   ::selection {
-    background: oklch(67% 0.185 280 / 0.35);
+    background: color-mix(in oklch, var(--color-accent) 40%, transparent);
   }
   ::-webkit-scrollbar {
     width: 10px;
@@ -105,9 +112,23 @@
   ::-webkit-scrollbar-corner {
     background: transparent;
   }
+  /* Telemetry numbers — JetBrains Mono, tabular so values never shift width. */
   .nums {
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
     font-feature-settings: "tnum" 1;
+    letter-spacing: -0.01em;
+  }
+  /* Orbitron display — brand wordmark, HUD stat/section titles (Latin + numbers). */
+  .display {
+    font-family: var(--font-display);
+    letter-spacing: 0.02em;
+  }
+  /* Uppercase HUD micro-label. */
+  .hud-label {
+    font-family: var(--font-display);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
   }
 }
 
@@ -179,7 +200,75 @@
   }
 
   .grad-accent {
-    background-image: linear-gradient(135deg, oklch(67% 0.185 280), oklch(66% 0.15 248));
+    background-image: linear-gradient(135deg, var(--color-accent-bright), color-mix(in oklch, var(--color-rose) 70%, var(--color-accent)));
+  }
+  /* Rose-tinted glow variant (energy / danger highlights). */
+  .glow-rose {
+    --glow: var(--color-rose);
+    box-shadow:
+      0 0 0 1px color-mix(in oklch, var(--glow) calc(40% * var(--glow-o, 1)), transparent),
+      0 0 18px color-mix(in oklch, var(--glow) calc(34% * var(--glow-o, 1)), transparent);
+  }
+
+  /* ── HUD instrument framing ────────────────────────────────────────────────
+     L-shaped corner ticks on opposite corners → "telemetry readout" feel. Use on
+     key panels/stat tiles, sparingly. Accent-colored, dims with --glow-o. */
+  .hud-frame {
+    position: relative;
+  }
+  .hud-frame::before,
+  .hud-frame::after {
+    content: "";
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    border: 1.5px solid color-mix(in oklch, var(--color-accent) 55%, transparent);
+    pointer-events: none;
+  }
+  .hud-frame::before {
+    top: 7px;
+    left: 7px;
+    border-right: 0;
+    border-bottom: 0;
+    border-top-left-radius: 4px;
+  }
+  .hud-frame::after {
+    right: 7px;
+    bottom: 7px;
+    border-left: 0;
+    border-top: 0;
+    border-bottom-right-radius: 4px;
+  }
+
+  /* Angled tech corner (clip top-right). Sparingly on hero/key panels. */
+  .chamfer {
+    clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
+  }
+
+  /* Animated HUD backdrop — faint grid + drifting glow. Behind content only. */
+  .hud-grid {
+    background-image:
+      linear-gradient(color-mix(in oklch, var(--color-accent) 7%, transparent) 1px, transparent 1px),
+      linear-gradient(90deg, color-mix(in oklch, var(--color-accent) 7%, transparent) 1px, transparent 1px);
+    background-size: 44px 44px;
+    -webkit-mask-image: radial-gradient(120% 100% at 50% 0%, #000 35%, transparent 78%);
+    mask-image: radial-gradient(120% 100% at 50% 0%, #000 35%, transparent 78%);
+  }
+
+  /* Subtle scanlines overlay (very low opacity, pointer-events none). */
+  .scanlines::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      to bottom,
+      oklch(100% 0 0 / 0.018) 0px,
+      oklch(100% 0 0 / 0.018) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    mix-blend-mode: overlay;
   }
 
   .drag-region {

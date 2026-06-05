@@ -34,7 +34,7 @@ function Head({ k, label, sortKey, sortDir, onSort, align = "right" }: HeadProps
     <button
       onClick={() => onSort(k)}
       className={cn(
-        "no-drag flex items-center gap-1 text-[11.5px] font-medium transition-colors hover:text-ink",
+        "hud-label no-drag flex cursor-pointer items-center gap-1 text-[9.5px] transition-colors hover:text-ink",
         align === "right" ? "justify-end" : "justify-start",
         active ? "text-accent" : "text-muted",
       )}
@@ -45,13 +45,15 @@ function Head({ k, label, sortKey, sortDir, onSort, align = "right" }: HeadProps
   );
 }
 
-/** A horizontal mini-bar + value, reused for CPU on every row. */
+/** A horizontal mini-bar + value, reused for CPU on every row.
+ *  Bar hue shifts to warn above 60% load for at-a-glance telemetry. */
 function CpuCell({ value }: { value: number }) {
+  const hot = value >= 60;
   return (
     <div className="flex items-center justify-end gap-1.5">
       <span className="relative h-1 w-8 overflow-hidden rounded-full bg-surface3">
         <span
-          className="absolute inset-y-0 left-0 rounded-full bg-accent"
+          className={cn("absolute inset-y-0 left-0 rounded-full transition-colors", hot ? "bg-warn" : "bg-accent")}
           style={{ width: `${Math.min(value, 100)}%` }}
         />
       </span>
@@ -77,16 +79,22 @@ function MetricCells({ cpu, gpu, mem, threads, gpuEngine, gpuAdapter, detailed }
       <span className="nums text-right text-muted">{threads || "—"}</span>
       <CpuCell value={cpu} />
       <span
-        className="nums text-right text-dim"
+        className={cn("nums text-right", gpu > 0.05 ? "text-vcache" : "text-dim")}
         title={gpu > 0.05 ? `${gpuAdapter ?? "GPU"} · ${gpuEngine ?? ""}`.trim() : undefined}
       >
         {gpu > 0.05 ? gpu.toFixed(1) : "—"}
       </span>
-      {detailed && (
-        <span className="truncate text-[11.5px] text-muted" title={gpuAdapter ?? undefined}>
-          {gpu > 0.05 ? (gpuEngine ?? "—") : "—"}
-        </span>
-      )}
+      {detailed &&
+        (gpu > 0.05 && gpuEngine ? (
+          <span
+            className="hud-label justify-self-start truncate rounded border border-vcache/30 bg-vcache/10 px-1.5 py-px text-[9px] text-vcache"
+            title={gpuAdapter ?? undefined}
+          >
+            {gpuEngine}
+          </span>
+        ) : (
+          <span className="text-[11.5px] text-dim">—</span>
+        ))}
       <span className="nums text-right text-muted">{formatBytes(mem, 0)}</span>
     </>
   );
@@ -262,13 +270,13 @@ export function TmProcessTable({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/50">
-      <div className={cn("grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2", cols)}>
+      <div className={cn("grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2.5", cols)}>
         <Head k="name" label="进程名" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="left" />
-        {detailed && <span className="text-right text-[11.5px] font-medium text-muted">PID</span>}
+        {detailed && <span className="hud-label text-right text-[9.5px] text-muted">PID</span>}
         <Head k="threads" label="线程" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <Head k="cpu" label="CPU" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <Head k="gpu" label="GPU" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-        {detailed && <span className="text-[11.5px] font-medium text-muted">GPU 引擎</span>}
+        {detailed && <span className="hud-label text-[9.5px] text-muted">GPU 引擎</span>}
         <Head k="mem" label="内存" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <span />
       </div>
@@ -301,7 +309,12 @@ export function TmProcessTable({
             </div>
           );
         })}
-        {groups.length === 0 && <div className="py-10 text-center text-[12.5px] text-dim">没有匹配的进程</div>}
+        {groups.length === 0 && (
+          <div className="flex flex-col items-center gap-1.5 py-12 text-center">
+            <span className="hud-label text-[10px] text-dim">NO PROCESSES</span>
+            <span className="text-[12.5px] text-dim">没有匹配的进程</span>
+          </div>
+        )}
       </div>
     </div>
   );

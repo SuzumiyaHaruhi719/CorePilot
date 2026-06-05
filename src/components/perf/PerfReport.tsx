@@ -102,8 +102,8 @@ const STATS: StatDef[] = [
 function StatCell({ stat, value }: { stat: StatDef; value: number | null }) {
   const empty = !isNum(value);
   return (
-    <div className="rounded-xl border border-line bg-surface2/40 px-3 py-2.5">
-      <div className="text-[10.5px] uppercase tracking-wide text-dim">{stat.label}</div>
+    <div className="rounded-xl border border-line bg-surface2/40 px-3 py-2.5 transition-colors hover:border-line-strong">
+      <div className="hud-label text-[9px] text-dim">{stat.label}</div>
       <div className="nums mt-0.5 flex items-baseline gap-1">
         <span
           className="text-[20px] font-semibold leading-none"
@@ -122,7 +122,7 @@ function MetaItem({ icon, label, value }: { icon: ReactNode; label: string; valu
     <div className="flex min-w-0 items-center gap-2">
       <span className="shrink-0 text-dim">{icon}</span>
       <div className="min-w-0">
-        <div className="text-[10px] uppercase tracking-wide text-dim">{label}</div>
+        <div className="hud-label text-[9px] text-dim">{label}</div>
         <div className="truncate text-[12px] font-medium text-ink" title={value}>
           {value}
         </div>
@@ -148,7 +148,7 @@ function HeadlineCard({
 }) {
   const empty = value === DASH;
   return (
-    <div className="flex items-center gap-3 rounded-2xl border border-line bg-surface2/40 px-4 py-3">
+    <div className="hud-frame glass hairline flex items-center gap-3 rounded-2xl px-4 py-3">
       <span
         className="grid h-10 w-10 shrink-0 place-items-center rounded-xl"
         style={{ background: `oklch(70% 0.13 ${hue} / 0.16)`, color: `oklch(82% 0.13 ${hue})` }}
@@ -156,7 +156,7 @@ function HeadlineCard({
         {icon}
       </span>
       <div className="min-w-0">
-        <div className="text-[10.5px] uppercase tracking-wide text-dim">{label}</div>
+        <div className="hud-label text-[9px] text-dim">{label}</div>
         <div className="nums flex items-baseline gap-1">
           <span
             className="text-[22px] font-semibold leading-none"
@@ -254,9 +254,10 @@ interface ChartPanelProps {
 function ChartPanel({ def, timesSec, values, refLines, syncKey, onHover }: ChartPanelProps) {
   const fmt = def.fmt ?? ((v: number) => `${v.toFixed(def.digits)}${def.unit}`);
   return (
-    <div className="rounded-2xl border border-line bg-surface2/40 p-4">
-      <div className="mb-2 flex items-center gap-2 text-[12.5px] font-semibold text-muted">
-        <span style={{ color: `oklch(80% 0.13 ${def.hue})` }}>{def.icon}</span> {def.title}
+    <div className="rounded-2xl border border-line bg-surface2/40 p-4 transition-colors hover:border-line-strong">
+      <div className="mb-2 flex items-center gap-2">
+        <span style={{ color: `oklch(80% 0.13 ${def.hue})` }}>{def.icon}</span>
+        <span className="hud-label text-[10px] text-muted">{def.title}</span>
       </div>
       <TimeSeriesChart
         timesSec={timesSec}
@@ -300,7 +301,7 @@ function FeaturedStat({ label, value, hue }: { label: string; value: string; hue
   const empty = value === DASH;
   return (
     <div className="flex items-baseline justify-between gap-2 rounded-lg border border-line bg-surface2/40 px-2.5 py-1.5 lg:flex-col lg:items-start lg:gap-0.5">
-      <span className="text-[10px] uppercase tracking-wide text-dim">{label}</span>
+      <span className="hud-label text-[9px] text-dim">{label}</span>
       <span
         className="nums text-[15px] font-semibold leading-none"
         style={{ color: empty ? "var(--color-dim)" : `oklch(82% 0.13 ${hue})` }}
@@ -388,7 +389,7 @@ function FeaturedChart({ series, summary, timesSec, syncKey, onHover, hovered }:
           />
         </div>
         <div className="nums flex items-baseline gap-1.5">
-          <span className="text-[10px] uppercase tracking-wide text-dim">{live ? "当前" : "平均"}</span>
+          <span className="hud-label text-[9px] text-dim">{live ? "当前" : "平均"}</span>
           <span
             className="text-[26px] font-semibold leading-none"
             style={{ color: `oklch(84% 0.13 ${def.hue})` }}
@@ -529,7 +530,7 @@ export function PerfReport({ session }: { session: PerfSession }) {
       className="space-y-4"
     >
       {/* Header */}
-      <div className="glass hairline rounded-2xl p-4">
+      <div className="hud-frame glass hairline rounded-2xl p-4">
         <div className="flex items-start gap-3.5">
           <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl grad-accent glow text-white">
             <Gauge size={22} />
@@ -587,8 +588,9 @@ export function PerfReport({ session }: { session: PerfSession }) {
 
       {/* Summary stat grid */}
       <div className="glass hairline rounded-2xl p-4">
-        <div className="mb-3 flex items-center gap-2 text-[12.5px] font-semibold text-muted">
-          <Activity size={15} className="text-accent" /> 性能汇总
+        <div className="mb-3 flex items-center gap-2">
+          <Activity size={15} className="text-accent" />
+          <span className="hud-label text-[10px] text-muted">性能汇总 · SUMMARY</span>
         </div>
         <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
           {STATS.map((stat) => (
@@ -630,8 +632,9 @@ export function PerfReport({ session }: { session: PerfSession }) {
 
         {hasNet && (
           <div className="rounded-2xl border border-line bg-surface2/40 p-4 lg:col-span-2">
-            <div className="mb-2 flex items-center gap-2 text-[12.5px] font-semibold text-muted">
-              <Activity size={15} style={{ color: "oklch(80% 0.13 224)" }} /> 网络上传 / 下载
+            <div className="mb-2 flex items-center gap-2">
+              <Activity size={15} style={{ color: "oklch(80% 0.13 224)" }} />
+              <span className="hud-label text-[10px] text-muted">网络上传 / 下载</span>
               <span className="nums ml-1 text-[10.5px] font-normal">
                 <span style={{ color: "oklch(80% 0.13 75)" }}>↑ 上传</span>
                 <span className="text-dim"> · </span>

@@ -22,8 +22,8 @@ export function TabHeader({ icon: Icon, title, subtitle, actions }: TabHeaderPro
           <Icon size={21} strokeWidth={2.2} />
         </motion.div>
         <div>
-          <h1 className="text-[18px] font-semibold leading-tight text-ink">{title}</h1>
-          {subtitle && <p className="text-[12.5px] text-muted">{subtitle}</p>}
+          <h1 className="display text-[17px] font-bold uppercase leading-tight tracking-[0.08em] text-ink">{title}</h1>
+          {subtitle && <p className="mt-0.5 text-[12.5px] text-muted">{subtitle}</p>}
         </div>
       </div>
       {actions && <div className="no-drag flex items-center gap-2">{actions}</div>}

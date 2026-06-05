@@ -1,6 +1,7 @@
 import { MonitorPlay } from "lucide-react";
 import { motion } from "motion/react";
 import { useEffect, useState } from "react";
+import { cn } from "../../lib/cn";
 import { formatBytes } from "../../lib/format";
 import { api, type GpuOcInfo } from "../../lib/ipc";
 import { Sparkline } from "../charts/Sparkline";
@@ -18,7 +19,7 @@ function push(arr: number[], v: number): number[] {
 function Info({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="text-[10.5px] uppercase tracking-wider text-dim">{label}</div>
+      <div className="hud-label text-[9px] text-dim">{label}</div>
       <div className="nums truncate text-[13px] font-medium text-ink">{value}</div>
     </div>
   );
@@ -79,21 +80,32 @@ export function GpuDetail() {
           <MonitorPlay size={15} className="text-vcache" /> GPU
           <span className="font-normal text-dim">— {info?.name ?? "—"}</span>
         </div>
-        <div className="nums text-[20px] font-semibold text-vcache">{info ? info.utilizationGpu : 0}%</div>
+        <div className="nums display text-[22px] font-semibold text-vcache glow-text">{info ? info.utilizationGpu : 0}%</div>
       </div>
 
       <Sparkline data={utilHist} max={100} hue={184} height={92} />
 
       <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5">
-        {ENGINES.map((name) => (
-          <div key={name} className="rounded-xl border border-line bg-surface2/40 p-2.5">
-            <div className="mb-1 flex items-center justify-between">
-              <span className="text-[11px] text-muted">{name}</span>
-              <span className="nums text-[12px] font-semibold text-ink">{Math.round(engines[name] ?? 0)}%</span>
+        {ENGINES.map((name) => {
+          const live = (engines[name] ?? 0) > 1;
+          return (
+            <div
+              key={name}
+              className={cn(
+                "rounded-xl border bg-surface2/40 p-2.5 transition-colors",
+                live ? "border-vcache/30" : "border-line",
+              )}
+            >
+              <div className="mb-1 flex items-center justify-between">
+                <span className="hud-label text-[9px] text-muted">{name}</span>
+                <span className={cn("nums text-[12px] font-semibold", live ? "text-vcache" : "text-ink")}>
+                  {Math.round(engines[name] ?? 0)}%
+                </span>
+              </div>
+              <Sparkline data={engHist[name] ?? []} max={100} hue={184} height={38} />
             </div>
-            <Sparkline data={engHist[name] ?? []} max={100} hue={184} height={38} />
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       <div>

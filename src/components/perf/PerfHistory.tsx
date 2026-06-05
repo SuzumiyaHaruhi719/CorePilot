@@ -144,13 +144,15 @@ export function PerfHistory() {
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-          className="glass hairline flex max-w-md flex-col items-center gap-3 rounded-2xl p-8 text-center"
+          className="hud-frame glass hairline flex max-w-md flex-col items-center gap-3 rounded-2xl p-8 text-center"
         >
-          <span className="grid h-12 w-12 place-items-center rounded-xl bg-accent/15 text-accent">
+          <span className="grid h-12 w-12 place-items-center rounded-xl bg-accent/15 text-accent glow-sm">
             <Gamepad2 size={22} />
           </span>
-          <div className="text-[14px] font-semibold text-ink">暂无性能报告</div>
-          <p className="text-[12px] leading-relaxed text-dim">游戏运行结束后自动生成</p>
+          <div className="hud-label text-[12px] text-ink">暂无性能报告</div>
+          <p className="text-[12px] leading-relaxed text-dim">
+            启动并退出游戏后，CorePilot 会自动记录本次会话并在此生成性能报告。
+          </p>
         </motion.div>
       </div>
     );
@@ -163,8 +165,8 @@ export function PerfHistory() {
       {/* Master: session list */}
       <div className="flex min-h-0 flex-col gap-3">
         <div className="flex items-center justify-between">
-          <span className="text-[12.5px] font-semibold text-muted">
-            报告 <span className="nums text-dim">({sessions.length})</span>
+          <span className="hud-label flex items-center gap-1.5 text-[10px] text-muted">
+            报告 <span className="nums text-dim">{sessions.length}</span>
           </span>
           <Button variant="subtle" onClick={() => setConfirmClear(true)} className="px-2 py-1">
             <Trash2 size={13} /> 清空历史

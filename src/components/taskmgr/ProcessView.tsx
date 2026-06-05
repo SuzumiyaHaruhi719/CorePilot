@@ -127,7 +127,12 @@ export function ProcessView({ detailed }: ProcessViewProps) {
           />
         </div>
         <span className="nums text-[11.5px] text-dim">{visible.length} 个进程</span>
-        {status && <span className="ml-auto text-[11.5px] text-accent">{status}</span>}
+        {status && (
+          <span className="ml-auto flex items-center gap-1.5 text-[11.5px] text-accent">
+            <span className="h-1.5 w-1.5 rounded-full bg-accent glow-sm" />
+            {status}
+          </span>
+        )}
       </div>
 
       {detailed ? (

@@ -484,7 +484,7 @@ export function CoreAssignment() {
                   ref={colorBtnRef}
                   onClick={openColorPicker}
                   title="自定义分组颜色"
-                  className="no-drag grid h-[34px] w-[34px] shrink-0 place-items-center rounded-lg border border-line bg-surface2 transition-colors hover:border-line-strong"
+                  className="no-drag grid h-[34px] w-[34px] shrink-0 cursor-pointer place-items-center rounded-lg border border-line bg-surface2 transition-colors hover:border-line-strong"
                 >
                   <span
                     className="h-4 w-4 rounded-full glow-sm"
@@ -499,7 +499,7 @@ export function CoreAssignment() {
                 <Button onClick={openCoreModal}>
                   <SlidersHorizontal size={14} /> 选择核心
                 </Button>
-                <span className="nums text-[11.5px] text-dim">
+                <span className="nums rounded-md border border-line bg-surface2/60 px-2 py-1 text-[11px] text-muted">
                   {selectedGroup.mask === 0n ? "全部核心" : `CPU ${maskToCpuList(selectedGroup.mask)}`}
                 </span>
                 <span className="text-[11.5px] text-dim">· {visible.length} 个进程</span>
@@ -544,7 +544,21 @@ export function CoreAssignment() {
             </div>
           </div>
 
-          {status && <div className="text-[11.5px] text-accent">{status}</div>}
+          <AnimatePresence>
+            {status && (
+              <motion.div
+                key={status}
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.18 }}
+                className="flex items-center gap-2 text-[11.5px] text-accent"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-accent glow-sm" />
+                {status}
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           {/* Keyed on the selected group so the list animates only when switching
               groups (not on the ~1.5s data poll, which keeps the same key).

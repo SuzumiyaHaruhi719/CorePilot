@@ -25,6 +25,28 @@ export function defaultConfig(): FanConfig {
   return { mode: "auto", manualPct: 50, tempSourceId: null, curve: DEFAULT_CURVE, minDuty: 20 };
 }
 
+/** A saved, named snapshot of all fan configs for one-click switching. */
+export interface FanProfile {
+  id: string;
+  name: string;
+  configs: Record<string, FanConfig>;
+}
+
+function uid(): string {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  return `fp_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+}
+
+/** Deep-copy a config map so saved profiles don't alias the live state. */
+function cloneConfigs(src: Record<string, FanConfig>): Record<string, FanConfig> {
+  const out: Record<string, FanConfig> = {};
+  for (const [k, v] of Object.entries(src)) {
+    out[k] = { ...v, curve: v.curve.map((p) => ({ ...p })) };
+  }
+  return out;
+}
+
 function toBackend(configs: Record<string, FanConfig>): FanChannelConfig[] {
   return Object.entries(configs).map(([controlId, c]) => ({
     controlId,
@@ -47,6 +69,14 @@ interface FanProfileState {
   setApplyOnStartup: (value: boolean) => void;
   /** Set (or clear, with "") a fan's custom display name. */
   setLabel: (controlId: string, label: string) => void;
+  /** Saved fan profiles + the currently-applied one. */
+  profiles: FanProfile[];
+  activeProfileId: string | null;
+  /** Snapshot the current configs as a named profile and make it active. */
+  saveProfile: (name: string) => void;
+  /** Apply a saved profile: load its configs and push to the engine. */
+  applyProfile: (id: string) => void;
+  deleteProfile: (id: string) => void;
   /** Push the current config set to the backend engine. */
   push: () => void;
 }
@@ -74,6 +104,25 @@ export const useFanProfiles = create<FanProfileState>()(
         else delete labels[controlId];
         set({ labels });
       },
+      profiles: [],
+      activeProfileId: null,
+      saveProfile: (name) => {
+        const id = uid();
+        const profile: FanProfile = { id, name, configs: cloneConfigs(get().configs) };
+        set((s) => ({ profiles: [...s.profiles, profile], activeProfileId: id }));
+      },
+      applyProfile: (id) => {
+        const profile = get().profiles.find((p) => p.id === id);
+        if (!profile) return;
+        const configs = cloneConfigs(profile.configs);
+        set({ configs, activeProfileId: id });
+        api.fanSetConfig(toBackend(configs)).catch(() => undefined);
+      },
+      deleteProfile: (id) =>
+        set((s) => ({
+          profiles: s.profiles.filter((p) => p.id !== id),
+          activeProfileId: s.activeProfileId === id ? null : s.activeProfileId,
+        })),
       push: () => {
         api.fanSetConfig(toBackend(get().configs)).catch(() => undefined);
       },

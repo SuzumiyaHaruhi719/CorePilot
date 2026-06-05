@@ -77,7 +77,7 @@ function Head({ k, label, sortKey, sortDir, onSort, align = "right" }: HeadProps
     <button
       onClick={() => onSort(k)}
       className={cn(
-        "no-drag flex items-center gap-1 text-[11.5px] font-medium transition-colors hover:text-ink",
+        "hud-label no-drag flex cursor-pointer items-center gap-1 text-[9.5px] transition-colors hover:text-ink",
         align === "right" ? "justify-end" : "justify-start",
         active ? "text-accent" : "text-muted",
       )}
@@ -108,7 +108,7 @@ export function ProcessTable({
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/40">
       <div
         className={cn(
-          "grid items-center gap-2 border-b border-line bg-surface2/60 px-3 py-2",
+          "grid items-center gap-2 border-b border-line bg-surface2/60 px-3 py-2.5",
           COLS,
         )}
       >
@@ -116,7 +116,7 @@ export function ProcessTable({
           onClick={onToggleAll}
           title="全选 / 取消全选"
           className={cn(
-            "grid h-4 w-4 place-items-center rounded border transition-colors",
+            "grid h-4 w-4 cursor-pointer place-items-center rounded border transition-colors",
             allOn ? "border-accent bg-accent" : "border-line-strong hover:border-accent/60",
           )}
         >
@@ -146,7 +146,9 @@ export function ProcessTable({
               className={cn(
                 "grid cursor-pointer items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] transition-colors",
                 COLS,
-                isSelected ? "bg-accent/10" : "hover:bg-surface2/50",
+                isSelected
+                  ? "bg-accent/10 shadow-[inset_2px_0_0_0_var(--color-accent)]"
+                  : "hover:bg-surface2/50",
                 offline && "opacity-65",
               )}
             >
@@ -203,7 +205,10 @@ export function ProcessTable({
                 <div className="flex items-center justify-end gap-1.5">
                   <span className="relative h-1 w-8 overflow-hidden rounded-full bg-surface3">
                     <span
-                      className="absolute inset-y-0 left-0 rounded-full bg-accent"
+                      className={cn(
+                        "absolute inset-y-0 left-0 rounded-full transition-colors",
+                        p.cpu >= 60 ? "bg-warn" : "bg-accent",
+                      )}
                       style={{ width: `${Math.min(p.cpu, 100)}%` }}
                     />
                   </span>
@@ -218,7 +223,10 @@ export function ProcessTable({
           );
         })}
         {processes.length === 0 && (
-          <div className="py-10 text-center text-[12.5px] text-dim">没有匹配的进程</div>
+          <div className="flex flex-col items-center gap-1.5 py-12 text-center">
+            <span className="hud-label text-[10px] text-dim">NO PROCESSES</span>
+            <span className="text-[12.5px] text-dim">没有匹配的进程</span>
+          </div>
         )}
       </div>
     </div>

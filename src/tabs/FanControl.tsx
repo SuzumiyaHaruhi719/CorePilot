@@ -1,11 +1,15 @@
-import { AlertTriangle, Fan, Gauge, Info, Pencil, Thermometer, Wind } from "lucide-react";
+import { AlertTriangle, Check, Eye, EyeOff, Fan, Gauge, Info, Layers, Pencil, Save, Thermometer, Trash2, Wind } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { FanCurveEditor } from "../components/fans/FanCurveEditor";
+import { Button } from "../components/ui/Button";
+import { Modal } from "../components/ui/Modal";
 import { Segmented } from "../components/ui/Segmented";
 import { Slider } from "../components/ui/Slider";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
+import { hoverPop } from "../lib/motion";
 import { api, type FanChannel, type FanCurvePoint, type FanInfo, type FanMode, type FanTempSource } from "../lib/ipc";
 import { useSettings } from "../store/settings";
 import { defaultConfig, useFanProfiles, type FanConfig } from "../store/fanProfiles";
@@ -88,12 +92,27 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
     }
   }
 
+  const spinning = !locked && config.mode !== "auto";
+  const rpm = channel.rpm != null ? Math.round(channel.rpm) : null;
+  const pct = channel.pct != null ? Math.round(channel.pct) : null;
+
   return (
-    <div className={cn("rounded-2xl border border-line bg-surface2/40 p-4", locked && "opacity-60")}>
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+    <div
+      className={cn(
+        "hud-frame glass hairline relative overflow-hidden rounded-2xl p-4 transition-colors duration-200",
+        locked && "opacity-60",
+      )}
+    >
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
-          <span className="grid h-9 w-9 place-items-center rounded-lg bg-cyan/15 text-cyan">
-            <Fan size={17} className={config.mode !== "auto" ? "animate-spin-slow" : ""} />
+          <span
+            className={cn(
+              "grid h-9 w-9 place-items-center rounded-lg transition-colors duration-200",
+              spinning ? "bg-cyan/20 text-cyan glow-sm" : "bg-surface3 text-dim",
+            )}
+            style={spinning ? ({ "--glow": "var(--color-cyan)" } as React.CSSProperties) : undefined}
+          >
+            <Fan size={17} className={spinning ? "animate-spin-slow" : ""} />
           </span>
           <div className="min-w-0">
             {editing ? (
@@ -108,16 +127,16 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
                 }}
                 placeholder={channel.name}
                 maxLength={24}
-                className="no-drag w-32 rounded-md border border-accent/50 bg-surface2 px-1.5 py-0.5 text-[13px] font-semibold text-ink outline-none"
+                className="no-drag w-32 rounded-md border border-accent/50 bg-surface2 px-1.5 py-0.5 text-[13px] font-semibold text-ink outline-none glow-sm"
               />
             ) : (
               <button
                 type="button"
                 onClick={startEdit}
                 title="点击重命名"
-                className="no-drag group flex items-center gap-1.5 text-left"
+                className="no-drag group flex cursor-pointer items-center gap-1.5 text-left"
               >
-                <span className="text-[13.5px] font-semibold text-ink underline decoration-dotted decoration-dim/40 underline-offset-4">{displayName}</span>
+                <span className="text-[13.5px] font-semibold text-ink underline decoration-dotted decoration-dim/40 underline-offset-4 transition-colors group-hover:decoration-accent">{displayName}</span>
                 <Pencil size={12} className="text-dim/70 transition-colors group-hover:text-accent" />
               </button>
             )}
@@ -127,27 +146,27 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-4">
-          <div className="text-right">
-            <div className="text-[9.5px] uppercase tracking-wide text-dim">转速</div>
-            <div className="nums text-[14px] font-semibold text-ink">
-              {channel.rpm != null ? Math.round(channel.rpm) : "—"}
-              <span className="ml-0.5 text-[10px] font-normal text-dim">RPM</span>
+        <div className="flex items-stretch gap-2">
+          <div className="rounded-lg border border-line bg-surface2/50 px-2.5 py-1 text-right">
+            <div className="hud-label text-[8.5px] text-dim">转速</div>
+            <div className="nums text-[15px] font-semibold leading-tight text-cyan" style={{ textShadow: rpm != null ? "0 0 10px color-mix(in oklch, var(--color-cyan) 30%, transparent)" : undefined }}>
+              {rpm ?? "—"}
+              <span className="ml-0.5 text-[9.5px] font-normal text-dim">RPM</span>
             </div>
           </div>
-          <div className="text-right">
-            <div className="text-[9.5px] uppercase tracking-wide text-dim">占空比</div>
-            <div className="nums text-[14px] font-semibold text-ink">
-              {channel.pct != null ? Math.round(channel.pct) : "—"}
-              <span className="ml-0.5 text-[10px] font-normal text-dim">%</span>
+          <div className="rounded-lg border border-line bg-surface2/50 px-2.5 py-1 text-right">
+            <div className="hud-label text-[8.5px] text-dim">占空比</div>
+            <div className="nums text-[15px] font-semibold leading-tight text-ink">
+              {pct ?? "—"}
+              <span className="ml-0.5 text-[9.5px] font-normal text-dim">%</span>
             </div>
           </div>
         </div>
       </div>
 
       {locked ? (
-        <div className="flex items-center gap-2 rounded-lg bg-warn/10 px-3 py-2 text-[11.5px] text-warn">
-          <AlertTriangle size={13} /> 此风扇接口被主板固件锁定，无法软件调速（仅可读取转速）。
+        <div className="flex items-center gap-2 rounded-lg border border-warn/25 bg-warn/10 px-3 py-2 text-[11.5px] text-warn">
+          <AlertTriangle size={13} className="shrink-0" /> 此风扇接口被主板固件锁定，无法软件调速（仅可读取转速）。
         </div>
       ) : (
         <>
@@ -174,7 +193,7 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
                   <select
                     value={config.tempSourceId ?? ""}
                     onChange={(e) => onChange({ tempSourceId: e.target.value })}
-                    className="no-drag rounded-lg border border-line bg-surface2 px-2 py-1 text-[12px] text-ink outline-none focus:border-accent/50"
+                    className="no-drag cursor-pointer rounded-lg border border-line bg-surface2 px-2 py-1 text-[12px] text-ink outline-none transition-colors hover:border-line-strong focus:border-accent/50"
                   >
                     {temps.map((t) => (
                       <option key={t.id} value={t.id}>
@@ -186,12 +205,17 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
                 </label>
                 {liveTemp != null && (
                   <span
-                    className="nums rounded-md px-2 py-0.5 text-[11.5px] font-medium"
+                    className="nums inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11.5px] font-medium"
                     style={{
-                      background: `oklch(70% 0.14 ${tempHue(liveTemp)} / 0.16)`,
+                      background: `oklch(70% 0.14 ${tempHue(liveTemp)} / 0.14)`,
+                      borderColor: `oklch(70% 0.14 ${tempHue(liveTemp)} / 0.35)`,
                       color: `oklch(82% 0.13 ${tempHue(liveTemp)})`,
                     }}
                   >
+                    <span
+                      className="h-1.5 w-1.5 animate-pulse rounded-full"
+                      style={{ background: `oklch(82% 0.13 ${tempHue(liveTemp)})` }}
+                    />
                     {Math.round(liveTemp)}°C → {liveDuty != null ? Math.round(liveDuty) : "—"}%
                   </span>
                 )}
@@ -222,8 +246,15 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
 
 export function FanControl() {
   const pollMs = useSettings((s) => s.pollMs);
-  const { configs, labels, applyOnStartup, setConfig, setApplyOnStartup, setLabel } = useFanProfiles();
+  const { configs, labels, applyOnStartup, setConfig, setApplyOnStartup, setLabel, profiles, activeProfileId, saveProfile, applyProfile, deleteProfile } =
+    useFanProfiles();
   const [info, setInfo] = useState<FanInfo | null>(null);
+  // Control ids that have shown a valid (>0) RPM at least once this session.
+  // Headers that have never spun are hidden (no fan connected) until they do.
+  const [seen, setSeen] = useState<Set<string>>(() => new Set());
+  const [showAll, setShowAll] = useState(false);
+  const [showSave, setShowSave] = useState(false);
+  const [newName, setNewName] = useState("");
 
   // Apply saved fan configs when the page opens (hydration-aware).
   useEffect(() => {
@@ -243,7 +274,19 @@ export function FanControl() {
       api
         .fanInfo()
         .then((i) => {
-          if (alive) setInfo(i);
+          if (!alive) return;
+          setInfo(i);
+          // Remember any header that is currently spinning, so a fan that idles
+          // back to 0 (BIOS fan-stop) stays visible instead of vanishing.
+          const spinning = i.channels.filter((c) => (c.rpm ?? 0) > 0).map((c) => c.id);
+          if (spinning.length) {
+            setSeen((prev) => {
+              let changed = false;
+              const next = new Set(prev);
+              for (const id of spinning) if (!next.has(id)) { next.add(id); changed = true; }
+              return changed ? next : prev;
+            });
+          }
         })
         .catch(() => undefined);
     void tick();
@@ -255,6 +298,11 @@ export function FanControl() {
   }, [pollMs]);
 
   const channels = info?.channels ?? [];
+  // Auto-hide headers with no detectable RPM (never spun) — show once they do.
+  const visibleChannels = showAll
+    ? channels
+    : channels.filter((c) => (c.rpm ?? 0) > 0 || seen.has(c.id));
+  const hiddenCount = channels.length - visibleChannels.length;
 
   return (
     <>
@@ -287,22 +335,98 @@ export function FanControl() {
             </div>
           )}
 
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-[12.5px] font-semibold text-muted">
-              <Gauge size={15} className="text-accent" /> 风扇接口
-              <span className="text-[11px] font-normal text-dim">· {channels.length} 个</span>
+          {/* Fan profiles — one-click switch */}
+          <div className="glass hairline rounded-2xl p-3.5">
+            <div className="mb-2.5 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Layers size={13} className="text-accent" />
+                <span className="hud-label text-[10px] text-dim">风扇配置</span>
+                {profiles.length > 0 && <span className="nums text-[10px] text-dim">· {profiles.length}</span>}
+              </div>
+              <Button onClick={() => { setNewName(""); setShowSave(true); }}>
+                <Save size={13} /> 保存当前
+              </Button>
             </div>
-            <label className="flex items-center gap-2 text-[11.5px] text-muted">
-              启动时自动应用
-              <Toggle checked={applyOnStartup} onChange={setApplyOnStartup} />
-            </label>
+            {profiles.length === 0 ? (
+              <p className="text-[11px] leading-relaxed text-dim">
+                把每个风扇调好后点「保存当前」存为一套方案,之后即可一键切换(如「静音」「游戏全速」)。
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                <AnimatePresence>
+                  {profiles.map((p) => {
+                    const active = p.id === activeProfileId;
+                    return (
+                      <motion.button
+                        key={p.id}
+                        layout
+                        initial={{ opacity: 0, scale: 0.9 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.85 }}
+                        whileHover={{ scale: 1.03, y: -2 }}
+                        whileTap={{ scale: 0.97 }}
+                        transition={hoverPop}
+                        onClick={() => applyProfile(p.id)}
+                        className={cn(
+                          "no-drag group relative flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-left",
+                          active ? "border-accent/50 bg-accent/10 glow-sm" : "border-line bg-surface2/50 hover:bg-surface3",
+                        )}
+                      >
+                        <Layers size={13} className={active ? "text-accent-bright" : "text-dim"} />
+                        <span className="text-[12.5px] font-medium text-ink">{p.name}</span>
+                        {active && <Check size={12} className="text-accent-bright" />}
+                        <span
+                          role="button"
+                          tabIndex={-1}
+                          onClick={(e) => { e.stopPropagation(); deleteProfile(p.id); }}
+                          className="ml-0.5 grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white group-hover:opacity-100"
+                        >
+                          <Trash2 size={11} />
+                        </span>
+                      </motion.button>
+                    );
+                  })}
+                </AnimatePresence>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Gauge size={13} className="text-accent" />
+              <span className="hud-label text-[10px] text-dim">风扇接口</span>
+              <span className="nums text-[10px] text-dim">· {visibleChannels.length}</span>
+              <span className="h-px flex-1 bg-line" />
+            </div>
+            <div className="flex shrink-0 items-center gap-3">
+              {hiddenCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowAll((v) => !v)}
+                  className="no-drag flex cursor-pointer items-center gap-1.5 text-[11px] text-dim transition-colors hover:text-muted"
+                >
+                  {showAll ? <EyeOff size={12} /> : <Eye size={12} />}
+                  {showAll ? "隐藏未接入" : `显示全部 (+${hiddenCount})`}
+                </button>
+              )}
+              <label className="flex shrink-0 cursor-pointer items-center gap-2 text-[11.5px] text-muted">
+                启动时自动应用
+                <Toggle checked={applyOnStartup} onChange={setApplyOnStartup} />
+              </label>
+            </div>
           </div>
 
           {channels.length === 0 ? (
-            <p className="text-[11.5px] leading-relaxed text-dim">正在读取风扇接口…</p>
+            <div className="flex items-center gap-2.5 rounded-xl border border-dashed border-line bg-surface2/30 px-3.5 py-3 text-[11.5px] text-dim">
+              <Fan size={14} className="animate-spin-slow text-cyan" /> 正在读取风扇接口…
+            </div>
+          ) : visibleChannels.length === 0 ? (
+            <div className="flex items-center gap-2.5 rounded-xl border border-dashed border-line bg-surface2/30 px-3.5 py-3 text-[11.5px] text-dim">
+              <Fan size={14} className="text-dim" /> 暂未检测到有效转速的风扇接口（接口接入风扇并转动后会自动显示）。
+            </div>
           ) : (
             <div className="grid gap-3 lg:grid-cols-2">
-              {channels.map((ch) => (
+              {visibleChannels.map((ch) => (
                 <ChannelCard
                   key={ch.id}
                   channel={ch}
@@ -325,6 +449,41 @@ export function FanControl() {
           </div>
         </div>
       )}
+
+      <Modal
+        open={showSave}
+        onClose={() => setShowSave(false)}
+        title="保存风扇配置"
+        footer={
+          <>
+            <Button onClick={() => setShowSave(false)}>取消</Button>
+            <Button
+              variant="primary"
+              onClick={() => {
+                saveProfile(newName.trim() || `配置 ${profiles.length + 1}`);
+                setShowSave(false);
+              }}
+            >
+              保存
+            </Button>
+          </>
+        }
+      >
+        <input
+          autoFocus
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              saveProfile(newName.trim() || `配置 ${profiles.length + 1}`);
+              setShowSave(false);
+            }
+          }}
+          placeholder="配置名称，例如「静音」「游戏全速」"
+          className="no-drag w-full rounded-lg border border-line bg-surface2 px-3 py-2 text-[13px] text-ink outline-none transition-colors focus:border-accent/50"
+        />
+        <p className="mt-2 text-[11.5px] text-dim">将保存当前每个风扇的模式与曲线，可随时一键切换。</p>
+      </Modal>
     </>
   );
 }

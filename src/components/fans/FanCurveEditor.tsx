@@ -42,6 +42,11 @@ export function FanCurveEditor({ points, onChange, live, minDuty = 0 }: FanCurve
 
   const sorted = [...points].sort((a, b) => a.tempC - b.tempC);
   const linePath = sorted.map((p) => `${xToPx(p.tempC)},${yToPx(p.duty)}`).join(" ");
+  // Closed area under the curve for a soft telemetry fill.
+  const areaPath =
+    sorted.length > 0
+      ? `${xToPx(sorted[0].tempC)},${HEIGHT - PAD} ${linePath} ${xToPx(sorted[sorted.length - 1].tempC)},${HEIGHT - PAD}`
+      : "";
 
   function moveTo(clientX: number, clientY: number) {
     if (dragging === null) return;
@@ -79,7 +84,10 @@ export function FanCurveEditor({ points, onChange, live, minDuty = 0 }: FanCurve
   const liveY = live ? yToPx(Math.max(0, Math.min(100, live.duty))) : 0;
 
   return (
-    <div ref={wrapRef} className="no-drag w-full select-none">
+    <div
+      ref={wrapRef}
+      className="hud-frame no-drag w-full select-none overflow-hidden rounded-xl border border-line bg-surface2/30"
+    >
       <svg
         width={width}
         height={HEIGHT}
@@ -88,6 +96,13 @@ export function FanCurveEditor({ points, onChange, live, minDuty = 0 }: FanCurve
         onPointerLeave={endDrag}
         style={{ touchAction: "none", display: "block" }}
       >
+        <defs>
+          <linearGradient id="fan-curve-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--color-accent)" stopOpacity={0.22} />
+            <stop offset="100%" stopColor="var(--color-accent)" stopOpacity={0.02} />
+          </linearGradient>
+        </defs>
+
         {/* grid */}
         {[0, 25, 50, 75, 100].map((t) => (
           <g key={`v${t}`} className="text-line">
@@ -107,34 +122,62 @@ export function FanCurveEditor({ points, onChange, live, minDuty = 0 }: FanCurve
           <rect x={PAD} y={floorY} width={innerW} height={HEIGHT - PAD - floorY} fill="currentColor" className="text-dim" opacity={0.08} />
         )}
 
+        {/* area fill under the curve */}
+        {areaPath && <polygon points={areaPath} fill="url(#fan-curve-fill)" />}
+
         {/* curve */}
-        <polyline points={linePath} fill="none" stroke="var(--color-accent)" strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
+        <polyline
+          points={linePath}
+          fill="none"
+          stroke="var(--color-accent)"
+          strokeWidth={2.5}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          style={{ filter: "drop-shadow(0 0 5px color-mix(in oklch, var(--color-accent) 50%, transparent))" }}
+        />
 
         {/* live operating point */}
         {live && (
           <g className="text-cyan">
             <line x1={liveX} y1={PAD} x2={liveX} y2={HEIGHT - PAD} stroke="currentColor" strokeWidth={1} strokeDasharray="3 3" opacity={0.6} />
-            <circle cx={liveX} cy={liveY} r={5} fill="currentColor" opacity={0.9} />
+            <circle cx={liveX} cy={liveY} r={9} fill="currentColor" opacity={0.18} />
+            <circle
+              cx={liveX}
+              cy={liveY}
+              r={5}
+              fill="currentColor"
+              stroke="var(--color-base)"
+              strokeWidth={1.5}
+              style={{ filter: "drop-shadow(0 0 6px color-mix(in oklch, var(--color-cyan) 70%, transparent))" }}
+            />
           </g>
         )}
 
         {/* draggable points */}
-        {sorted.map((p, i) => (
-          <circle
-            key={i}
-            cx={xToPx(p.tempC)}
-            cy={yToPx(p.duty)}
-            r={dragging === i ? 8 : 6}
-            fill="var(--color-accent-bright)"
-            className="cursor-grab"
-            stroke="white"
-            strokeWidth={1.5}
-            onPointerDown={(e) => {
-              e.currentTarget.setPointerCapture?.(e.pointerId);
-              setDragging(i);
-            }}
-          />
-        ))}
+        {sorted.map((p, i) => {
+          const isActive = dragging === i;
+          return (
+            <g key={i}>
+              {isActive && (
+                <circle cx={xToPx(p.tempC)} cy={yToPx(p.duty)} r={12} fill="var(--color-accent-bright)" opacity={0.18} />
+              )}
+              <circle
+                cx={xToPx(p.tempC)}
+                cy={yToPx(p.duty)}
+                r={isActive ? 8 : 6}
+                fill="var(--color-accent-bright)"
+                className={isActive ? "cursor-grabbing" : "cursor-grab"}
+                stroke="var(--color-base)"
+                strokeWidth={2}
+                style={{ filter: "drop-shadow(0 0 4px color-mix(in oklch, var(--color-accent-bright) 60%, transparent))", transition: "r 120ms ease-out" }}
+                onPointerDown={(e) => {
+                  e.currentTarget.setPointerCapture?.(e.pointerId);
+                  setDragging(i);
+                }}
+              />
+            </g>
+          );
+        })}
       </svg>
     </div>
   );

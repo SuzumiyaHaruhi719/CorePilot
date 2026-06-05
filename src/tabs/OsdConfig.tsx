@@ -3,6 +3,7 @@ import {
   Gamepad2,
   ListPlus,
   MonitorPlay,
+  Palette,
   Plus,
   RotateCcw,
   Search,
@@ -274,11 +275,16 @@ export function OsdConfig() {
       />
       <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
         {/* Enable + preview */}
-        <div className="glass hairline rounded-2xl p-4">
-          <div className="mb-3 flex items-center justify-between">
+        <div className="hud-frame glass hairline rounded-2xl p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-[14px] font-semibold text-ink">启用游戏内叠加</div>
-              <div className="text-[12px] text-dim">总开关 — 关闭后所有游戏均不显示叠加层</div>
+              <div className="flex items-center gap-2">
+                <div className="text-[14px] font-semibold text-ink">启用游戏内叠加</div>
+                <span className="hidden items-center gap-1 rounded border border-line bg-surface2 px-1.5 py-0.5 text-[10px] text-dim sm:inline-flex">
+                  <span className="hud-label">总开关</span>
+                </span>
+              </div>
+              <div className="text-[12px] text-dim">关闭后所有游戏均不显示叠加层</div>
             </div>
             <Toggle checked={osd.enabled} onChange={setEnabled} />
           </div>
@@ -303,8 +309,16 @@ export function OsdConfig() {
 
           {/* Live preview = a short, centered mini-monitor at the display aspect
               ratio (fixed height so it always fits the panel above the fold). */}
+          <div className="mb-2 flex items-center justify-center gap-2">
+            <span className="h-px w-8 bg-line/60" />
+            <span className="hud-label flex items-center gap-1.5 text-[10px] text-dim">
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ok" />
+              实时预览 · LIVE PREVIEW
+            </span>
+            <span className="h-px w-8 bg-line/60" />
+          </div>
           <div
-            className="relative mx-auto overflow-hidden rounded-xl border border-line"
+            className="hud-frame relative mx-auto overflow-hidden rounded-xl border border-line-strong glow-sm"
             style={{ height: 170, width: 170 * screenAspect, maxWidth: "100%" }}
           >
             <div
@@ -427,19 +441,19 @@ export function OsdConfig() {
             <button
               onClick={submitAdd}
               disabled={!addName.trim()}
-              className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+              className="no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Plus size={13} /> 添加
             </button>
             <button
               onClick={() => void openProcessPicker()}
-              className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+              className="no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
             >
               <ListPlus size={13} /> 从运行中的进程选择
             </button>
             <button
               onClick={() => void pickFromFile()}
-              className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+              className="no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
             >
               <FolderOpen size={13} /> 从文件选择
             </button>
@@ -465,7 +479,7 @@ export function OsdConfig() {
                   >
                     <button
                       onClick={() => setSelected(isSel ? null : t.name)}
-                      className="flex flex-1 items-center gap-2 text-left"
+                      className="flex flex-1 cursor-pointer items-center gap-2 text-left"
                     >
                       <MonitorPlay
                         size={13}
@@ -494,7 +508,7 @@ export function OsdConfig() {
                         removeTarget(t.name);
                         if (isSel) setSelected(null);
                       }}
-                      className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-dim transition-colors hover:bg-danger/15 hover:text-danger"
+                      className="grid h-7 w-7 shrink-0 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-danger/15 hover:text-danger"
                       title="移除"
                     >
                       <Trash2 size={13} />
@@ -515,7 +529,7 @@ export function OsdConfig() {
                 <button
                   onClick={() => updateTargetConfig(selectedTarget.name, undefined)}
                   disabled={selectedTarget.config === undefined}
-                  className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
+                  className="no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
                 >
                   <RotateCcw size={12} /> 用默认
                 </button>
@@ -534,13 +548,20 @@ export function OsdConfig() {
 
         {/* Monitoring content */}
         <div className="glass hairline rounded-2xl p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <span className="text-[13.5px] font-semibold text-ink">
-              监控内容{editingOverride ? ` · ${selectedTarget?.name}` : "（默认）"}
-            </span>
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <MonitorPlay size={14} className="shrink-0 text-accent-bright" />
+              <span className="hud-label truncate text-[10.5px] text-dim">
+                监控内容 · CONTENT{editingOverride ? ` · ${selectedTarget?.name}` : ""}
+              </span>
+              <span className="rounded bg-surface2 px-1.5 py-0.5 text-[10px] text-dim">
+                已选 <span className="nums text-muted">{previewCfg.metrics.length}</span>
+              </span>
+            </div>
             <button
               onClick={() => applyPatch({ metrics: [] })}
-              className="no-drag flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+              disabled={previewCfg.metrics.length === 0}
+              className="no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
             >
               <RotateCcw size={12} /> 全部清空
             </button>
@@ -551,8 +572,8 @@ export function OsdConfig() {
                 key={c.id}
                 onClick={() => setCat(c.id)}
                 className={cn(
-                  "no-drag rounded-lg px-3 py-1.5 text-[12.5px] font-medium transition-colors",
-                  cat === c.id ? "bg-accent/15 text-accent-bright" : "text-dim hover:bg-surface3 hover:text-ink",
+                  "no-drag cursor-pointer rounded-lg px-3 py-1.5 text-[12.5px] font-medium transition-colors",
+                  cat === c.id ? "bg-accent/15 text-accent-bright glow-sm" : "text-dim hover:bg-surface3 hover:text-ink",
                 )}
               >
                 {c.label}
@@ -580,8 +601,8 @@ export function OsdConfig() {
                       !m.supported
                         ? "cursor-not-allowed border-line/60 text-dim opacity-55"
                         : on
-                          ? "border-accent/40 bg-accent/10 text-ink"
-                          : "border-line bg-surface2 text-muted hover:bg-surface3 hover:text-ink",
+                          ? "cursor-pointer border-accent/40 bg-accent/10 text-ink"
+                          : "cursor-pointer border-line bg-surface2 text-muted hover:bg-surface3 hover:text-ink",
                     )}
                   >
                     <span
@@ -632,7 +653,7 @@ export function OsdConfig() {
                   <button
                     key={p.name.toLowerCase()}
                     onClick={() => pickProcess(p.name)}
-                    className="no-drag flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[12.5px] text-muted transition-colors hover:bg-accent/10 hover:text-ink"
+                    className="no-drag flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-[12.5px] text-muted transition-colors hover:bg-accent/10 hover:text-ink"
                   >
                     <MonitorPlay size={13} className="shrink-0 text-dim" />
                     <span className="flex-1 truncate">{p.name}</span>
@@ -764,7 +785,13 @@ interface OsdAppearanceControlsProps {
  *  or a selected game's per-game override. */
 function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
   return (
-    <div className="glass hairline grid gap-4 rounded-2xl p-4 sm:grid-cols-2">
+    <div className="glass hairline rounded-2xl p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <Palette size={14} className="text-accent-bright" />
+        <span className="hud-label text-[10.5px] text-dim">样式 · 位置 · STYLE</span>
+        <span className="h-px flex-1 bg-line/50" />
+      </div>
+      <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
       <Row label="布局样式">
         <Segmented
           id="osd-style"
@@ -846,6 +873,7 @@ function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
       <Row label="OLED 防烧屏">
         <Toggle checked={cfg.oledShift} onChange={(v) => onChange({ oledShift: v })} />
       </Row>
+      </div>
     </div>
   );
 }

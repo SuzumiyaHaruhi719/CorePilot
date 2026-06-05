@@ -47,9 +47,12 @@ export function TitleBar({ cpuName }: TitleBarProps) {
         >
           <Cpu size={15} strokeWidth={2.4} />
         </motion.div>
-        <span className="text-[13px] font-semibold tracking-wide text-ink glow-text">CorePilot</span>
+        <span className="display text-[14px] font-bold uppercase tracking-[0.18em] text-ink glow-text">
+          Core<span className="text-accent-bright">Pilot</span>
+        </span>
         {cpuName && (
-          <span className="no-drag ml-1 hidden rounded-md border border-line bg-surface2 px-2 py-[3px] text-[11px] font-medium text-muted md:inline">
+          <span className="no-drag ml-1 hidden items-center gap-1.5 rounded-md border border-line bg-surface2 px-2 py-[3px] text-[11px] font-medium text-muted md:inline-flex">
+            <span className="h-1.5 w-1.5 rounded-full bg-ok glow-sm" style={{ ["--glow" as string]: "var(--color-ok)" }} />
             {cpuName}
           </span>
         )}

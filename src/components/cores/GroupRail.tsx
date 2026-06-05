@@ -37,13 +37,13 @@ export function GroupRail({
 
   return (
     <div className="flex w-[244px] shrink-0 flex-col border-r border-line">
-      <div className="flex items-center justify-between px-3 py-2.5">
-        <span className="text-[12px] font-semibold uppercase tracking-[0.12em] text-muted">进程分组</span>
+      <div className="flex items-center justify-between px-3 py-3">
+        <span className="hud-label text-[10.5px] text-muted">进程分组</span>
         <motion.button
           whileHover={{ scale: 1.12 }}
           whileTap={{ scale: 0.9 }}
           onClick={() => addGroup({ mask: fullMask })}
-          className="no-drag grid h-6 w-6 place-items-center rounded-lg bg-accent/15 text-accent hover:bg-accent/25"
+          className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-lg bg-accent/15 text-accent transition-colors hover:bg-accent/25 hover:text-accent-bright"
           title="创建分组"
         >
           <Plus size={15} />
@@ -56,10 +56,10 @@ export function GroupRail({
         <button
           onClick={() => select(null)}
           className={cn(
-            "no-drag flex w-full items-center justify-between rounded-xl border p-2.5 text-left transition-colors",
+            "no-drag flex w-full cursor-pointer items-center justify-between rounded-xl border p-2.5 text-left transition-[background-color,border-color] duration-150",
             selectedId === null
               ? "border-accent/40 bg-accent/10 glow-sm"
-              : "border-line bg-surface2 hover:bg-surface3",
+              : "border-line bg-surface2 hover:border-line-strong hover:bg-surface3",
           )}
         >
           <div className="flex items-center gap-2">
@@ -68,11 +68,12 @@ export function GroupRail({
           </div>
           <span className="nums text-[11px] text-muted">{processes.filter((p) => p.settable).length}</span>
         </button>
-        <div className="px-1 pt-1 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-dim">分组</div>
+        <div className="hud-label px-1 pt-1.5 text-[9.5px] text-dim">分组</div>
         <AnimatePresence initial={false}>
           {groups.map((group) => {
           const active = activeCount(group, processes);
           const selected = group.id === selectedId;
+          const color = groupColor(group.hue);
           return (
             <motion.button
               key={group.id}
@@ -85,20 +86,35 @@ export function GroupRail({
               whileTap={{ scale: 0.985 }}
               transition={hoverPop}
               className={cn(
-                "relative w-full rounded-xl border p-2.5 text-left transition-colors",
-                selected ? "border-accent/40 bg-accent/10 glow-sm" : "border-line bg-surface2 hover:bg-surface3",
+                "relative w-full cursor-pointer overflow-hidden rounded-xl border p-2.5 text-left transition-[background-color,border-color] duration-150",
+                selected
+                  ? "bg-surface3/60"
+                  : "border-line bg-surface2 hover:border-line-strong hover:bg-surface3",
               )}
+              style={
+                selected
+                  ? {
+                      borderColor: `color-mix(in oklch, ${color} 50%, transparent)`,
+                      boxShadow: `0 0 14px -3px color-mix(in oklch, ${color} 55%, transparent), inset 2px 0 0 0 ${color}`,
+                    }
+                  : undefined
+              }
             >
               <div className="flex items-center justify-between">
                 <div className="flex min-w-0 items-center gap-2">
                   <span
-                    className="h-2.5 w-2.5 shrink-0 rounded-full glow-sm"
-                    style={{ background: groupColor(group.hue) }}
+                    className={cn("h-2.5 w-2.5 shrink-0 rounded-full", selected && "glow-sm")}
+                    style={{ background: color }}
                   />
                   <span className="truncate text-[13px] font-medium text-ink">{group.name}</span>
+                  {group.builtin && (
+                    <span className="hud-label shrink-0 rounded border border-line px-1 py-px text-[8px] text-dim">
+                      内置
+                    </span>
+                  )}
                 </div>
                 <span className="nums shrink-0 text-[11px] text-muted">
-                  {active} / {group.patterns.length}
+                  <span className={active > 0 ? "text-ink" : ""}>{active}</span> / {group.patterns.length}
                 </span>
               </div>
               <div className="nums mt-1 truncate text-[10.5px] text-dim">
@@ -110,23 +126,25 @@ export function GroupRail({
           })}
         </AnimatePresence>
         {groups.length === 0 && (
-          <div className="px-2 py-8 text-center text-[12px] leading-relaxed text-dim">
+          <div className="mx-1 mt-2 rounded-xl border border-dashed border-line px-3 py-8 text-center text-[12px] leading-relaxed text-dim">
             还没有分组
             <br />
-            点击右上角 + 创建
+            点击右上角 <Plus size={11} className="inline -translate-y-px" /> 创建
           </div>
         )}
       </div>
 
       <div className="space-y-2 border-t border-line p-2.5">
         <motion.button
+          whileHover={{ scale: 1.015 }}
           whileTap={{ scale: 0.97 }}
+          transition={hoverPop}
           onClick={onToggleOptimization}
           className={cn(
-            "flex w-full items-center justify-center gap-2 rounded-xl py-2 text-[12.5px] font-semibold transition-colors",
+            "flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl py-2.5 text-[12.5px] font-semibold transition-[background-color,border-color,color] duration-150",
             optimizationEnabled
-              ? "border border-ok/40 bg-ok/15 text-ok glow-sm"
-              : "border border-danger/40 bg-danger/15 text-danger",
+              ? "border border-ok/45 bg-ok/15 text-ok glow-sm"
+              : "border border-danger/40 bg-danger/15 text-danger hover:bg-danger/25",
           )}
         >
           <Power size={15} />
@@ -135,13 +153,13 @@ export function GroupRail({
         <div className="flex gap-2">
           <button
             onClick={onImport}
-            className="no-drag flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-line bg-surface2 py-1.5 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+            className="no-drag flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-line bg-surface2 py-1.5 text-[11.5px] text-muted transition-colors hover:border-line-strong hover:bg-surface3 hover:text-ink"
           >
             <Upload size={13} /> 导入
           </button>
           <button
             onClick={onExport}
-            className="no-drag flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-line bg-surface2 py-1.5 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+            className="no-drag flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-line bg-surface2 py-1.5 text-[11.5px] text-muted transition-colors hover:border-line-strong hover:bg-surface3 hover:text-ink"
           >
             <Download size={13} /> 导出
           </button>

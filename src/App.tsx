@@ -145,8 +145,10 @@ function App() {
     <MotionConfig reducedMotion={reduceMotion ? "always" : "never"}>
       <div className="relative flex h-screen w-screen flex-col overflow-hidden text-ink">
         <div aria-hidden className="pointer-events-none absolute inset-0 -z-10 overflow-hidden">
+          <div className="hud-grid absolute inset-0 opacity-60" />
           <div className="absolute -left-40 -top-40 h-[480px] w-[480px] rounded-full bg-accent/20 blur-[120px]" />
-          <div className="absolute -bottom-52 -right-32 h-[460px] w-[460px] rounded-full bg-cyan/15 blur-[130px]" />
+          <div className="absolute -bottom-52 -right-32 h-[460px] w-[460px] rounded-full bg-rose/12 blur-[130px]" />
+          <div className="absolute -bottom-40 left-1/3 h-[360px] w-[360px] rounded-full bg-cyan/10 blur-[130px]" />
         </div>
 
         <TitleBar cpuName={overview?.cpuName} />

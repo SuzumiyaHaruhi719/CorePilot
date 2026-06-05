@@ -53,7 +53,9 @@ export function NavRail() {
                 layoutId="nav-pill"
                 className="absolute inset-0 rounded-xl border border-accent/40 bg-accent/10 glow"
                 transition={{ type: "spring", stiffness: 300, damping: 28 }}
-              />
+              >
+                <span className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-accent-bright" />
+              </motion.span>
             )}
             <motion.span
               variants={ICON_VARIANTS}
