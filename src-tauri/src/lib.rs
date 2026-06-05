@@ -1,6 +1,7 @@
 pub mod affinity;
 pub mod commands;
 pub mod error;
+pub mod fan;
 pub mod fps;
 pub mod game_library;
 pub mod gpu;
@@ -92,6 +93,11 @@ pub fn run() {
             // game exit; the frontend persists + shows the report.
             perf_recorder::start_recorder(app.handle().clone());
 
+            // Start the motherboard fan-control engine. It idles until the
+            // frontend pushes a per-fan config (mode/curve), then drives the
+            // sidecar's fan controls every ~2s. Safe no-op on locked boards.
+            fan::start_engine();
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -137,6 +143,8 @@ pub fn run() {
             gpu::gpu_oc_info,
             gpu::gpu_oc_apply,
             gpu::gpu_oc_reset,
+            fan::fan_info,
+            fan::fan_set_config,
             osd::osd_set_visible,
             osd::osd_set_bounds,
             osd::osd_target_monitor,

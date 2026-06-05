@@ -111,7 +111,7 @@ static SIDECAR_SPAWN: Once = Once::new();
 /// captured, this returns quietly and the four fields simply stay `None` — the
 /// app keeps running with power/temperature unavailable. The reader thread never
 /// panics: parse failures are ignored and EOF/errors end the thread cleanly.
-fn ensure_sidecar() {
+pub fn ensure_sidecar() {
     SIDECAR_SPAWN.call_once(|| {
         // Resolve `<dir of current exe>/sensord.exe`.
         let exe_path = match std::env::current_exe() {
@@ -129,7 +129,9 @@ fn ensure_sidecar() {
 
         let child = Command::new(&sidecar)
             .stdout(Stdio::piped())
-            .stdin(Stdio::null())
+            // Piped (not null) so the fan engine can send `set`/`auto` commands
+            // to the sidecar over stdin (see `crate::fan`).
+            .stdin(Stdio::piped())
             .stderr(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW)
             .spawn();
@@ -138,6 +140,12 @@ fn ensure_sidecar() {
             Ok(c) => c,
             Err(_) => return, // spawn failed (e.g. blocked) — stay graceful.
         };
+
+        // Hand the sidecar's stdin to the fan engine (used as the fan-control
+        // actuator). Taken before the child moves into the reader thread.
+        if let Some(stdin) = child.stdin.take() {
+            crate::fan::register_sidecar_stdin(stdin);
+        }
 
         let Some(stdout) = child.stdout.take() else {
             // Without stdout we can't read anything; let the child run/exit on
@@ -159,11 +167,15 @@ fn ensure_sidecar() {
                     if let Some(readings) = parse_sidecar_line(&line) {
                         *SIDECAR.lock() = readings;
                     }
+                    // The same line also carries fan / temp / control arrays for
+                    // the fan engine; let it parse what it needs.
+                    crate::fan::ingest_line(&line);
                 }
                 // Sidecar stopped emitting (crashed or exited): clear readings so
                 // the UI shows power/temp as unavailable ("—") rather than stale
                 // last-known values.
                 *SIDECAR.lock() = SidecarReadings::default();
+                crate::fan::clear();
                 // stdout closed → sidecar exited. Reap it; ignore the result.
                 let _ = child.wait();
             })

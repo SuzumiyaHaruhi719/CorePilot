@@ -37,3 +37,6 @@ branding/.*
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code local agent data
+.claude/

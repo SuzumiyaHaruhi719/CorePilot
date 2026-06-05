@@ -43,6 +43,20 @@
 - GPU% + VRAM (PDH + DXGI), disk R/W + active% (PDH), network up/down (sysinfo) — REAL
 - CPU/GPU power + temps: None (honest — needs a kernel sensor driver)
 
+### 🌀 风扇控制 (fan.rs + sensord sidecar) — FanXpert-style
+- `sensord` sidecar extended: enables LHM Motherboard+Controller, streams fans
+  (RPM) / temps / controls (PWM) per line, and accepts stdin commands
+  (`set <id> <pct>` / `auto <id>` / `autoall`); resets driven fans to BIOS
+  default on exit.
+- `fan.rs`: snapshot ingest, `fan_info` / `fan_set_config` commands, and a ~2 Hz
+  curve engine (auto / manual / temperature-curve with selectable source,
+  min-duty floor, hysteresis). Reuses the single sidecar (one driver load).
+- Frontend 风扇 tab: live RPM + duty per header, mode segmented, manual slider,
+  draggable SVG curve editor (live operating-point marker), 启动时自动应用.
+  Graceful "board locked" state when firmware refuses PWM writes.
+- Build: `dotnet build`/`cargo check`/`tsc`+`vite build` all green. NOT yet
+  exercised on hardware (per owner instruction — functional testing deferred).
+
 ## 🔵 Deferred / honest gaps (documented for morning)
 - In-game FPS overlay (PresentMon) — Monitor shows live sensors; FPS card marked "即将上线"
 - Boot-time background daemon + tray — in-app enforcer auto-applies rules while CorePilot runs; no separate boot-launched watcher yet

@@ -1,4 +1,4 @@
-import { Cpu, Gauge, ListTree, MonitorPlay, Rocket, Settings as SettingsIcon, Zap } from "lucide-react";
+import { Cpu, Fan, Gauge, ListTree, MonitorPlay, Rocket, Settings as SettingsIcon, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
@@ -18,6 +18,7 @@ const ITEMS: NavItem[] = [
   { id: "monitor", label: "监控", icon: Gauge },
   { id: "osd", label: "游戏OSD", icon: MonitorPlay },
   { id: "gpu", label: "GPU", icon: Rocket },
+  { id: "fans", label: "风扇", icon: Fan },
   { id: "optimize", label: "优化", icon: Zap },
   { id: "settings", label: "设置", icon: SettingsIcon },
 ];

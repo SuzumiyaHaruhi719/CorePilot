@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type TabId = "cores" | "taskmgr" | "monitor" | "osd" | "gpu" | "optimize" | "settings";
+export type TabId = "cores" | "taskmgr" | "monitor" | "osd" | "gpu" | "fans" | "optimize" | "settings";
 
 /** Monitor tab sub-views: live dashboard vs. saved session reports. */
 export type MonitorSub = "live" | "history";

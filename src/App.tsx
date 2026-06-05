@@ -11,6 +11,7 @@ import { usePerfRecorder } from "./hooks/usePerfRecorder";
 import { useOverlayInjection } from "./hooks/useOverlayInjection";
 import { useUi, type TabId } from "./store/ui";
 import { CoreAssignment } from "./tabs/CoreAssignment";
+import { FanControl } from "./tabs/FanControl";
 import { GpuTune } from "./tabs/GpuTune";
 import { Monitor } from "./tabs/Monitor";
 import { Optimize } from "./tabs/Optimize";
@@ -18,6 +19,7 @@ import { OsdConfig } from "./tabs/OsdConfig";
 import { Settings } from "./tabs/Settings";
 import { TaskManager } from "./tabs/TaskManager";
 import { useGpuProfiles } from "./store/gpuProfiles";
+import { useFanProfiles } from "./store/fanProfiles";
 import { useOsd } from "./store/osd";
 
 const TABS: Record<TabId, () => ReactElement> = {
@@ -26,6 +28,7 @@ const TABS: Record<TabId, () => ReactElement> = {
   monitor: Monitor,
   osd: OsdConfig,
   gpu: GpuTune,
+  fans: FanControl,
   optimize: Optimize,
   settings: Settings,
 };
@@ -62,6 +65,22 @@ function App() {
       return;
     }
     return useGpuProfiles.persist.onFinishHydration(applyActive);
+  }, []);
+
+  // Apply saved fan configs on launch when "apply on startup" is enabled, so
+  // custom fan curves take effect at boot without opening the Fan page. Storage
+  // is async (tauri-plugin-store) → wait for hydration before reading state.
+  useEffect(() => {
+    const applyFans = () => {
+      if (useFanProfiles.getState().applyOnStartup) {
+        useFanProfiles.getState().push();
+      }
+    };
+    if (useFanProfiles.persist.hasHydrated()) {
+      applyFans();
+      return;
+    }
+    return useFanProfiles.persist.onFinishHydration(applyFans);
   }, []);
 
   // Re-show the OSD overlay on launch if it was left enabled OR desktop mode is

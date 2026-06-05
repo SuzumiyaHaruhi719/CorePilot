@@ -180,6 +180,56 @@ export interface GpuOcSettings {
   memOffsetMhz?: number;
 }
 
+/** One controllable fan header (a Super-I/O fan-control channel) + its RPM. */
+export interface FanChannel {
+  id: string;
+  name: string;
+  /** Owning hardware, e.g. "Nuvoton NCT6798D". */
+  hw: string;
+  /** Current duty %, or null when unread. */
+  pct: number | null;
+  /** True when this header accepts software PWM writes on this board. */
+  controllable: boolean;
+  /** Best-matched fan RPM, or null. */
+  rpm: number | null;
+  rpmName: string | null;
+}
+
+/** A temperature sensor usable as a fan-curve source. */
+export interface FanTempSource {
+  id: string;
+  name: string;
+  c: number | null;
+}
+
+/** Live motherboard fan state. */
+export interface FanInfo {
+  /** The sidecar produced fan/control data at least once. */
+  available: boolean;
+  /** At least one header is software-controllable on this board. */
+  supported: boolean;
+  channels: FanChannel[];
+  temps: FanTempSource[];
+}
+
+export type FanMode = "auto" | "manual" | "curve";
+
+/** One point of a fan curve: at `tempC` °C, run at `duty` %. */
+export interface FanCurvePoint {
+  tempC: number;
+  duty: number;
+}
+
+/** Per-fan configuration pushed to the backend engine. */
+export interface FanChannelConfig {
+  controlId: string;
+  mode: FanMode;
+  manualPct?: number;
+  tempSourceId?: string | null;
+  curve?: FanCurvePoint[];
+  minDuty?: number;
+}
+
 export interface ServiceItem {
   name: string;
   display: string;
@@ -274,6 +324,10 @@ export const api = {
   gpuOcInfo: () => invoke<GpuOcInfo>("gpu_oc_info"),
   gpuOcApply: (settings: GpuOcSettings) => invoke<void>("gpu_oc_apply", { settings }),
   gpuOcReset: () => invoke<void>("gpu_oc_reset"),
+  /** Live motherboard fan headers + temperature sources. */
+  fanInfo: () => invoke<FanInfo>("fan_info"),
+  /** Push the per-fan configuration (mode/curve) to the backend fan engine. */
+  fanSetConfig: (configs: FanChannelConfig[]) => invoke<void>("fan_set_config", { configs }),
   osdSetVisible: (visible: boolean) => invoke<void>("osd_set_visible", { visible }),
   osdSetBounds: (x: number, y: number, w: number, h: number) =>
     invoke<void>("osd_set_bounds", { x, y, w, h }),
