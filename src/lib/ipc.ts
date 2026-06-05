@@ -328,6 +328,12 @@ export const api = {
   fanInfo: () => invoke<FanInfo>("fan_info"),
   /** Push the per-fan configuration (mode/curve) to the backend fan engine. */
   fanSetConfig: (configs: FanChannelConfig[]) => invoke<void>("fan_set_config", { configs }),
+  /** Apply a reversible system optimization tweak by id (深度优化). */
+  tweakApply: (id: string) => invoke<void>("tweak_apply", { id }),
+  /** Revert an optimization tweak to its Windows default. */
+  tweakRevert: (id: string) => invoke<void>("tweak_revert", { id }),
+  /** Create a System Restore point before applying tweaks. */
+  createRestorePoint: () => invoke<void>("create_restore_point"),
   osdSetVisible: (visible: boolean) => invoke<void>("osd_set_visible", { visible }),
   osdSetBounds: (x: number, y: number, w: number, h: number) =>
     invoke<void>("osd_set_bounds", { x, y, w, h }),

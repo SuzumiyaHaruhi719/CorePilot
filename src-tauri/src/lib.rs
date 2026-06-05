@@ -21,6 +21,7 @@ pub mod state;
 pub mod sysmon;
 pub mod topology;
 pub mod tray;
+pub mod tweaks;
 pub mod winsvc;
 
 use state::AppState;
@@ -145,6 +146,9 @@ pub fn run() {
             gpu::gpu_oc_reset,
             fan::fan_info,
             fan::fan_set_config,
+            tweaks::tweak_apply,
+            tweaks::tweak_revert,
+            tweaks::create_restore_point,
             osd::osd_set_visible,
             osd::osd_set_bounds,
             osd::osd_target_monitor,
