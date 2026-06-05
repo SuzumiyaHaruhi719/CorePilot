@@ -46,7 +46,7 @@ export const useSettings = create<SettingsState>()(
   persist(
     (set) => ({
       accent: "violet",
-      glow: "intense",
+      glow: "medium",
       acrylic: true,
       windowOpacity: 100,
       reduceMotion: false,

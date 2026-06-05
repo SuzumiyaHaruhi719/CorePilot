@@ -127,6 +127,9 @@ export function Tuning() {
   function TweakRow({ meta, zone }: { meta: TweakMeta; zone: Zone }) {
     const on = !!applied[meta.id];
     const busy = busyId === meta.id;
+    // Lock every toggle while ANY tweak / bulk op is running, so concurrent or
+    // conflicting operations can't be triggered.
+    const anyBusy = busyId !== null;
     return (
       <div
         className={cn(
@@ -147,7 +150,7 @@ export function Tuning() {
           {busy ? (
             <Loader2 size={16} className="animate-spin text-dim" />
           ) : (
-            <Toggle checked={on} onChange={(v) => handleToggle(meta, zone, v)} />
+            <Toggle checked={on} disabled={anyBusy} label={meta.name} onChange={(v) => handleToggle(meta, zone, v)} />
           )}
         </div>
       </div>

@@ -6,6 +6,7 @@ import { classifyCcd } from "../../lib/cpu";
 import { formatBytes } from "../../lib/format";
 import type { CpuTopology, ProcInfo } from "../../lib/ipc";
 import { groupForProcess, useGroups } from "../../store/groups";
+import { TableBodyState } from "../taskmgr/TmProcessTable";
 
 export type SortKey = "name" | "group" | "threads" | "cpu" | "gpu" | "gpuMem" | "mem" | "power";
 
@@ -21,6 +22,10 @@ interface ProcessTableProps {
   topo: CpuTopology | null;
   /** Show a sortable "分组" column (used in the 全部进程 view). */
   showGroup?: boolean;
+  /** First process read in flight — show a skeleton instead of an empty state. */
+  loading?: boolean;
+  /** First process read failed — show a retry/error state. */
+  error?: boolean;
 }
 
 // The 分组 column is only present in the 全部进程 view; both literal templates
@@ -99,6 +104,8 @@ export function ProcessTable({
   onRowContextMenu,
   topo,
   showGroup = false,
+  loading,
+  error,
 }: ProcessTableProps) {
   const groups = useGroups((s) => s.groups);
   const allOn = processes.length > 0 && processes.every((p) => selected.has(p.pid));
@@ -223,10 +230,12 @@ export function ProcessTable({
           );
         })}
         {processes.length === 0 && (
-          <div className="flex flex-col items-center gap-1.5 py-12 text-center">
-            <span className="hud-label text-[10px] text-dim">NO PROCESSES</span>
-            <span className="text-[12.5px] text-dim">没有匹配的进程</span>
-          </div>
+          <TableBodyState
+            loading={loading}
+            error={error}
+            emptyTag="NO PROCESSES"
+            emptyLabel="没有匹配的进程"
+          />
         )}
       </div>
     </div>

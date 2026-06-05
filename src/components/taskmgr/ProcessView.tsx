@@ -15,7 +15,7 @@ interface ProcessViewProps {
 }
 
 export function ProcessView({ detailed }: ProcessViewProps) {
-  const { processes } = useProcesses();
+  const { processes, loading, error } = useProcesses();
   const [sortKey, setSortKey] = useState<SortKey>("cpu");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [search, setSearch] = useState("");
@@ -161,6 +161,8 @@ export function ProcessView({ detailed }: ProcessViewProps) {
       {detailed ? (
         <DetailsTable
           processes={visible}
+          loading={loading}
+          error={error}
           sortKey={sortKey}
           sortDir={sortDir}
           onSort={handleSort}
@@ -170,6 +172,8 @@ export function ProcessView({ detailed }: ProcessViewProps) {
       ) : (
         <TmProcessTable
           processes={visible}
+          loading={loading}
+          error={error}
           sortKey={sortKey}
           sortDir={sortDir}
           onSort={handleSort}

@@ -34,7 +34,16 @@ export function NavRail() {
   const setTab = useUi((s) => s.setTab);
 
   return (
-    <nav className="relative z-10 flex w-[88px] shrink-0 flex-col items-center gap-1.5 border-r border-line py-4">
+    <nav
+      className={cn(
+        "relative z-10 flex w-[88px] shrink-0 flex-col items-center gap-1.5 border-r border-line py-4",
+        // When the viewport is too short for all items, scroll instead of clipping.
+        // min-h-0 lets the flex column actually shrink; a slim, HUD-toned scrollbar
+        // (scoped here so it stays narrow inside the 88px rail) appears only on overflow.
+        "min-h-0 overflow-y-auto overflow-x-hidden",
+        "[scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border-0 [&::-webkit-scrollbar-thumb]:bg-white/10 hover:[&::-webkit-scrollbar-thumb]:bg-white/20",
+      )}
+    >
       {ITEMS.map((item) => {
         const active = tab === item.id;
         const Icon = item.icon;
@@ -46,7 +55,7 @@ export function NavRail() {
             whileHover="hover"
             whileTap="tap"
             transition={hoverPop}
-            className="no-drag relative flex h-[60px] w-[72px] flex-col items-center justify-center gap-1 rounded-xl transition-colors hover:bg-surface2/40"
+            className="no-drag relative flex h-[60px] w-[72px] shrink-0 flex-col items-center justify-center gap-1 rounded-xl transition-colors hover:bg-surface2/40"
           >
             {active && (
               <motion.span

@@ -375,5 +375,28 @@
   border-bottom: 1px dashed oklch(100% 0 0 / 0.18);
 }
 
-/* Motion is controlled in-app via the 减弱动画 setting (MotionConfig), not the
-   OS prefers-reduced-motion media query — so animations always play by default. */
+/* Slow spin — fan icons in active mode, loading affordances. */
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.animate-spin-slow {
+  animation: spin-slow 3s linear infinite;
+}
+
+/* Motion is primarily controlled in-app via the 减弱动画 setting (MotionConfig,
+   reducedMotion="user" in App.tsx). We ALSO honor the OS prefers-reduced-motion
+   preference here for CSS-level animations/transitions (spinners, pulses, glows,
+   hover fades) so an OS-level "reduce motion" request is respected even when the
+   in-app toggle is off. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

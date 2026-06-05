@@ -15,15 +15,16 @@ interface SegmentedProps<T extends string> {
 
 export function Segmented<T extends string>({ id, value, options, onChange }: SegmentedProps<T>) {
   return (
-    <div className="no-drag inline-flex rounded-lg border border-line bg-surface2 p-0.5">
+    <div role="group" className="no-drag inline-flex rounded-lg border border-line bg-surface2 p-0.5">
       {options.map((option) => {
         const active = option.value === value;
         return (
           <button
             key={option.value}
             type="button"
+            aria-pressed={active}
             onClick={() => onChange(option.value)}
-            className="relative rounded-[7px] px-3 py-1 text-[12.5px]"
+            className="relative cursor-pointer rounded-[7px] px-3 py-1 text-[12.5px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
           >
             {active && (
               <motion.span

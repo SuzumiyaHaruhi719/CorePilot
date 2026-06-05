@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, type Metrics } from "../lib/ipc";
-import { useSettings } from "../store/settings";
+import { type Metrics } from "../lib/ipc";
+import { useSharedMetrics } from "./useSharedTelemetry";
 
 interface MetricsHistory {
   cpu: number[];
@@ -8,33 +8,21 @@ interface MetricsHistory {
   latest: Metrics | null;
 }
 
-/** Polls system metrics and keeps rolling history buffers for charts. */
+/** Rolling history buffers for charts, fed by the shared metrics poller (so the
+ *  app keeps a single `get_metrics` interval regardless of how many views use it). */
 export function useMetricsHistory(points = 60): MetricsHistory {
   const [cpu, setCpu] = useState<number[]>(() => new Array(points).fill(0));
   const [memPct, setMemPct] = useState<number[]>(() => new Array(points).fill(0));
-  const [latest, setLatest] = useState<Metrics | null>(null);
-  const pollMs = useSettings((s) => s.pollMs);
+  const latest = useSharedMetrics();
 
   useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const m = await api.getMetrics();
-        if (!alive) return;
-        setLatest(m);
-        setCpu((prev) => [...prev.slice(1), m.cpuOverall]);
-        setMemPct((prev) => [...prev.slice(1), (m.memUsed / m.memTotal) * 100]);
-      } catch {
-        /* ignore */
-      }
-    };
-    void tick();
-    const id = window.setInterval(() => void tick(), Math.max(pollMs, 1000));
-    return () => {
-      alive = false;
-      window.clearInterval(id);
-    };
-  }, [pollMs, points]);
+    if (!latest) return;
+    setCpu((prev) => [...prev.slice(1), latest.cpuOverall]);
+    setMemPct((prev) => [
+      ...prev.slice(1),
+      latest.memTotal ? (latest.memUsed / latest.memTotal) * 100 : 0,
+    ]);
+  }, [latest]);
 
   return { cpu, memPct, latest };
 }

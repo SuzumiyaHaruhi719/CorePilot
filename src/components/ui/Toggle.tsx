@@ -4,16 +4,26 @@ import { cn } from "../../lib/cn";
 interface ToggleProps {
   checked: boolean;
   onChange: (value: boolean) => void;
+  /** Accessible name for the switch (screen readers); also used as the title. */
+  label?: string;
+  disabled?: boolean;
 }
 
-export function Toggle({ checked, onChange }: ToggleProps) {
+export function Toggle({ checked, onChange, label, disabled }: ToggleProps) {
   return (
     <button
       type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      title={label}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(
-        "no-drag relative h-[24px] w-[44px] rounded-full border transition-colors duration-200",
+        "no-drag relative h-[24px] w-[44px] shrink-0 rounded-full border transition-colors duration-200",
+        "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:ring-offset-2 focus-visible:ring-offset-base",
         checked ? "border-accent/50 bg-accent/25 glow-sm" : "border-line bg-surface3",
+        disabled && "cursor-not-allowed opacity-40",
       )}
     >
       <motion.span

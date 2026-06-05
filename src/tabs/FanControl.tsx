@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Eye, EyeOff, Fan, Gauge, Info, Layers, Pencil, Save, Thermometer, Trash2, Wind } from "lucide-react";
+import { AlertTriangle, Check, Eye, EyeOff, Fan, Gauge, Info, Layers, Loader2, Pencil, Save, Thermometer, Trash2, Wind } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { FanCurveEditor } from "../components/fans/FanCurveEditor";
@@ -69,6 +69,10 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const displayName = label || channel.name;
+  // While dragging the curve, hold a local draft so we don't persist + hit the
+  // backend on every pointer-move; commit once on release.
+  const [draftCurve, setDraftCurve] = useState<FanCurvePoint[] | null>(null);
+  const effectiveCurve = draftCurve ?? config.curve;
 
   function startEdit() {
     setDraft(label ?? "");
@@ -82,7 +86,7 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
   const source = temps.find((t) => t.id === config.tempSourceId) ?? null;
   const liveTemp = source?.c ?? null;
   const liveDuty =
-    liveTemp != null ? Math.max(config.minDuty, interpCurve(config.curve, liveTemp)) : null;
+    liveTemp != null ? Math.max(config.minDuty, interpCurve(effectiveCurve, liveTemp)) : null;
 
   function setMode(mode: FanMode) {
     if (mode === "curve" && !config.tempSourceId) {
@@ -222,8 +226,12 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
               </div>
 
               <FanCurveEditor
-                points={config.curve}
-                onChange={(curve) => onChange({ curve })}
+                points={effectiveCurve}
+                onChange={setDraftCurve}
+                onCommit={(curve) => {
+                  setDraftCurve(null);
+                  onChange({ curve });
+                }}
                 minDuty={config.minDuty}
                 live={liveTemp != null && liveDuty != null ? { tempC: liveTemp, duty: liveDuty } : null}
               />
@@ -246,8 +254,9 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
 
 export function FanControl() {
   const pollMs = useSettings((s) => s.pollMs);
-  const { configs, labels, applyOnStartup, setConfig, setApplyOnStartup, setLabel, profiles, activeProfileId, saveProfile, applyProfile, deleteProfile, lastError, clearError } =
+  const { configs, labels, applyOnStartup, setConfig, setApplyOnStartup, setLabel, profiles, activeProfileId, pendingProfileId, saveProfile, applyProfile, deleteProfile, lastError, clearError } =
     useFanProfiles();
+  const [delProfile, setDelProfile] = useState<{ id: string; name: string } | null>(null);
   const [info, setInfo] = useState<FanInfo | null>(null);
   // Control ids that have shown a valid (>0) RPM at least once this session.
   // Headers that have never spun are hidden (no fan connected) until they do.
@@ -355,7 +364,8 @@ export function FanControl() {
               <div className="flex flex-wrap gap-2">
                 <AnimatePresence>
                   {profiles.map((p) => {
-                    const active = p.id === activeProfileId;
+                    const pending = p.id === pendingProfileId;
+                    const active = p.id === activeProfileId && !pending;
                     return (
                       <motion.button
                         key={p.id}
@@ -367,19 +377,25 @@ export function FanControl() {
                         whileTap={{ scale: 0.97 }}
                         transition={hoverPop}
                         onClick={() => applyProfile(p.id)}
+                        aria-pressed={active}
                         className={cn(
-                          "no-drag group relative flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-left",
+                          "no-drag group relative flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
                           active ? "border-accent/50 bg-accent/10 glow-sm" : "border-line bg-surface2/50 hover:bg-surface3",
                         )}
                       >
-                        <Layers size={13} className={active ? "text-accent-bright" : "text-dim"} />
+                        {pending ? (
+                          <Loader2 size={13} className="animate-spin text-accent-bright" />
+                        ) : (
+                          <Layers size={13} className={active ? "text-accent-bright" : "text-dim"} />
+                        )}
                         <span className="text-[12.5px] font-medium text-ink">{p.name}</span>
                         {active && <Check size={12} className="text-accent-bright" />}
                         <span
                           role="button"
                           tabIndex={-1}
-                          onClick={(e) => { e.stopPropagation(); deleteProfile(p.id); }}
-                          className="ml-0.5 grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white group-hover:opacity-100"
+                          aria-label={`删除配置 ${p.name}`}
+                          onClick={(e) => { e.stopPropagation(); setDelProfile({ id: p.id, name: p.name }); }}
+                          className="ml-0.5 grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white group-focus-within:opacity-100 group-hover:opacity-100"
                         >
                           <Trash2 size={11} />
                         </span>
@@ -502,6 +518,30 @@ export function FanControl() {
           className="no-drag w-full rounded-lg border border-line bg-surface2 px-3 py-2 text-[13px] text-ink outline-none transition-colors focus:border-accent/50"
         />
         <p className="mt-2 text-[11.5px] text-dim">将保存当前每个风扇的模式与曲线，可随时一键切换。</p>
+      </Modal>
+
+      <Modal
+        open={delProfile !== null}
+        onClose={() => setDelProfile(null)}
+        title="删除风扇配置"
+        footer={
+          <>
+            <Button onClick={() => setDelProfile(null)}>取消</Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                if (delProfile) deleteProfile(delProfile.id);
+                setDelProfile(null);
+              }}
+            >
+              删除
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] leading-relaxed text-muted">
+          确定删除配置 <span className="font-semibold text-ink">{delProfile?.name}</span> 吗？此操作不可撤销（当前风扇设置不受影响）。
+        </p>
       </Modal>
     </>
   );

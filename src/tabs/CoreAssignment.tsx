@@ -32,7 +32,7 @@ function offlinePid(name: string): number {
 
 export function CoreAssignment() {
   const [topo, setTopo] = useState<CpuTopology | null>(null);
-  const { processes } = useProcesses();
+  const { processes, loading, error } = useProcesses();
 
   const groups = useGroups((s) => s.groups);
   const selectedId = useGroups((s) => s.selectedId);
@@ -54,6 +54,7 @@ export function CoreAssignment() {
   const [selectedPids, setSelectedPids] = useState<Set<number>>(new Set());
   const [coreModalOpen, setCoreModalOpen] = useState(false);
   const [editMask, setEditMask] = useState<bigint>(0n);
+  const [pendingKill, setPendingKill] = useState<ProcInfo | null>(null);
   const [status, setStatus] = useState("");
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [colorAnchor, setColorAnchor] = useState<ColorAnchor | null>(null);
@@ -243,16 +244,25 @@ export function CoreAssignment() {
       label: "结束进程",
       icon: X,
       danger: true,
-      onClick: () => {
-        void api
-          .endTask(proc.pid)
-          .then(() => setStatus(`已结束 ${proc.name}`))
-          .catch(() => setStatus(`无法结束 ${proc.name}（受保护）`));
-      },
+      // Mirror Task Manager: confirm via Modal before the destructive end-task.
+      onClick: () => setPendingKill(proc),
     });
     items.push({ label: "复制名称", icon: Copy, onClick: () => void navigator.clipboard.writeText(proc.name) });
     items.push({ label: "复制 PID", icon: Copy, onClick: () => void navigator.clipboard.writeText(String(proc.pid)) });
     setMenu({ x: e.clientX, y: e.clientY, items });
+  }
+
+  // Mirror ProcessView.confirmKill: end the task once the user confirms.
+  async function confirmKill() {
+    if (!pendingKill) return;
+    const target = pendingKill;
+    setPendingKill(null);
+    try {
+      await api.endTask(target.pid);
+      setStatus(`已结束 ${target.name}`);
+    } catch {
+      setStatus(`无法结束 ${target.name}（受保护）`);
+    }
   }
 
   async function applyToProcess(group: GroupRule, proc: ProcInfo) {
@@ -584,6 +594,8 @@ export function CoreAssignment() {
                 onRowContextMenu={openRowMenu}
                 topo={topo}
                 showGroup={!selectedGroup}
+                loading={loading && !selectedGroup}
+                error={error && !selectedGroup}
               />
             </motion.div>
           </AnimatePresence>
@@ -607,6 +619,24 @@ export function CoreAssignment() {
           <CoreGrid topo={topo} mask={editMask} onChange={setEditMask} />
         </Modal>
       )}
+      <Modal
+        open={!!pendingKill}
+        onClose={() => setPendingKill(null)}
+        title="结束进程"
+        footer={
+          <>
+            <Button onClick={() => setPendingKill(null)}>取消</Button>
+            <Button variant="danger" onClick={confirmKill}>
+              结束进程
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] leading-relaxed text-muted">
+          确定要结束 <span className="font-semibold text-ink">{pendingKill?.name}</span>{" "}
+          (PID {pendingKill?.pid}) 吗？未保存的数据将丢失。
+        </p>
+      </Modal>
       <ContextMenu state={menu} onClose={() => setMenu(null)} />
       <ColorPicker
         anchor={colorAnchor}

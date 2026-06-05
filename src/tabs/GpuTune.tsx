@@ -143,6 +143,8 @@ export function GpuTune() {
   const [applying, setApplying] = useState(false);
   const [showSave, setShowSave] = useState(false);
   const [newName, setNewName] = useState("");
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [delProfile, setDelProfile] = useState<GpuProfile | null>(null);
 
   const [powerOn, setPowerOn] = useState(true);
   const [powerW, setPowerW] = useState(300);
@@ -259,10 +261,24 @@ export function GpuTune() {
     setStatus(`已保存配置「${name}」`);
   }
 
-  function loadProfile(p: GpuProfile) {
+  async function loadProfile(p: GpuProfile) {
+    // Mark active only AFTER the backend confirms the apply; show pending meanwhile.
     loadDraft(p.settings, info);
-    setActive(p.id);
-    void applySettings(p.settings, `已应用配置「${p.name}」`);
+    setPendingId(p.id);
+    setApplying(true);
+    setStatus(null);
+    try {
+      await api.gpuOcApply(p.settings);
+      setActive(p.id);
+      setStatus(`已应用配置「${p.name}」`);
+      const fresh = await api.gpuOcInfo();
+      setInfo(fresh);
+    } catch (e: unknown) {
+      setStatus(getErrorMessage(e));
+    } finally {
+      setApplying(false);
+      setPendingId(null);
+    }
   }
 
   const isErrorStatus = status != null && !status.startsWith("已");
@@ -509,7 +525,8 @@ export function GpuTune() {
               <div className="flex flex-wrap gap-2">
                 <AnimatePresence>
                   {profiles.map((p) => {
-                    const active = p.id === activeId;
+                    const pending = p.id === pendingId;
+                    const active = p.id === activeId && !pending;
                     return (
                       <motion.button
                         key={p.id}
@@ -520,18 +537,20 @@ export function GpuTune() {
                         whileHover={{ scale: 1.03, y: -2 }}
                         whileTap={{ scale: 0.97 }}
                         transition={hoverPop}
-                        onClick={() => loadProfile(p)}
+                        onClick={() => void loadProfile(p)}
+                        aria-pressed={active}
                         className={cn(
-                          "no-drag group relative flex items-center gap-2 overflow-hidden rounded-xl border px-3 py-2 text-left",
+                          "no-drag group relative flex items-center gap-2 overflow-hidden rounded-xl border px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
                           active ? "border-accent/50 bg-accent/10 glow-sm" : "border-line bg-surface2/50 hover:bg-surface3",
                         )}
                       >
                         <span className={cn("grid h-7 w-7 shrink-0 place-items-center rounded-lg", active ? "bg-accent/20 text-accent-bright" : "bg-surface3 text-dim")}>
-                          <Rocket size={14} />
+                          {pending ? <Loader2 size={14} className="animate-spin" /> : <Rocket size={14} />}
                         </span>
                         <div>
                           <div className="flex items-center gap-1.5">
                             <span className="text-[12.5px] font-medium text-ink">{p.name}</span>
+                            {pending && <span className="hud-label text-[8px] text-dim">应用中…</span>}
                             {active && <span className="hud-label text-[8px] text-accent-bright glow-text">已应用</span>}
                           </div>
                           <div className="nums text-[10px] text-dim">
@@ -553,9 +572,10 @@ export function GpuTune() {
                           tabIndex={-1}
                           onClick={(e) => {
                             e.stopPropagation();
-                            deleteProfile(p.id);
+                            setDelProfile(p);
                           }}
-                          className="no-drag ml-1 grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition-colors duration-150 hover:bg-danger hover:text-white group-hover:opacity-100"
+                          className="no-drag ml-1 grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition-colors duration-150 hover:bg-danger hover:text-white group-focus-within:opacity-100 group-hover:opacity-100"
+                          aria-label={`删除配置 ${p.name}`}
                           title="删除配置"
                         >
                           <Trash2 size={12} />
@@ -600,6 +620,30 @@ export function GpuTune() {
           className="no-drag w-full rounded-lg border border-line bg-surface2 px-3 py-2 text-[13px] text-ink outline-none transition-colors focus:border-accent/50"
         />
         <p className="mt-2 text-[11.5px] text-dim">将保存当前已开启的调优项，可随时一键应用。</p>
+      </Modal>
+
+      <Modal
+        open={delProfile !== null}
+        onClose={() => setDelProfile(null)}
+        title="删除超频配置"
+        footer={
+          <>
+            <Button onClick={() => setDelProfile(null)}>取消</Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                if (delProfile) deleteProfile(delProfile.id);
+                setDelProfile(null);
+              }}
+            >
+              删除
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] leading-relaxed text-muted">
+          确定删除超频配置 <span className="font-semibold text-ink">{delProfile?.name}</span> 吗？此操作不可撤销（当前 GPU 设置不受影响）。
+        </p>
       </Modal>
     </>
   );

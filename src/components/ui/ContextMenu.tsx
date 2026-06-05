@@ -56,8 +56,12 @@ export function ContextMenu({ state, onClose }: ContextMenuProps) {
           exit={{ opacity: 0, scale: 0.96 }}
           transition={{ duration: 0.13, ease: [0.22, 1, 0.36, 1] }}
           style={{
-            left: Math.min(state.x, window.innerWidth - MENU_WIDTH - 8),
-            top: Math.min(state.y, window.innerHeight - state.items.length * ITEM_HEIGHT - 16),
+            // Clamp on BOTH axes so the menu never escapes a small viewport, and
+            // cap height (scroll) when there are many items / a short window.
+            left: Math.max(8, Math.min(state.x, window.innerWidth - MENU_WIDTH - 8)),
+            top: Math.max(8, Math.min(state.y, window.innerHeight - state.items.length * ITEM_HEIGHT - 16)),
+            maxHeight: window.innerHeight - 16,
+            overflowY: "auto",
           }}
           className="glass glow fixed z-[100] origin-top-left rounded-xl border border-line-strong p-1.5"
           onClick={(e) => e.stopPropagation()}

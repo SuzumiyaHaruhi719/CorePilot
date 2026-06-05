@@ -6,6 +6,10 @@ import { Toggle } from "../ui/Toggle";
 
 const COLS = "grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_92px_64px]";
 
+// Floor width so narrow windows scroll horizontally instead of crushing the
+// name / command columns. Full literal so Tailwind's scanner picks it up.
+const MIN_W = "min-w-[560px]";
+
 const LOC_LABEL: Record<string, string> = {
   hkcu_run: "用户启动",
   hklm_run: "系统启动",
@@ -104,7 +108,10 @@ export function StartupView() {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/50">
-        <div className={cn("grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2.5", COLS)}>
+        {/* Horizontal scroll on narrow windows; min-w wrapper keeps the header
+            and body aligned while the body scrolls vertically. */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-x-auto">
+        <div className={cn(MIN_W, "grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2.5", COLS)}>
           <SortHead label="名称" active={sortKey === "name"} dir={sortDir} onClick={() => sort("name")} />
           <span className="hud-label text-[9.5px] text-muted">命令</span>
           <SortHead label="位置" active={sortKey === "location"} dir={sortDir} onClick={() => sort("location")} />
@@ -120,7 +127,7 @@ export function StartupView() {
           {visible.map((item) => (
             <div
               key={`${item.location}:${item.name}`}
-              className={cn("grid items-center gap-2 border-b border-line/40 px-3 py-2 text-[12.5px] transition-colors hover:bg-surface2/50", COLS)}
+              className={cn(MIN_W, "grid items-center gap-2 border-b border-line/40 px-3 py-2 text-[12.5px] transition-colors hover:bg-surface2/50", COLS)}
             >
               <span className={cn("truncate", item.enabled ? "text-ink" : "text-dim")} title={item.name}>
                 {item.name}
@@ -140,6 +147,7 @@ export function StartupView() {
               <span className="text-[12.5px] text-dim">没有启动项</span>
             </div>
           )}
+        </div>
         </div>
       </div>
     </div>

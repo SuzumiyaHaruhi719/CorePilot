@@ -115,6 +115,8 @@ export function PerfHistory() {
 
   const [selectedId, setSelectedId] = useState<string | null>(sessions[0]?.id ?? null);
   const [confirmClear, setConfirmClear] = useState(false);
+  // Id of the single session pending a delete confirmation (null = no prompt).
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // Auto-surface a session requested by the recorder (game just exited): select
   // it, then clear the one-shot pending flag so manual selection isn't overridden.
@@ -159,6 +161,9 @@ export function PerfHistory() {
   }
 
   const selected = sessions.find((s) => s.id === selectedId) ?? sessions[0];
+  const pendingDelete = confirmDeleteId
+    ? sessions.find((s) => s.id === confirmDeleteId) ?? null
+    : null;
 
   return (
     <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-hidden p-4 lg:grid-cols-[280px_minmax(0,1fr)]">
@@ -180,7 +185,7 @@ export function PerfHistory() {
                 session={session}
                 active={session.id === selected.id}
                 onSelect={() => setSelectedId(session.id)}
-                onDelete={() => removeSession(session.id)}
+                onDelete={() => setConfirmDeleteId(session.id)}
               />
             ))}
           </AnimatePresence>
@@ -215,6 +220,34 @@ export function PerfHistory() {
       >
         <p className="text-[13px] leading-relaxed text-muted">
           将删除全部 <span className="nums text-ink">{sessions.length}</span> 份性能报告，此操作不可撤销。
+        </p>
+      </Modal>
+
+      <Modal
+        open={pendingDelete !== null}
+        onClose={() => setConfirmDeleteId(null)}
+        title="删除性能报告"
+        footer={
+          <>
+            <Button onClick={() => setConfirmDeleteId(null)}>取消</Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                if (confirmDeleteId) removeSession(confirmDeleteId);
+                setConfirmDeleteId(null);
+              }}
+            >
+              删除
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] leading-relaxed text-muted">
+          将删除
+          <span className="text-ink">
+            {pendingDelete ? `“${gameDisplayName(pendingDelete.exe)}”` : ""}
+          </span>
+          的这份性能报告，此操作不可撤销。
         </p>
       </Modal>
     </div>

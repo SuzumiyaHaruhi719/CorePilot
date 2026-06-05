@@ -139,7 +139,7 @@ export function OsdOverlay() {
   // Any FPS-group metric (fps / 1% low / 0.1% low / frametime) needs the stats fetch.
   const needFps = shownMetrics.some((k) => k.startsWith("fps"));
 
-  // Single poll loop: refresh the foreground app and (only while showing) the
+  // Single poll loop: refresh the foreground app and (when it should show) the
   // metric snapshot. When hidden we still track the foreground app cheaply so a
   // game gaining focus brings the overlay up on the next tick.
   useEffect(() => {
@@ -147,19 +147,36 @@ export function OsdOverlay() {
     const tick = async () => {
       const info = await api.foregroundInfo().catch(() => null);
       if (!alive) return;
-      setFg(info ? { exe: info.exe, isGame: info.isGame } : { exe: null, isGame: false });
+      const exe = info?.exe ?? null;
+      const isGame = info?.isGame ?? false;
+      setFg({ exe, isGame });
+      // Resolve visibility from the JUST-fetched foreground info + live store
+      // state — NOT the stale `show` closed over from the previous render. This
+      // lets a game gaining focus fetch its metrics in the SAME tick, so the
+      // overlay appears immediately instead of after one empty poll.
+      const freshCfg = resolveOsd(useOsd.getState(), useOsdTargets.getState().targets, exe, isGame);
+      const showNow = freshCfg !== null;
       // Follow the foreground window's monitor when the OSD is showing FOR that
       // specific app — a detected game OR a whitelisted target — so the overlay
       // tracks it across displays. Desktop mode (general, no match) keeps mon=null
       // and stays on the primary monitor, so it can never be dragged off.
-      const n = info?.exe ? info.exe.trim().toLowerCase() : "";
+      const n = exe ? exe.trim().toLowerCase() : "";
       const whitelisted =
         !!n && useOsdTargets.getState().targets.some((t) => t.name === n && t.list === "white");
-      const followFg = !!info && (info.isGame || whitelisted);
+      const followFg = !!info && (isGame || whitelisted);
       const m = followFg ? await api.osdTargetMonitor().catch(() => null) : null;
       if (alive) setMon(m);
-      if (show) {
-        const d = await fetchOsdData(needGpu, needFps);
+      if (showNow) {
+        // Derive the fetch flags from the freshly-resolved config + foreground
+        // kind (desktop hides FPS), so the right data is fetched on the first
+        // tick a game appears.
+        const metrics = isGame
+          ? freshCfg.metrics
+          : freshCfg.metrics.filter((k) => !k.startsWith("fps"));
+        const d = await fetchOsdData(
+          metrics.some((k) => k.startsWith("gpu.")),
+          metrics.some((k) => k.startsWith("fps")),
+        );
         if (alive) setData(d);
       }
     };

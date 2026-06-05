@@ -5,6 +5,10 @@ import { api, type ServiceItem } from "../../lib/ipc";
 
 const COLS = "grid-cols-[minmax(110px,0.9fr)_52px_minmax(0,1.5fr)_70px_minmax(0,0.7fr)_108px]";
 
+// Floor width so narrow windows scroll horizontally instead of crushing the
+// description / group columns. Full literal so Tailwind's scanner picks it up.
+const MIN_W = "min-w-[720px]";
+
 const STATUS_STYLE: Record<string, string> = {
   running: "text-ok",
   stopped: "text-dim",
@@ -128,7 +132,10 @@ export function ServicesView() {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/50">
-        <div className={cn("grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2.5", COLS)}>
+        {/* Horizontal scroll on narrow windows; min-w wrapper keeps the header
+            and body aligned while the body scrolls vertically. */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-x-auto">
+        <div className={cn(MIN_W, "grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2.5", COLS)}>
           <SortHead label="服务名" active={sortKey === "display"} dir={sortDir} onClick={() => sort("display")} />
           <span className="hud-label text-[9.5px] text-muted">PID</span>
           <span className="hud-label text-[9.5px] text-muted">描述</span>
@@ -140,7 +147,7 @@ export function ServicesView() {
           {visible.map((svc) => (
             <div
               key={svc.name}
-              className={cn("grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] transition-colors hover:bg-surface2/50", COLS)}
+              className={cn(MIN_W, "grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] transition-colors hover:bg-surface2/50", COLS)}
             >
               <span className="truncate text-ink" title={svc.display || svc.name}>
                 {svc.name}
@@ -195,6 +202,7 @@ export function ServicesView() {
               <span className="text-[12.5px] text-dim">没有匹配的服务</span>
             </div>
           )}
+        </div>
         </div>
       </div>
     </div>

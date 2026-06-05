@@ -72,6 +72,8 @@ interface FanProfileState {
   /** Saved fan profiles + the currently-applied one. */
   profiles: FanProfile[];
   activeProfileId: string | null;
+  /** Profile whose apply is in flight; becomes active only after it succeeds. */
+  pendingProfileId: string | null;
   /** Snapshot the current configs as a named profile and make it active. */
   saveProfile: (name: string) => void;
   /** Apply a saved profile: load its configs and push to the engine. */
@@ -124,6 +126,7 @@ export const useFanProfiles = create<FanProfileState>()(
       },
       profiles: [],
       activeProfileId: null,
+      pendingProfileId: null,
       saveProfile: (name) => {
         const id = uid();
         const profile: FanProfile = { id, name, configs: cloneConfigs(get().configs) };
@@ -133,16 +136,20 @@ export const useFanProfiles = create<FanProfileState>()(
         const profile = get().profiles.find((p) => p.id === id);
         if (!profile) return;
         const configs = cloneConfigs(profile.configs);
-        set({ configs, activeProfileId: id });
+        // Load configs immediately (so the engine reflects them), but mark the
+        // profile active ONLY after the backend confirms — otherwise show pending
+        // and, on failure, surface the error without a false "active" badge.
+        set({ configs, pendingProfileId: id });
         api
           .fanSetConfig(toBackend(configs))
-          .then(() => set({ lastError: null }))
-          .catch((e) => set({ lastError: applyErrorMessage(e) }));
+          .then(() => set({ activeProfileId: id, pendingProfileId: null, lastError: null }))
+          .catch((e) => set({ pendingProfileId: null, lastError: applyErrorMessage(e) }));
       },
       deleteProfile: (id) =>
         set((s) => ({
           profiles: s.profiles.filter((p) => p.id !== id),
           activeProfileId: s.activeProfileId === id ? null : s.activeProfileId,
+          pendingProfileId: s.pendingProfileId === id ? null : s.pendingProfileId,
         })),
       push: () => {
         api

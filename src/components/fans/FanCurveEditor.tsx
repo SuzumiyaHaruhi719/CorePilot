@@ -3,7 +3,11 @@ import type { FanCurvePoint } from "../../lib/ipc";
 
 interface FanCurveEditorProps {
   points: FanCurvePoint[];
+  /** Live (per-pointer-move) update — use for cheap local preview only. */
   onChange: (points: FanCurvePoint[]) => void;
+  /** Commit — fires once on pointer-up. Use to persist + push to the backend so
+   *  dragging doesn't spam the store/IPC on every frame. */
+  onCommit?: (points: FanCurvePoint[]) => void;
   /** Live operating point (current temp °C → resulting duty %), drawn as a marker. */
   live?: { tempC: number; duty: number } | null;
   /** Minimum duty floor (drawn as a shaded band; points can't go below it). */
@@ -16,7 +20,7 @@ const TEMP_MAX = 100;
 
 /** A draggable temperature→duty fan-curve editor (FanXpert-style). X axis is
  *  temperature (0–100 °C), Y axis is duty (0–100%). Drag points to reshape. */
-export function FanCurveEditor({ points, onChange, live, minDuty = 0 }: FanCurveEditorProps) {
+export function FanCurveEditor({ points, onChange, onCommit, live, minDuty = 0 }: FanCurveEditorProps) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(420);
   const [dragging, setDragging] = useState<number | null>(null);
@@ -76,6 +80,8 @@ export function FanCurveEditor({ points, onChange, live, minDuty = 0 }: FanCurve
     if (dragging !== null) {
       e.currentTarget.releasePointerCapture?.(e.pointerId);
       setDragging(null);
+      // Commit the final curve once (persist + backend) — not on every frame.
+      onCommit?.(sorted);
     }
   }
 

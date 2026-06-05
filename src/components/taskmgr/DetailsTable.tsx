@@ -4,6 +4,7 @@ import { cn } from "../../lib/cn";
 import { formatBytes, formatDuration } from "../../lib/format";
 import type { ProcInfo } from "../../lib/ipc";
 import type { SortKey } from "../cores/ProcessTable";
+import { TableBodyState } from "./TmProcessTable";
 
 interface DetailsTableProps {
   processes: ProcInfo[];
@@ -12,10 +13,19 @@ interface DetailsTableProps {
   onSort: (key: SortKey) => void;
   onEndTask: (proc: ProcInfo) => void;
   onRowContextMenu?: (e: MouseEvent, proc: ProcInfo) => void;
+  /** First read in flight — show a skeleton instead of an empty state. */
+  loading?: boolean;
+  /** First read failed — show a retry/error state. */
+  error?: boolean;
 }
 
 const COLS =
   "grid-cols-[minmax(0,1fr)_50px_84px_64px_74px_78px_74px_54px_46px_50px_34px]";
+
+// Sum of the fixed columns above (+ a floor for the flexible name column and
+// the inter-column gaps) so narrow windows scroll horizontally instead of
+// crushing every cell. Kept as a full literal so Tailwind's scanner sees it.
+const MIN_W = "min-w-[760px]";
 
 function Head({
   k,
@@ -48,10 +58,23 @@ function Head({
   );
 }
 
-export function DetailsTable({ processes, sortKey, sortDir, onSort, onEndTask, onRowContextMenu }: DetailsTableProps) {
+export function DetailsTable({
+  processes,
+  sortKey,
+  sortDir,
+  onSort,
+  onEndTask,
+  onRowContextMenu,
+  loading,
+  error,
+}: DetailsTableProps) {
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/50">
-      <div className={cn("grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2.5", COLS)}>
+      {/* Horizontal scroll: when the window is narrower than the table's fixed
+          columns, scroll instead of squashing. The min-w wrapper holds both the
+          header and the (vertically scrolling) body so they stay aligned. */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-x-auto">
+      <div className={cn(MIN_W, "grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2.5", COLS)}>
         <Head k="name" label="名称" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="left" />
         <span className="hud-label text-right text-[9.5px] text-muted">PID</span>
         <span className="hud-label text-[9.5px] text-muted">用户</span>
@@ -70,7 +93,7 @@ export function DetailsTable({ processes, sortKey, sortDir, onSort, onEndTask, o
           <div
             key={p.pid}
             onContextMenu={(e) => onRowContextMenu?.(e, p)}
-            className={cn("group grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] hover:bg-surface2/50", COLS)}
+            className={cn(MIN_W, "group grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] hover:bg-surface2/50", COLS)}
           >
             <span className="truncate text-ink" title={p.name}>
               {p.name}
@@ -89,18 +112,22 @@ export function DetailsTable({ processes, sortKey, sortDir, onSort, onEndTask, o
             <button
               onClick={() => onEndTask(p)}
               title="结束任务"
-              className="no-drag grid h-6 w-6 place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white group-hover:opacity-100"
+              aria-label={`结束任务 ${p.name}`}
+              className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
             >
               <X size={13} />
             </button>
           </div>
         ))}
         {processes.length === 0 && (
-          <div className="flex flex-col items-center gap-1.5 py-12 text-center">
-            <span className="hud-label text-[10px] text-dim">NO PROCESSES</span>
-            <span className="text-[12.5px] text-dim">没有匹配的进程</span>
-          </div>
+          <TableBodyState
+            loading={loading}
+            error={error}
+            emptyTag="NO PROCESSES"
+            emptyLabel="没有匹配的进程"
+          />
         )}
+      </div>
       </div>
     </div>
   );

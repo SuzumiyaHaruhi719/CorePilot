@@ -70,6 +70,10 @@ export function OsdConfig() {
   const [procs, setProcs] = useState<ProcInfo[]>([]);
   const [procLoading, setProcLoading] = useState(false);
   const [procQuery, setProcQuery] = useState("");
+  // Transient free-placement position held only while dragging the plate, so the
+  // preview follows the pointer smoothly without writing the persisted store on
+  // every move; the final position is committed once on pointer-up.
+  const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const previewRef = useRef<HTMLDivElement>(null);
 
   const selectedTarget = useMemo(
@@ -176,22 +180,40 @@ export function OsdConfig() {
 
   // Free placement: drag the plate within the preview to set its normalized
   // top-left position (clamped to the box). The same coords drive the overlay.
+  //
+  // While dragging we keep the position in transient local state (`dragPos`) so
+  // the preview follows the pointer at full frame rate, and — only for the global
+  // default — push the live position straight to the overlay window so it follows
+  // too, WITHOUT touching the persisted store. The final position is committed to
+  // the store exactly once on pointer-up (a per-frame store write would thrash
+  // the tauri-store backed persist on every move).
   function onFreeDragStart(e: React.PointerEvent<HTMLDivElement>) {
     e.preventDefault();
     const box = previewRef.current;
     if (!box) return;
     const clamp = (v: number) => Math.min(1, Math.max(0, v));
+    let latest = { x: previewCfg.freeX ?? 0, y: previewCfg.freeY ?? 0 };
     const move = (ev: PointerEvent) => {
       const rect = box.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
-      applyPatch({
-        freeX: clamp((ev.clientX - rect.left) / rect.width),
-        freeY: clamp((ev.clientY - rect.top) / rect.height),
-      });
+      latest = {
+        x: clamp((ev.clientX - rect.left) / rect.width),
+        y: clamp((ev.clientY - rect.top) / rect.height),
+      };
+      setDragPos(latest);
+      // Live overlay follow for the global default (the standing `osd:cfg`
+      // subscription only ever emits the global config). Per-game drags still
+      // preview locally and commit on pointer-up.
+      if (!selectedTarget) {
+        void emit("osd:cfg", { ...globalCfg, freeX: latest.x, freeY: latest.y });
+      }
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      // Commit the final position to the persisted store, then drop transient state.
+      applyPatch({ freeX: latest.x, freeY: latest.y });
+      setDragPos(null);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -346,7 +368,10 @@ export function OsdConfig() {
               {previewCfg.position === "free" ? (
                 <div
                   className="absolute cursor-grab touch-none active:cursor-grabbing"
-                  style={freePosStyle(previewCfg.freeX, previewCfg.freeY)}
+                  style={freePosStyle(
+                    dragPos?.x ?? previewCfg.freeX,
+                    dragPos?.y ?? previewCfg.freeY,
+                  )}
                   onPointerDown={onFreeDragStart}
                 >
                   <OsdPlate
@@ -428,7 +453,7 @@ export function OsdConfig() {
           </div>
 
           {/* Add by exe name */}
-          <div className="mb-3 flex items-center gap-2">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
             <input
               value={addName}
               onChange={(e) => setAddName(e.target.value)}
@@ -436,24 +461,24 @@ export function OsdConfig() {
                 if (e.key === "Enter") submitAdd();
               }}
               placeholder="可执行文件名，如 cyberpunk2077.exe"
-              className="no-drag w-72 rounded-lg border border-line bg-surface2 px-3 py-1.5 text-[12.5px] text-ink outline-none transition-colors focus:border-accent/50"
+              className="no-drag w-72 min-w-0 flex-1 rounded-lg border border-line bg-surface2 px-3 py-1.5 text-[12.5px] text-ink outline-none transition-colors focus:border-accent/50"
             />
             <button
               onClick={submitAdd}
               disabled={!addName.trim()}
-              className="no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+              className="no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Plus size={13} /> 添加
             </button>
             <button
               onClick={() => void openProcessPicker()}
-              className="no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+              className="no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
             >
               <ListPlus size={13} /> 从运行中的进程选择
             </button>
             <button
               onClick={() => void pickFromFile()}
-              className="no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+              className="no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
             >
               <FolderOpen size={13} /> 从文件选择
             </button>
