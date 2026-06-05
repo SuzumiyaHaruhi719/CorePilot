@@ -138,6 +138,14 @@ pub struct GpuOcSettings {
 /// Lowest temp limit we let the UI request, °C (sane floor).
 const TEMP_LIMIT_FLOOR: u32 = 50;
 
+/// Lowest *manual* fan speed we let the UI request, % of max. Auto fan control is
+/// expressed as `fan_speed_pct == None` (the frontend omits the field), so any
+/// value that reaches here is an explicit manual request — and a manual 0% would
+/// pin the fans fully off and let the GPU overheat. We clamp the manual floor to
+/// this value; restoring the automatic fan curve goes through `gpu_oc_reset`
+/// (`set_default_fan_speed`), never through a 0% manual request.
+const FAN_SPEED_FLOOR: u32 = 20;
+
 /// Factory thermal target captured on first read, restored by reset.
 static DEFAULT_TEMP_LIMIT: Lazy<Mutex<Option<u32>>> = Lazy::new(|| Mutex::new(None));
 /// Cached one-time probe: is the GPU_MAX threshold settable on this GPU?
@@ -149,21 +157,37 @@ fn is_unsupported(err: &NvmlError) -> bool {
     matches!(err, NvmlError::NotSupported)
 }
 
-/// Acquire the primary NVIDIA device, owning the `Nvml` handle so the borrow
-/// outlives the returned `Device`. Returns a human-readable error string.
-fn init_device() -> Result<(Nvml, Device<'static>), String> {
-    let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
+/// Owns the per-call `Nvml` handle and hands out a borrowed [`Device`] through a
+/// closure. This replaces the previous `transmute`-to-`'static` trick: a `Device`
+/// borrows its `Nvml`, and laundering that borrow to `'static` is unsound if the
+/// two are ever separated. Here the `Nvml` lives in the struct and every `Device`
+/// is created *inside* [`with_device`], so the borrow is genuinely tied to `&self`
+/// and the `Device` cannot outlive its `Nvml` — the compiler enforces drop order
+/// for us, no `unsafe` required.
+struct GpuHandle {
+    nvml: Nvml,
+}
 
-    // SAFETY/lifetime note: `device_by_index` borrows `nvml`. We transmute the
-    // borrow to `'static` and return it alongside the owning `Nvml` so the two
-    // travel together; the `Device` is never used after the `Nvml` is dropped
-    // because they are dropped together at the end of each command. This keeps
-    // per-call init ergonomic without a self-referential struct crate.
-    let device = nvml
-        .device_by_index(0)
-        .map_err(|e| format!("No NVIDIA GPU at index 0: {e}"))?;
-    let device: Device<'static> = unsafe { std::mem::transmute(device) };
-    Ok((nvml, device))
+impl GpuHandle {
+    /// Initialise NVML for this call. Cheap enough for the interactive cadence
+    /// these commands run at (the previous design also re-init'd per call).
+    fn init() -> Result<Self, String> {
+        let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
+        Ok(Self { nvml })
+    }
+
+    /// Run `f` with the primary NVIDIA device (index 0). The `Device` is created
+    /// here and dropped when `f` returns, so its borrow of `self.nvml` never
+    /// escapes. `f` gets `&mut Device` so it can call both the read (`&self`) and
+    /// the mutating (`&mut self`) NVML methods. Returns the device-acquisition
+    /// error as a human-readable string if index 0 can't be opened.
+    fn with_device<T>(&self, f: impl FnOnce(&mut Device<'_>) -> T) -> Result<T, String> {
+        let mut device = self
+            .nvml
+            .device_by_index(0)
+            .map_err(|e| format!("No NVIDIA GPU at index 0: {e}"))?;
+        Ok(f(&mut device))
+    }
 }
 
 /// Cached "is there an NVIDIA GPU" probe so the telemetry sampler doesn't retry
@@ -179,12 +203,16 @@ pub fn gpu_temp_power() -> (Option<f32>, Option<f32>) {
     if !*NVML_PRESENT {
         return (None, None);
     }
-    let Ok((_nvml, device)) = init_device() else {
+    let Ok(handle) = GpuHandle::init() else {
         return (None, None);
     };
-    let temp = device.temperature(TemperatureSensor::Gpu).ok().map(|t| t as f32);
-    let power = device.power_usage().ok().map(|mw| mw as f32 / 1000.0);
-    (temp, power)
+    handle
+        .with_device(|device| {
+            let temp = device.temperature(TemperatureSensor::Gpu).ok().map(|t| t as f32);
+            let power = device.power_usage().ok().map(|mw| mw as f32 / 1000.0);
+            (temp, power)
+        })
+        .unwrap_or((None, None))
 }
 
 /// Highest attainable graphics clock (MHz). Prefers `max_clock_info`, which is
@@ -215,18 +243,22 @@ fn max_graphics_clock(device: &Device) -> u32 {
 /// or no NVIDIA GPU exists, returns `GpuOcInfo { available: false, .. }`.
 #[tauri::command]
 pub fn gpu_oc_info() -> GpuOcInfo {
-    let (_nvml, device) = match init_device() {
-        Ok(pair) => pair,
+    let handle = match GpuHandle::init() {
+        Ok(h) => h,
         Err(_) => return GpuOcInfo::default(),
     };
 
-    let mut info = GpuOcInfo {
-        available: true,
-        ..Default::default()
-    };
+    // The whole snapshot is built inside `with_device` so the borrowed `Device`
+    // never outlives its `Nvml`. Device-acquisition failure → `available: false`.
+    handle
+        .with_device(|device| {
+            let mut info = GpuOcInfo {
+                available: true,
+                ..Default::default()
+            };
 
-    info.name = device.name().unwrap_or_default();
-    info.driver_version = _nvml.sys_driver_version().unwrap_or_default();
+            info.name = device.name().unwrap_or_default();
+            info.driver_version = device.nvml().sys_driver_version().unwrap_or_default();
 
     info.graphics_clock = device.clock_info(Clock::Graphics).unwrap_or(0);
     info.mem_clock = device.clock_info(Clock::Memory).unwrap_or(0);
@@ -272,7 +304,7 @@ pub fn gpu_oc_info() -> GpuOcInfo {
 
     // Locked-clocks support: presence of supported graphics clocks is the
     // proxy. A non-zero max also feeds the UI's slider range.
-    info.max_graphics_clock_mhz = max_graphics_clock(&device);
+    info.max_graphics_clock_mhz = max_graphics_clock(device);
     // Core-clock locking (NVML) is replaced by NVAPI clock OFFSETS — the lock
     // crippled GeForce to its minimum; offsets are the real Afterburner control.
     info.supports_locked_clocks = false;
@@ -318,7 +350,9 @@ pub fn gpu_oc_info() -> GpuOcInfo {
         info.supports_temp_limit = settable;
     }
 
-    info
+            info
+        })
+        .unwrap_or_default()
 }
 
 /// Debug probe: for every NVML temperature-threshold type, read it and attempt
@@ -326,8 +360,8 @@ pub fn gpu_oc_info() -> GpuOcInfo {
 /// temp-limit is unsupported on consumer GeForce (and reveals any alternative
 /// settable threshold). Not wired into the GUI — used by the CLI.
 pub fn gpu_temp_probe() -> Vec<String> {
-    let (_nvml, device) = match init_device() {
-        Ok(p) => p,
+    let handle = match GpuHandle::init() {
+        Ok(h) => h,
         Err(e) => return vec![format!("init failed: {e}")],
     };
     let thresholds = [
@@ -338,17 +372,21 @@ pub fn gpu_temp_probe() -> Vec<String> {
         ("Slowdown", TemperatureThreshold::Slowdown),
         ("Shutdown", TemperatureThreshold::Shutdown),
     ];
-    let mut out = Vec::new();
-    for (name, t) in thresholds {
-        match device.temperature_threshold(t) {
-            Ok(cur) => match device.set_temperature_threshold(t, cur as i32) {
-                Ok(()) => out.push(format!("{name}: read={cur}C  SET=OK (SETTABLE)")),
-                Err(e) => out.push(format!("{name}: read={cur}C  SET=Err({e})")),
-            },
-            Err(e) => out.push(format!("{name}: read=Err({e})")),
-        }
-    }
-    out
+    handle
+        .with_device(|device| {
+            let mut out = Vec::new();
+            for (name, t) in thresholds {
+                match device.temperature_threshold(t) {
+                    Ok(cur) => match device.set_temperature_threshold(t, cur as i32) {
+                        Ok(()) => out.push(format!("{name}: read={cur}C  SET=OK (SETTABLE)")),
+                        Err(e) => out.push(format!("{name}: read={cur}C  SET=Err({e})")),
+                    },
+                    Err(e) => out.push(format!("{name}: read=Err({e})")),
+                }
+            }
+            out
+        })
+        .unwrap_or_else(|e| vec![format!("init failed: {e}")])
 }
 
 /// Apply the requested tuning changes. Each control is attempted independently;
@@ -357,8 +395,10 @@ pub fn gpu_temp_probe() -> Vec<String> {
 /// elevated, which is required for these mutations.
 #[tauri::command]
 pub fn gpu_oc_apply(settings: GpuOcSettings) -> Result<(), String> {
-    let (_nvml, mut device) = init_device()?;
-
+    let handle = GpuHandle::init()?;
+    // All mutations run inside `with_device`; the closure returns the collapsed
+    // per-control result, and `?` propagates a device-acquisition failure.
+    handle.with_device(|device| {
     // Count requested controls so we can return Err only if ALL of them failed.
     let mut requested = 0usize;
     let mut failures: Vec<String> = Vec::new();
@@ -395,10 +435,13 @@ pub fn gpu_oc_apply(settings: GpuOcSettings) -> Result<(), String> {
         }
     }
 
-    // --- Fan speed (clamp 0..=100, apply to every fan) ---
+    // --- Fan speed (clamp to FAN_SPEED_FLOOR..=100, apply to every fan) ---
+    // A manual request only ever arrives via `Some(pct)`; "auto" is `None` and is
+    // restored through `gpu_oc_reset`. So we never honour a manual 0% (which would
+    // stop the fans entirely) — clamp up to the safe floor and cap at 100.
     if let Some(pct) = settings.fan_speed_pct {
         requested += 1;
-        let clamped = pct.min(100);
+        let clamped = clamp_u32(pct, FAN_SPEED_FLOOR, 100);
         match device.num_fans() {
             Ok(n) if n > 0 => {
                 let mut any_ok = false;
@@ -422,6 +465,19 @@ pub fn gpu_oc_apply(settings: GpuOcSettings) -> Result<(), String> {
     // --- Temperature limit (thermal target = GPU_MAX threshold) ---
     if let Some(target_c) = settings.temp_limit_c {
         requested += 1;
+        // Capture the factory thermal target BEFORE the first mutation so reset
+        // can restore the true default. `gpu_oc_info` also seeds this, but on a
+        // startup auto-apply path apply runs first — without this, reset would
+        // have no baseline (or worse, a baseline equal to an already-applied
+        // value). Read the live current threshold and store it once.
+        {
+            let mut def = DEFAULT_TEMP_LIMIT.lock();
+            if def.is_none() {
+                if let Ok(cur) = device.temperature_threshold(TemperatureThreshold::AcousticCurr) {
+                    *def = Some(cur);
+                }
+            }
+        }
         let lo = device
             .temperature_threshold(TemperatureThreshold::AcousticMin)
             .unwrap_or(TEMP_LIMIT_FLOOR);
@@ -435,13 +491,15 @@ pub fn gpu_oc_apply(settings: GpuOcSettings) -> Result<(), String> {
     }
 
     finish(requested, failures)
+    })?
 }
 
 /// Reset all tuning controls to stock. Each reset is attempted independently;
 /// returns `Err` only when every attempted reset failed.
 #[tauri::command]
 pub fn gpu_oc_reset() -> Result<(), String> {
-    let (_nvml, mut device) = init_device()?;
+    let handle = GpuHandle::init()?;
+    handle.with_device(|device| {
 
     let mut requested = 0usize;
     let mut failures: Vec<String> = Vec::new();
@@ -526,6 +584,7 @@ pub fn gpu_oc_reset() -> Result<(), String> {
     }
 
     finish(requested, failures)
+    })?
 }
 
 /// Collapse per-control outcomes into a single command result: `Ok` if nothing

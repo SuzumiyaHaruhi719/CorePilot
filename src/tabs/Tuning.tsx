@@ -55,7 +55,7 @@ function getErrorMessage(e: unknown): string {
 }
 
 export function Tuning() {
-  const { applied, setApplied } = useTweaks();
+  const { applied, snapshots, setApplied, setSnapshot } = useTweaks();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [status, setStatus] = useState<{ msg: string; ok: boolean } | null>(null);
   const [confirmTweak, setConfirmTweak] = useState<TweakMeta | null>(null);
@@ -64,8 +64,14 @@ export function Tuning() {
     setBusyId(meta.id);
     setStatus(null);
     try {
-      if (next) await api.tweakApply(meta.id);
-      else await api.tweakRevert(meta.id);
+      if (next) {
+        // Persist the pre-apply snapshot so a later revert restores the user's
+        // real prior values (not an assumed Windows default).
+        const snapshot = await api.tweakApply(meta.id);
+        setSnapshot(meta.id, snapshot);
+      } else {
+        await api.tweakRevert(meta.id, snapshots[meta.id] ?? "");
+      }
       setApplied(meta.id, next);
       setStatus({
         msg: `${next ? "已应用" : "已还原"}「${meta.name}」${meta.reboot && next ? " · 重启后生效" : ""}`,
@@ -95,7 +101,7 @@ export function Tuning() {
     let failed = 0;
     for (const t of ids) {
       try {
-        await api.tweakRevert(t.id);
+        await api.tweakRevert(t.id, snapshots[t.id] ?? "");
         setApplied(t.id, false);
       } catch {
         failed += 1;

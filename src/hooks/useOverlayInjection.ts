@@ -36,6 +36,10 @@ export function useOverlayInjection(): void {
 
   // PID we currently have the injected overlay attached to (0 = none).
   const attachedPid = useRef(0);
+  // Layout flags last pushed to the backend for the attached PID. Lets us call
+  // overlayAttach again ONLY when the metric selection actually changed, instead
+  // of every poll tick (re-attaching an unchanged PID would re-inject the DLL).
+  const attachedFlags = useRef(layoutFlags);
 
   useEffect(() => {
     const setStatus = useOverlayStatus.getState().setStatus;
@@ -60,16 +64,29 @@ export function useOverlayInjection(): void {
         const st = await api.overlayStatus();
         if (!alive) return;
         if (st.mode === "inject") {
-          // Re-attach when the foreground game changed; (re)attaching the same
-          // pid is cheap and keeps the layout flags current.
-          if (attachedPid.current !== st.target.pid) {
+          const pidChanged = attachedPid.current !== st.target.pid;
+          const flagsChanged = attachedFlags.current !== flagsRef.current;
+          // Attach (which injects on the backend) ONLY when the foreground game
+          // changed or we haven't attached yet. When the same game stays in front
+          // we must NOT re-attach every tick — that re-ran LoadLibraryW each poll
+          // and leaked the DLL. We only re-issue attach to push a layout-flag
+          // change, which the backend handles as a cheap shared-memory update
+          // (no re-injection). An unchanged pid + unchanged flags does no IPC.
+          if (pidChanged) {
             if (attachedPid.current !== 0) await detachCurrent();
             const attached = await api.overlayAttach(st.target.pid, flagsRef.current);
             attachedPid.current = st.target.pid;
+            attachedFlags.current = flagsRef.current;
             if (alive) setStatus(attached);
-          } else {
+          } else if (flagsChanged) {
+            // Same game, new metric selection: backend updates the shared block's
+            // layout flags in place rather than re-injecting.
             const attached = await api.overlayAttach(st.target.pid, flagsRef.current);
+            attachedFlags.current = flagsRef.current;
             if (alive) setStatus(attached);
+          } else if (alive) {
+            // Steady state: nothing changed. Refresh the status line only.
+            setStatus(st);
           }
         } else {
           // Not injectable (anti-cheat / unsupported / no game): drop any prior

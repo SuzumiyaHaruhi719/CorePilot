@@ -246,7 +246,7 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
 
 export function FanControl() {
   const pollMs = useSettings((s) => s.pollMs);
-  const { configs, labels, applyOnStartup, setConfig, setApplyOnStartup, setLabel, profiles, activeProfileId, saveProfile, applyProfile, deleteProfile } =
+  const { configs, labels, applyOnStartup, setConfig, setApplyOnStartup, setLabel, profiles, activeProfileId, saveProfile, applyProfile, deleteProfile, lastError, clearError } =
     useFanProfiles();
   const [info, setInfo] = useState<FanInfo | null>(null);
   // Control ids that have shown a valid (>0) RPM at least once this session.
@@ -390,6 +390,25 @@ export function FanControl() {
               </div>
             )}
           </div>
+
+          {/* Surface a failed backend apply so a profile never looks "active"
+              while nothing was actually applied. Click to dismiss. */}
+          <AnimatePresence>
+            {lastError && (
+              <motion.button
+                type="button"
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                onClick={clearError}
+                title="点击关闭"
+                className="no-drag flex w-full items-start gap-2 overflow-hidden rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-left text-[11.5px] text-danger transition-colors hover:bg-danger/15"
+              >
+                <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                <span className="min-w-0">应用风扇配置失败:{lastError}</span>
+              </motion.button>
+            )}
+          </AnimatePresence>
 
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2">

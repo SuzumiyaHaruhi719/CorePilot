@@ -333,6 +333,29 @@ unsafe fn read_service_group_start(svc: SC_HANDLE) -> (String, String) {
     (group, start_type_label(cfg.dwStartType.0).to_string())
 }
 
+/// Service names (matched case-insensitively) that must never be stopped or
+/// restarted: the elevated app could otherwise brick or hard-hang Windows by
+/// killing the RPC/DCOM plumbing, the local session manager, the power service,
+/// the SAM/account database, or WMI. Kept deliberately small so ordinary
+/// services remain freely controllable.
+const PROTECTED_SERVICES: &[&str] = &[
+    "rpcss",                // Remote Procedure Call (COM/DCOM backbone)
+    "dcomlaunch",           // DCOM Server Process Launcher
+    "rpceptmapper",         // RPC Endpoint Mapper
+    "lsm",                  // Local Session Manager
+    "power",                // Power service
+    "brokerinfrastructure", // Background Tasks Infrastructure Service
+    "samss",                // Security Accounts Manager
+    "winmgmt",              // Windows Management Instrumentation (WMI)
+];
+
+/// `true` when `name` is on the [`PROTECTED_SERVICES`] denylist (case-insensitive).
+fn is_protected_service(name: &str) -> bool {
+    PROTECTED_SERVICES
+        .iter()
+        .any(|p| name.eq_ignore_ascii_case(p))
+}
+
 /// Start, stop, or restart a service by name.
 pub fn control_service(name: String, action: String) -> CoreResult<()> {
     let action = action.to_lowercase();
@@ -340,8 +363,19 @@ pub fn control_service(name: String, action: String) -> CoreResult<()> {
         return Err(CoreError::Msg(format!("unknown action: {action}")));
     }
 
+    // Refuse to stop/restart services whose death can break or brick Windows.
+    // Starting one is harmless, so only the stop-bearing actions are gated.
+    if matches!(action.as_str(), "stop" | "restart") && is_protected_service(&name) {
+        return Err(CoreError::Msg(format!(
+            "拒绝停止受保护的关键系统服务: {name}"
+        )));
+    }
+
     unsafe {
-        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ENUMERATE_SERVICE)?;
+        // SC_MANAGER_CONNECT is the correct right for opening a specific service
+        // to start/stop it. SC_MANAGER_ENUMERATE_SERVICE only grants the right to
+        // *list* services and can make the subsequent OpenServiceW fail.
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)?;
         let scm = ScHandle(scm);
 
         let name_w = wide(&name);

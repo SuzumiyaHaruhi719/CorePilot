@@ -195,6 +195,25 @@ pub fn ingest_line(line: &str) {
 
 // --- command transport ---------------------------------------------------------
 
+/// Maximum length of a control id we will forward to the sidecar. LHM
+/// identifiers are short paths; anything longer is almost certainly malformed.
+const MAX_CONTROL_ID_LEN: usize = 256;
+
+/// Whether a control id is safe to forward to the sidecar as a stdin text line.
+///
+/// The sidecar parses commands as space-delimited tokens terminated by a
+/// newline, so an id containing whitespace, control characters (`\r`, `\n`, …),
+/// or any byte outside the LHM identifier alphabet (`[A-Za-z0-9/_.:-]`) could
+/// split into extra tokens / inject additional sidecar commands. Reject those.
+fn is_valid_control_id(id: &str) -> bool {
+    if id.is_empty() || id.len() > MAX_CONTROL_ID_LEN {
+        return false;
+    }
+    id.chars().all(|c| {
+        matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '/' | '_' | '.' | ':' | '-')
+    })
+}
+
 /// Write a single line command to the sidecar; drop the handle on failure.
 fn send(cmd: &str) {
     let mut guard = SIDECAR_STDIN.lock();
@@ -208,10 +227,18 @@ fn send(cmd: &str) {
 }
 
 fn send_set(id: &str, pct: f32) {
+    // Never forward an id that could inject extra tokens/commands into the
+    // sidecar's line-oriented stdin protocol.
+    if !is_valid_control_id(id) {
+        return;
+    }
     send(&format!("set {id} {:.0}", pct.clamp(0.0, 100.0)));
 }
 
 fn send_auto(id: &str) {
+    if !is_valid_control_id(id) {
+        return;
+    }
     send(&format!("auto {id}"));
 }
 
@@ -276,11 +303,24 @@ fn apply_once() {
                 last.insert(c.control_id.clone(), ("manual".to_string(), target.round() as i32));
             }
             "curve" => {
-                let Some(src) = c.temp_source_id.as_ref() else {
+                // Fail safe: if the curve's temperature source is unconfigured,
+                // unknown, or has no current reading, we cannot compute a duty.
+                // Leaving the header at its last software duty could pin a fan
+                // low while temps climb, so hand the header back to the BIOS
+                // (auto). Track last-applied so we issue `auto` only once per
+                // transition instead of every 2 s tick.
+                let reading = c
+                    .temp_source_id
+                    .as_ref()
+                    .and_then(|src| temps.get(src).copied());
+                let Some(t) = reading else {
+                    let already_auto =
+                        last.get(&c.control_id).map(|(m, _)| m == "auto").unwrap_or(false);
+                    if !already_auto {
+                        send_auto(&c.control_id);
+                        last.insert(c.control_id.clone(), ("auto".to_string(), 0));
+                    }
                     continue;
-                };
-                let Some(&t) = temps.get(src) else {
-                    continue; // no reading yet this tick — leave header as-is
                 };
                 let target = interp(&c.curve, t).clamp(floor, 100.0);
                 let di = target.round() as i32;
@@ -397,12 +437,103 @@ pub fn fan_info() -> FanState {
     build_state()
 }
 
+/// Maximum number of points we accept in a single fan curve.
+const MAX_CURVE_POINTS: usize = 24;
+/// Highest temperature (°C) a curve point may reference.
+const MAX_CURVE_TEMP_C: f32 = 120.0;
+
+/// Sanitize one config coming over IPC: bound the mode, clamp the duties, and
+/// cap/clamp the curve. Returns `None` if the mode is not recognized.
+fn sanitize_config(c: &FanChannelConfig) -> Option<FanChannelConfig> {
+    // Mode allow-list: anything else is dropped rather than silently treated as
+    // a fail-safe (the engine only ever knows these three).
+    let mode = match c.mode.as_str() {
+        "auto" => "auto",
+        "manual" => "manual",
+        "curve" => "curve",
+        _ => return None,
+    };
+
+    // Bound the curve: cap the point count, clamp each point's temperature and
+    // duty into a sane physical range so interpolation can never be driven by
+    // out-of-range / non-finite values from the frontend.
+    let curve: Vec<CurvePoint> = c
+        .curve
+        .iter()
+        .take(MAX_CURVE_POINTS)
+        .map(|p| CurvePoint {
+            temp_c: clamp_finite(p.temp_c, 0.0, MAX_CURVE_TEMP_C),
+            duty: clamp_finite(p.duty, 0.0, 100.0),
+        })
+        .collect();
+
+    Some(FanChannelConfig {
+        control_id: c.control_id.clone(),
+        mode: mode.to_string(),
+        manual_pct: clamp_finite(c.manual_pct, 0.0, 100.0),
+        temp_source_id: c.temp_source_id.clone(),
+        curve,
+        min_duty: clamp_finite(c.min_duty, 0.0, 100.0),
+    })
+}
+
+/// Clamp into `[lo, hi]`, mapping NaN to `lo` (never trust a non-finite value
+/// from IPC to reach hardware).
+fn clamp_finite(v: f32, lo: f32, hi: f32) -> f32 {
+    if v.is_nan() {
+        lo
+    } else {
+        v.clamp(lo, hi)
+    }
+}
+
+/// The set of control ids that are currently software-controllable, taken from
+/// the latest sidecar snapshot. A config whose `control_id` is not in this set
+/// is dropped — IPC may not name an unknown or non-controllable header.
+fn controllable_ids() -> std::collections::HashSet<String> {
+    SNAP.lock()
+        .controls
+        .iter()
+        .filter(|(_, _, _, controllable, _)| *controllable)
+        .map(|(id, _, _, _, _)| id.clone())
+        .collect()
+}
+
 /// Replace the engine's per-fan configuration. Applied immediately and then on
 /// each engine tick. Sending an empty list leaves headers untouched (the engine
 /// no-ops); switch a fan to `auto` to actively hand it back to the BIOS.
+///
+/// Every config is validated against the live hardware before it can drive a
+/// fan: only currently-controllable control ids are accepted, modes are
+/// restricted to `auto`/`manual`/`curve`, and all duties/curve points are
+/// clamped to physical ranges. Anything that fails validation is dropped.
 #[tauri::command]
 pub fn fan_set_config(configs: Vec<FanChannelConfig>) -> crate::error::CoreResult<()> {
-    *FAN_CONFIG.lock() = configs;
+    let received = configs.len();
+
+    // An empty push is a legitimate "stop managing" signal: clear the config so
+    // the engine no-ops (headers keep whatever state they were last in).
+    if received == 0 {
+        *FAN_CONFIG.lock() = Vec::new();
+        return Ok(());
+    }
+
+    let controllable = controllable_ids();
+
+    let validated: Vec<FanChannelConfig> = configs
+        .iter()
+        .filter(|c| is_valid_control_id(&c.control_id))
+        .filter(|c| controllable.contains(&c.control_id))
+        .filter_map(sanitize_config)
+        .collect();
+
+    if validated.is_empty() {
+        return Err(crate::error::CoreError::from(format!(
+            "no valid fan configurations: all {received} dropped (unknown/non-controllable control id, unsupported mode, or no controllable fan headers detected yet)"
+        )));
+    }
+
+    *FAN_CONFIG.lock() = validated;
     apply_once();
     Ok(())
 }

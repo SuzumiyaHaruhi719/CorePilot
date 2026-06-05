@@ -330,10 +330,15 @@ export const api = {
   fanInfo: () => invoke<FanInfo>("fan_info"),
   /** Push the per-fan configuration (mode/curve) to the backend fan engine. */
   fanSetConfig: (configs: FanChannelConfig[]) => invoke<void>("fan_set_config", { configs }),
-  /** Apply a reversible system optimization tweak by id (深度优化). */
-  tweakApply: (id: string) => invoke<void>("tweak_apply", { id }),
-  /** Revert an optimization tweak to its Windows default. */
-  tweakRevert: (id: string) => invoke<void>("tweak_revert", { id }),
+  /** Apply a reversible system optimization tweak by id (深度优化). Returns a JSON
+   *  snapshot of the pre-apply state; persist it and pass it back to `tweakRevert`
+   *  to restore the EXACT prior values (empty string when nothing was captured). */
+  tweakApply: (id: string) => invoke<string>("tweak_apply", { id }),
+  /** Revert an optimization tweak. Pass the `snapshot` returned by `tweakApply` to
+   *  restore the exact prior state; an empty/missing snapshot reverts to Windows'
+   *  documented default. */
+  tweakRevert: (id: string, snapshot: string) =>
+    invoke<void>("tweak_revert", { id, snapshot }),
   /** Create a System Restore point before applying tweaks. */
   createRestorePoint: () => invoke<void>("create_restore_point"),
   osdSetVisible: (visible: boolean) => invoke<void>("osd_set_visible", { visible }),

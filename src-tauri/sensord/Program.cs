@@ -65,6 +65,21 @@ internal static class Program
     /// re-open-on-stale logic so a fanless board doesn't thrash.</summary>
     private static bool _sawMoboFan;
 
+    /// <summary>Reopen the chip only after this many CONSECUTIVE all-zero
+    /// motherboard-fan samples, so a single legit BIOS fan-stop (0 RPM) does not
+    /// trigger a driver close/open.</summary>
+    private const int StaleSamplesBeforeReopen = 3;
+
+    /// <summary>Minimum spacing between chip reopens, so repeated stale readings
+    /// can't churn the kernel driver more than once per this window.</summary>
+    private const int ReopenCooldownMs = 10_000;
+
+    /// <summary>Count of consecutive all-zero motherboard-fan samples.</summary>
+    private static int _consecutiveZeroSamples;
+
+    /// <summary>Tick (ms) of the last chip reopen, for the cooldown above.</summary>
+    private static long _lastReopenTick = -ReopenCooldownMs;
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         // Default options reject NaN/Infinity; we sanitize to null beforehand so
@@ -113,15 +128,40 @@ internal static class Program
             {
                 line = BuildSample(computer, visitor, out bool stale);
 
-                // Stale NCT6701D bank (board fans all zero after having spun):
-                // re-open and rebuild inline so the emitted line carries real RPM.
-                if (stale && _sawMoboFan && computer != null)
+                // Stale NCT6701D bank (board fans all zero after having spun).
+                // Track CONSECUTIVE all-zero samples: a single legit BIOS
+                // fan-stop reads 0 RPM and must NOT trigger a driver reopen.
+                if (stale)
+                {
+                    _consecutiveZeroSamples++;
+                }
+                else
+                {
+                    _consecutiveZeroSamples = 0;
+                }
+
+                // Reopen only after a sustained run of zeros, the board has
+                // actually spun this session, and the reopen cooldown elapsed —
+                // so legit fan-stop never churns the kernel driver. Reopening
+                // rebuilds the sample inline so the emitted line carries real RPM.
+                long nowTick = Environment.TickCount64;
+                bool cooldownElapsed = nowTick - _lastReopenTick >= ReopenCooldownMs;
+                if (_consecutiveZeroSamples >= StaleSamplesBeforeReopen
+                    && _sawMoboFan
+                    && computer != null
+                    && cooldownElapsed)
                 {
                     lock (Gate)
                     {
+                        // Restore any fans we drove to BIOS default BEFORE the
+                        // handle (and its control map) is destroyed; resetting
+                        // after Close() would run against a stale control map.
+                        ResetTouched();
                         try { computer.Close(); } catch { /* ignore */ }
                         computer = OpenComputer();
                     }
+                    _lastReopenTick = nowTick;
+                    _consecutiveZeroSamples = 0;
                     line = BuildSample(computer, visitor, out _);
                 }
             }
@@ -211,13 +251,15 @@ internal static class Program
             {
                 switch (verb)
                 {
-                    case "set" when parts.Length >= 3:
+                    // Exact token counts only: a malformed line (extra/missing
+                    // args) is ignored rather than partially interpreted.
+                    case "set" when parts.Length == 3:
                         ApplySet(parts[1], parts[2]);
                         break;
-                    case "auto" when parts.Length >= 2:
+                    case "auto" when parts.Length == 2:
                         ApplyAuto(parts[1]);
                         break;
-                    case "autoall":
+                    case "autoall" when parts.Length == 1:
                         foreach (string id in _touched)
                         {
                             if (_controls.TryGetValue(id, out ISensor? s) && s.Control != null)

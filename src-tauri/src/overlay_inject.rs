@@ -21,10 +21,15 @@
 //! Injection uses our own [`crate::inject`] (CreateRemoteThread + LoadLibraryW) —
 //! the published `dll-syringe` crate cannot build on this project's stable
 //! toolchain (it needs nightly `MaybeUninit` APIs / crate-root `#![feature]`), so
-//! we implement the exact mechanism it wraps directly on the `windows` crate. The
-//! injector is stateless: attach injects and returns (the DLL stays loaded), and
-//! detach re-finds the module by file name and ejects it. The only state shared
-//! with the sampler is the attached PID + the layout flags, behind a small mutex.
+//! we implement the exact mechanism it wraps directly on the `windows` crate.
+//! Attach is **idempotent**: the frontend polls and re-issues attach for the same
+//! foreground PID, so we track which PID currently has the DLL injected and only
+//! `LoadLibraryW` when that PID changes — a repeat attach for the resident PID
+//! just refreshes the layout flags through the shared block (no re-injection, so
+//! the module never accumulates). Detach re-finds the module by file name, ejects
+//! it, and clears that tracking so a later attach to the same PID injects again.
+//! The state shared with the sampler — the sampler target PID, the injected PID,
+//! and the layout flags — lives behind a small mutex (flags in an atomic).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -64,8 +69,19 @@ struct OverlayState {
     /// The single, long-lived writer mapping. `None` only if creating the mapping
     /// failed at startup (then the sampler degrades to a no-op).
     writer: Option<OsdShared>,
-    /// PID currently attached/targeted by the injected overlay, if any.
+    /// PID the **sampler** currently publishes metrics for (None = idle, write
+    /// `enabled = 0`). Cleared when the game exits so we stop sampling a dead PID.
     target_pid: Option<u32>,
+    /// PID that currently has `corepilot_overlay.dll` **injected**, if any.
+    ///
+    /// This is deliberately separate from `target_pid`: `target_pid` answers "what
+    /// should the sampler publish?" while `injected_pid` answers "is the DLL
+    /// already resident here?". Tracking it makes [`overlay_attach`] idempotent —
+    /// the frontend polls and re-issues attach for the *same* PID, and without this
+    /// we would `LoadLibraryW` on every poll, leaking/accumulating the module. We
+    /// only run the real injection when the target PID is not already this value,
+    /// and [`overlay_detach`] clears it after the eject so a later re-attach works.
+    injected_pid: Option<u32>,
 }
 
 // SAFETY: `OsdShared` holds a raw pointer (so it is `!Send`/`!Sync` by default),
@@ -79,6 +95,7 @@ static STATE: Lazy<Mutex<OverlayState>> = Lazy::new(|| {
     Mutex::new(OverlayState {
         writer: None,
         target_pid: None,
+        injected_pid: None,
     })
 });
 
@@ -271,7 +288,10 @@ pub fn start_sampler(app: AppHandle) {
                 match target {
                     Some(pid) if pid != 0 => {
                         // If the game exited, stop drawing and clear the target so
-                        // we don't keep sampling a dead PID forever.
+                        // we don't keep sampling a dead PID forever. Also clear any
+                        // injected-PID tracking for it: the process (and its resident
+                        // DLL) is gone, so a future attach to a recycled PID must be
+                        // free to inject again rather than be treated as idempotent.
                         if !crate::fps::pid_alive(pid) {
                             clear_target_if(pid);
                             write_disabled();
@@ -299,12 +319,30 @@ fn write_disabled() {
     }
 }
 
-/// Clear the attached target iff it still equals `pid` (avoids racing a fresh
-/// attach that happened while we were sampling the old one).
+/// Stamp the current [`LAYOUT_FLAGS`] into the shared block without touching the
+/// metric fields. The lightweight path used when [`overlay_attach`] is called for
+/// an already-injected PID purely to change which metric rows are drawn: the new
+/// flags take effect immediately for the resident overlay instead of waiting for
+/// the next sampler tick, and crucially without re-running injection.
+fn push_layout_flags() {
+    let flags = LAYOUT_FLAGS.load(Ordering::Relaxed);
+    if let Some(writer) = STATE.lock().writer.as_ref() {
+        writer.write(|b| b.layout_flags = flags);
+    }
+}
+
+/// Clear the sampler target iff it still equals `pid` (avoids racing a fresh
+/// attach that happened while we were sampling the old one). Also clears the
+/// injected-PID tracking when it matches: this is called when the target PID's
+/// process has exited, so the resident DLL is gone with it and a later attach to
+/// the same (recycled) PID must inject again rather than be skipped as idempotent.
 fn clear_target_if(pid: u32) {
     let mut st = STATE.lock();
     if st.target_pid == Some(pid) {
         st.target_pid = None;
+    }
+    if st.injected_pid == Some(pid) {
+        st.injected_pid = None;
     }
 }
 
@@ -418,8 +456,24 @@ pub fn overlay_attach(app: AppHandle, pid: u32, layout_flags: Option<u32>) -> Re
 
     match mode {
         OverlayMode::Inject => {
-            inject_dll(&app, pid)?;
-            // Sampler starts publishing for this PID on its next tick.
+            // IDEMPOTENCY: the frontend polls the foreground app and re-issues
+            // attach for the *same* PID to keep the layout current. Injecting on
+            // every such call would `LoadLibraryW` repeatedly and leave the module
+            // accumulating/resident. So inject only when this PID isn't already the
+            // injected one; otherwise this is a cheap "update layout flags" path —
+            // we push the new flags through the existing shared block (which the
+            // overlay reads) and the sampler keeps publishing, no re-injection.
+            let already_injected = STATE.lock().injected_pid == Some(pid);
+            if !already_injected {
+                inject_dll(&app, pid)?;
+                // Record the resident PID so subsequent attaches for it are no-ops.
+                STATE.lock().injected_pid = Some(pid);
+            } else {
+                // Flags-only update: stamp the latest layout into the shared block
+                // now so it takes effect without waiting for the next sampler tick.
+                push_layout_flags();
+            }
+            // Sampler (re)publishes for this PID on its next tick either way.
             STATE.lock().target_pid = Some(pid);
             Ok(OverlayStatus {
                 // Distinct from the probe's "可注入": the DLL is now injected and
@@ -453,10 +507,22 @@ pub fn overlay_attach(app: AppHandle, pid: u32, layout_flags: Option<u32>) -> Re
 /// the sampler stops writing (sets `enabled = 0`). Idempotent.
 #[tauri::command]
 pub fn overlay_detach(_app: AppHandle, pid: u32) -> Result<(), String> {
-    // Clear the target first so the sampler immediately stops publishing for it.
+    // Clear the sampler target first so it immediately stops publishing for it.
     clear_target_if(pid);
     write_disabled();
-    eject_dll(pid)
+    let result = eject_dll(pid);
+    // Clear the injected-PID tracking for this PID regardless of the eject result.
+    // On success the module is gone; if the eject failed (e.g. the process already
+    // exited, or FreeLibrary errored) we still must not leave this PID marked as
+    // injected forever — otherwise a later attach would be wrongly skipped as
+    // idempotent and never re-inject. Clearing here lets re-attach retry cleanly.
+    {
+        let mut st = STATE.lock();
+        if st.injected_pid == Some(pid) {
+            st.injected_pid = None;
+        }
+    }
+    result
 }
 
 /// Report the overlay status for a specific `pid`, or — when `pid` is `None` — for

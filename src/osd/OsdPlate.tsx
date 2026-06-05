@@ -64,11 +64,11 @@ export function OsdPlate({ metrics, style, scale, opacity, rounded, data }: OsdP
     >
       {groups.map((g) => (
         <div key={g.cat} className={cn("flex items-center gap-1.5", vertical && "w-full")}>
-          <span className={cn("text-[0.78em] font-bold uppercase tracking-wide", CAT_COLOR[g.cat])}>
+          <span className={cn("nums font-bold uppercase tracking-wide", CAT_COLOR[g.cat])}>
             {CAT_LABEL[g.cat]}
           </span>
           {g.items.map((def) => (
-            <span key={def.key} className="nums tabular-nums text-white/95">
+            <span key={def.key} className="nums tabular-nums font-semibold text-white/95">
               {def.value(data) ?? "—"}
             </span>
           ))}

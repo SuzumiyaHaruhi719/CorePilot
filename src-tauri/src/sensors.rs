@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use once_cell::sync::Lazy;
@@ -32,7 +32,7 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD};
 use windows::Win32::System::Performance::{
-    PdhAddEnglishCounterW, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
+    PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
     PdhGetFormattedCounterValue, PdhOpenQueryW, PDH_FMT_COUNTERVALUE,
     PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA,
 };
@@ -100,87 +100,132 @@ struct SidecarReadings {
 
 /// Shared, thread-safe store for the most recent sidecar readings.
 static SIDECAR: Lazy<Mutex<SidecarReadings>> = Lazy::new(|| Mutex::new(SidecarReadings::default()));
-/// Guards the one-time sidecar spawn so we never launch more than one process.
-static SIDECAR_SPAWN: Once = Once::new();
+/// Whether a sidecar process is currently believed to be alive.
+///
+/// Set `true` (via a CAS) by [`ensure_sidecar`] when it wins the right to spawn,
+/// and reset to `false` by the reader thread when the sidecar's stdout closes
+/// (crash / EOF). Unlike a `Once`, this lets a later `ensure_sidecar()` re-spawn
+/// the sidecar after it dies, instead of leaving fans + sensors dead until the
+/// app restarts. The CAS keeps spawning idempotent (no double-spawn).
+static SIDECAR_ALIVE: AtomicBool = AtomicBool::new(false);
 
-/// Spawn the `sensord` sidecar exactly once and read its line-delimited JSON on
-/// a background thread, updating [`SIDECAR`] with each parsed sample.
+/// Ensure the `sensord` sidecar is running, spawning it if not, and read its
+/// line-delimited JSON on a background thread, updating [`SIDECAR`] with each
+/// parsed sample.
+///
+/// Idempotent and respawn-capable: a CAS on [`SIDECAR_ALIVE`] guarantees at most
+/// one live sidecar at a time (concurrent / repeated calls while one is running
+/// are no-ops), yet once the sidecar crashes or hits EOF the reader thread
+/// clears the flag, so a later call here will spawn a fresh process instead of
+/// leaving fans + sensors dead until the app restarts.
 ///
 /// Resolves the sidecar next to the current executable (where Tauri places
 /// `externalBin`). If the file is missing, spawning fails, or stdout can't be
-/// captured, this returns quietly and the four fields simply stay `None` — the
-/// app keeps running with power/temperature unavailable. The reader thread never
-/// panics: parse failures are ignored and EOF/errors end the thread cleanly.
+/// captured, this returns quietly (resetting the flag so a future call may
+/// retry) and the four fields simply stay `None` — the app keeps running with
+/// power/temperature unavailable. The reader thread never panics: parse failures
+/// are ignored and EOF/errors end the thread cleanly.
 pub fn ensure_sidecar() {
-    SIDECAR_SPAWN.call_once(|| {
-        // Resolve `<dir of current exe>/sensord.exe`.
-        let exe_path = match std::env::current_exe() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let Some(dir) = exe_path.parent() else {
-            return;
-        };
-        let sidecar = dir.join(SIDECAR_EXE);
-        if !sidecar.exists() {
-            // Graceful: no sidecar bundled/built — leave readings as None.
+    // Claim the right to spawn. If another spawn is live (or in progress), the
+    // CAS fails and we return — keeping spawning idempotent / no double-spawn.
+    if SIDECAR_ALIVE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    // Helper: release the alive-flag on any failure path so a subsequent
+    // `ensure_sidecar()` call is free to retry the spawn.
+    let release = || SIDECAR_ALIVE.store(false, Ordering::SeqCst);
+
+    // Resolve `<dir of current exe>/sensord.exe`.
+    let exe_path = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => {
+            release();
             return;
         }
+    };
+    let Some(dir) = exe_path.parent() else {
+        release();
+        return;
+    };
+    let sidecar = dir.join(SIDECAR_EXE);
+    if !sidecar.exists() {
+        // Graceful: no sidecar bundled/built — leave readings as None.
+        release();
+        return;
+    }
 
-        let child = Command::new(&sidecar)
-            .stdout(Stdio::piped())
-            // Piped (not null) so the fan engine can send `set`/`auto` commands
-            // to the sidecar over stdin (see `crate::fan`).
-            .stdin(Stdio::piped())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+    let child = Command::new(&sidecar)
+        .stdout(Stdio::piped())
+        // Piped (not null) so the fan engine can send `set`/`auto` commands
+        // to the sidecar over stdin (see `crate::fan`).
+        .stdin(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
 
-        let mut child = match child {
-            Ok(c) => c,
-            Err(_) => return, // spawn failed (e.g. blocked) — stay graceful.
-        };
-
-        // Hand the sidecar's stdin to the fan engine (used as the fan-control
-        // actuator). Taken before the child moves into the reader thread.
-        if let Some(stdin) = child.stdin.take() {
-            crate::fan::register_sidecar_stdin(stdin);
+    let mut child = match child {
+        Ok(c) => c,
+        Err(_) => {
+            release();
+            return; // spawn failed (e.g. blocked) — stay graceful.
         }
+    };
 
-        let Some(stdout) = child.stdout.take() else {
-            // Without stdout we can't read anything; let the child run/exit on
-            // its own and keep readings None.
-            return;
-        };
+    // Hand the sidecar's stdin to the fan engine (used as the fan-control
+    // actuator). Taken before the child moves into the reader thread.
+    if let Some(stdin) = child.stdin.take() {
+        crate::fan::register_sidecar_stdin(stdin);
+    }
 
-        // Detached reader thread: owns the child handle so it isn't dropped (a
-        // dropped Child does not kill the process, but keeping it lets the OS
-        // reap it and ties the lifetime to this thread).
-        std::thread::Builder::new()
-            .name("sensord-reader".into())
-            .spawn(move || {
-                let reader = BufReader::new(stdout);
-                for line in reader.lines() {
-                    let Ok(line) = line else {
-                        break; // read error / pipe closed.
-                    };
-                    if let Some(readings) = parse_sidecar_line(&line) {
-                        *SIDECAR.lock() = readings;
-                    }
-                    // The same line also carries fan / temp / control arrays for
-                    // the fan engine; let it parse what it needs.
-                    crate::fan::ingest_line(&line);
+    let Some(stdout) = child.stdout.take() else {
+        // Without stdout we can't read anything; tear the child down and release
+        // so a later call can respawn a sidecar we can actually read.
+        let _ = child.kill();
+        let _ = child.wait();
+        crate::fan::clear();
+        release();
+        return;
+    };
+
+    // Detached reader thread: owns the child handle so it isn't dropped (a
+    // dropped Child does not kill the process, but keeping it lets the OS
+    // reap it and ties the lifetime to this thread).
+    let spawned = std::thread::Builder::new()
+        .name("sensord-reader".into())
+        .spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                let Ok(line) = line else {
+                    break; // read error / pipe closed.
+                };
+                if let Some(readings) = parse_sidecar_line(&line) {
+                    *SIDECAR.lock() = readings;
                 }
-                // Sidecar stopped emitting (crashed or exited): clear readings so
-                // the UI shows power/temp as unavailable ("—") rather than stale
-                // last-known values.
-                *SIDECAR.lock() = SidecarReadings::default();
-                crate::fan::clear();
-                // stdout closed → sidecar exited. Reap it; ignore the result.
-                let _ = child.wait();
-            })
-            .ok();
-    });
+                // The same line also carries fan / temp / control arrays for
+                // the fan engine; let it parse what it needs.
+                crate::fan::ingest_line(&line);
+            }
+            // Sidecar stopped emitting (crashed or exited): clear readings so
+            // the UI shows power/temp as unavailable ("—") rather than stale
+            // last-known values.
+            *SIDECAR.lock() = SidecarReadings::default();
+            crate::fan::clear();
+            // stdout closed → sidecar exited. Reap it; ignore the result.
+            let _ = child.wait();
+            // Mark dead LAST so a concurrent `ensure_sidecar()` that wins the CAS
+            // after this point spawns a genuinely fresh process.
+            SIDECAR_ALIVE.store(false, Ordering::SeqCst);
+        });
+
+    // If even the reader thread failed to start, don't leak the flag (the child
+    // would otherwise run unmonitored with the flag stuck true forever).
+    if spawned.is_err() {
+        release();
+    }
 }
 
 /// Parse one compact JSON line from the sidecar into [`SidecarReadings`].
@@ -291,6 +336,9 @@ impl PdhQuery {
             let (Some(disk_read), Some(disk_write), Some(disk_time), Some(gpu_util)) =
                 (disk_read, disk_write, disk_time, gpu_util)
             else {
+                // Essential counters missing: close the query we opened above so
+                // its handle isn't leaked, then report PDH as unavailable.
+                let _ = PdhCloseQuery(query);
                 return None;
             };
 

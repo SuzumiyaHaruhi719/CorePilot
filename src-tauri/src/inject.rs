@@ -9,6 +9,8 @@
 //! `CreateRemoteThread(LoadLibraryW)` injection — in ~120 lines we fully control.
 //!
 //! Technique (inject):
+//!   0. If the module is already loaded in the target (ToolHelp snapshot), return
+//!      early — injection is idempotent and never bumps the load count twice.
 //!   1. `OpenProcess` with create-thread + VM rights.
 //!   2. `VirtualAllocEx` a buffer for the DLL path (UTF-16, NUL-terminated).
 //!   3. `WriteProcessMemory` the path into it.
@@ -143,6 +145,18 @@ fn run_remote_thread(
 /// target — surfaced as an error.
 pub fn inject(pid: u32, dll_path: &Path) -> Result<(), String> {
     let proc = open_for_inject(pid)?;
+
+    // IDEMPOTENCY GUARD (defense in depth): if our overlay module is already
+    // loaded in the target, do not LoadLibraryW it again. Re-injecting would bump
+    // the module's load count and leave it resident across a single detach, which
+    // is the DLL leak this fixes. The caller (`overlay_inject`) already tracks the
+    // injected PID, but guarding here keeps the mechanism itself non-accumulating
+    // even if it is ever driven from another path. Match on the DLL's file name.
+    if let Some(file_name) = dll_path.file_name().and_then(|n| n.to_str()) {
+        if find_remote_module(pid, file_name).is_some() {
+            return Ok(());
+        }
+    }
 
     // Encode the absolute path as a NUL-terminated wide string and size the
     // remote buffer in BYTES.

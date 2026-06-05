@@ -79,6 +79,19 @@ interface FanProfileState {
   deleteProfile: (id: string) => void;
   /** Push the current config set to the backend engine. */
   push: () => void;
+  /** Last backend apply/push failure (localised), or null when the last apply
+   *  succeeded. Surfaced in the Fan page so a failed apply isn't silent. */
+  lastError: string | null;
+  /** Clear the surfaced apply error. */
+  clearError: () => void;
+}
+
+/** Best-effort message from a rejected `invoke` (Tauri rejects with a string,
+ *  but be defensive for Error/unknown shapes too). */
+function applyErrorMessage(e: unknown): string {
+  if (typeof e === "string" && e.trim()) return e;
+  if (e instanceof Error && e.message) return e.message;
+  return "未知错误";
 }
 
 /** Fan configurations auto-persist (tauri-store) and push to the backend engine
@@ -89,12 +102,17 @@ export const useFanProfiles = create<FanProfileState>()(
       configs: {},
       labels: {},
       applyOnStartup: false,
+      lastError: null,
+      clearError: () => set({ lastError: null }),
       setConfig: (controlId, patch) => {
         const prev = get().configs[controlId] ?? defaultConfig();
         const next = { ...prev, ...patch };
         const configs = { ...get().configs, [controlId]: next };
         set({ configs });
-        api.fanSetConfig(toBackend(configs)).catch(() => undefined);
+        api
+          .fanSetConfig(toBackend(configs))
+          .then(() => set({ lastError: null }))
+          .catch((e) => set({ lastError: applyErrorMessage(e) }));
       },
       setApplyOnStartup: (applyOnStartup) => set({ applyOnStartup }),
       setLabel: (controlId, label) => {
@@ -116,7 +134,10 @@ export const useFanProfiles = create<FanProfileState>()(
         if (!profile) return;
         const configs = cloneConfigs(profile.configs);
         set({ configs, activeProfileId: id });
-        api.fanSetConfig(toBackend(configs)).catch(() => undefined);
+        api
+          .fanSetConfig(toBackend(configs))
+          .then(() => set({ lastError: null }))
+          .catch((e) => set({ lastError: applyErrorMessage(e) }));
       },
       deleteProfile: (id) =>
         set((s) => ({
@@ -124,9 +145,18 @@ export const useFanProfiles = create<FanProfileState>()(
           activeProfileId: s.activeProfileId === id ? null : s.activeProfileId,
         })),
       push: () => {
-        api.fanSetConfig(toBackend(get().configs)).catch(() => undefined);
+        api
+          .fanSetConfig(toBackend(get().configs))
+          .then(() => set({ lastError: null }))
+          .catch((e) => set({ lastError: applyErrorMessage(e) }));
       },
     }),
-    { name: "corepilot-fan-profiles", version: 1, storage: createJSONStorage(() => tauriStorage) },
+    {
+      name: "corepilot-fan-profiles",
+      version: 1,
+      storage: createJSONStorage(() => tauriStorage),
+      // `lastError` is a transient session signal — never persist it.
+      partialize: ({ lastError: _lastError, clearError: _clearError, ...rest }) => rest,
+    },
   ),
 );

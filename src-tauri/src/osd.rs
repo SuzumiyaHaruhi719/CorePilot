@@ -133,28 +133,80 @@ pub fn osd_set_visible(app: AppHandle, visible: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Smallest overlay window we will ever set (logical px). Below this the plate
+/// would be unusable and a 0/negative size is rejected by the WM anyway.
+const OSD_MIN_DIM: f64 = 1.0;
+/// Hard cap on the overlay's width/height (logical px) regardless of what the
+/// monitor reports. A hostile/erroneous IPC caller must never be able to size
+/// this always-on-top, click-through window into a screen-covering surface.
+const OSD_MAX_DIM: f64 = 10_000.0;
+/// Hard cap on the magnitude of the overlay's logical x/y. Generous enough for
+/// any real multi-monitor layout, small enough that the window can never be
+/// flung to an absurd virtual-desktop coordinate.
+const OSD_MAX_COORD: f64 = 100_000.0;
+
+/// Resolve the upper bound for the overlay's width/height. Prefer the primary
+/// monitor's *physical* size converted to logical px (so the overlay can never
+/// exceed the actual screen) but never trust it above [`OSD_MAX_DIM`], and fall
+/// back to the hard cap when no monitor can be queried.
+fn osd_max_dim(win: &tauri::WebviewWindow) -> f64 {
+    let monitor_dim = win
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| {
+            let scale = m.scale_factor();
+            let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+            let size = m.size();
+            (size.width.max(size.height) as f64) / scale
+        })
+        .filter(|d| d.is_finite() && *d >= OSD_MIN_DIM);
+    match monitor_dim {
+        Some(d) => d.min(OSD_MAX_DIM),
+        None => OSD_MAX_DIM,
+    }
+}
+
 /// Size + position the overlay window in logical (DPI-independent) pixels. The
 /// frontend calls this after measuring the metrics plate so the window hugs the
 /// plate at the chosen corner / free position.
+///
+/// `x`/`y`/`w`/`h` arrive straight off the IPC boundary, so they are untrusted:
+/// non-finite values (NaN/±Inf) are rejected outright and finite values are
+/// clamped to sane bounds before being applied. This keeps a buggy or hostile
+/// caller from turning the always-on-top, click-through overlay into a
+/// screen-covering window or flinging it off into the virtual-desktop void.
 #[tauri::command]
 pub fn osd_set_bounds(app: AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
     use std::sync::atomic::Ordering;
     use tauri::{LogicalPosition, LogicalSize};
+    // Reject any non-finite input without touching the window. Returning Ok (not
+    // Err) keeps the per-frame caller quiet; a bad frame is simply ignored.
+    if !x.is_finite() || !y.is_finite() || !w.is_finite() || !h.is_finite() {
+        return Ok(());
+    }
     if let Some(win) = app.get_webview_window(OSD_LABEL) {
+        let max_dim = osd_max_dim(&win);
+        // Clamp size into [MIN, max_dim] and position into the coordinate cap.
+        let cw = w.clamp(OSD_MIN_DIM, max_dim);
+        let ch = h.clamp(OSD_MIN_DIM, max_dim);
+        let cx = x.clamp(-OSD_MAX_COORD, OSD_MAX_COORD);
+        let cy = y.clamp(-OSD_MAX_COORD, OSD_MAX_COORD);
+
         // Only resize — and re-assert click-through, which WebView2 resets on a
         // *resize*, not a move — when the plate size actually changed. During a
         // free-position slider drag the size is constant, so every frame does just
         // the cheap `set_position`; that is what keeps the live follow smooth
         // instead of churning a resize + EnumChildWindows 60×/s.
-        let wk = w.max(1.0).round() as u64;
-        let hk = h.max(1.0).round() as u64;
+        let wk = cw.round() as u64;
+        let hk = ch.round() as u64;
         let key = (wk << 32) | (hk & 0xFFFF_FFFF);
         if LAST_OSD_SIZE.swap(key, Ordering::Relaxed) != key {
-            let _ = win.set_size(LogicalSize::new(w.max(1.0), h.max(1.0)));
+            let _ = win.set_size(LogicalSize::new(cw, ch));
             let _ = win.set_ignore_cursor_events(true);
             force_click_through(hwnd_of(&win));
         }
-        let _ = win.set_position(LogicalPosition::new(x, y));
+        let _ = win.set_position(LogicalPosition::new(cx, cy));
     }
     Ok(())
 }

@@ -72,6 +72,7 @@ function App() {
   // Apply saved fan configs on launch when "apply on startup" is enabled, so
   // custom fan curves take effect at boot without opening the Fan page. Storage
   // is async (tauri-plugin-store) → wait for hydration before reading state.
+  // A failed push records `lastError` in the store, surfaced on the Fan page.
   useEffect(() => {
     const applyFans = () => {
       if (useFanProfiles.getState().applyOnStartup) {

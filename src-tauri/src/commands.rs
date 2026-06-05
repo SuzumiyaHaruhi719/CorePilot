@@ -132,6 +132,7 @@ pub fn get_metrics(state: State<AppState>) -> Metrics {
 /// a `u64` before delegating to the affinity setter.
 #[tauri::command]
 pub fn set_affinity(pid: u32, mask: String) -> CoreResult<()> {
+    process::guard_critical_pid(pid)?;
     let mask: u64 = mask
         .parse()
         .map_err(|_| crate::error::CoreError::from(format!("invalid affinity mask: {mask}")))?;
@@ -149,6 +150,7 @@ pub fn get_process_affinity(pid: u32) -> CoreResult<AffinityInfo> {
 
 #[tauri::command]
 pub fn set_priority(pid: u32, class: u32) -> CoreResult<()> {
+    process::guard_critical_pid(pid)?;
     affinity::set_priority(pid, class)
 }
 
@@ -179,6 +181,7 @@ pub fn flush_dns() -> CoreResult<()> {
 
 #[tauri::command]
 pub fn end_task(pid: u32) -> CoreResult<()> {
+    process::guard_critical_pid(pid)?;
     process::kill(pid)
 }
 
@@ -197,6 +200,20 @@ pub fn reveal_in_explorer(path: String) -> CoreResult<()> {
     let p = path.trim();
     if p.is_empty() {
         return Err("该进程没有可用的文件路径（受保护/系统进程）".into());
+    }
+    // We build the explorer argument with raw_arg (the path may contain spaces),
+    // wrapping the path in double quotes. Because the quoting is unescaped, a path
+    // containing a double quote, control char, or newline could break out of the
+    // quoted argument and inject additional `explorer.exe` arguments. Reject any
+    // such path before constructing the command.
+    if p.contains('"') || p.chars().any(|c| c.is_control()) {
+        return Err("文件路径包含非法字符".into());
+    }
+    // Require the file to actually exist; this both gives a clearer error for
+    // stale paths and ensures we never hand explorer an arbitrary attacker-shaped
+    // string for a nonexistent target.
+    if !std::path::Path::new(p).exists() {
+        return Err("文件路径不存在".into());
     }
     // `explorer /select,"<full path>"` — pass verbatim via raw_arg so the path
     // (which may contain spaces) is quoted correctly for explorer's parser.

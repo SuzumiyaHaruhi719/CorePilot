@@ -29,6 +29,14 @@ import { api, type GpuOcInfo, type GpuOcSettings } from "../lib/ipc";
 import { useGpuProfiles, type GpuProfile } from "../store/gpuProfiles";
 import { useSettings } from "../store/settings";
 
+/**
+ * Lowest manual fan speed the UI lets you request, % of max. Mirrors the backend
+ * `FAN_SPEED_FLOOR` in `gpu.rs`: a manual 0% would pin the fans fully off and let
+ * the GPU overheat. "Auto" is the separate toggle (sends no manual value), so the
+ * manual slider floor is safe to enforce here too.
+ */
+const MANUAL_FAN_FLOOR_PCT = 20;
+
 function getErrorMessage(e: unknown): string {
   if (typeof e === "string") return e;
   if (e instanceof Error) return e.message;
@@ -168,7 +176,7 @@ export function GpuTune() {
     setMemOffOn(s.memOffsetMhz != null);
     if (s.memOffsetMhz != null) setMemOffset(s.memOffsetMhz);
     setFanAuto(s.fanSpeedPct == null);
-    if (s.fanSpeedPct != null) setFanPct(s.fanSpeedPct);
+    if (s.fanSpeedPct != null) setFanPct(Math.max(MANUAL_FAN_FLOOR_PCT, s.fanSpeedPct));
     setTempOn(s.tempLimitC != null);
     if (s.tempLimitC != null) setTempLimit(s.tempLimitC);
     else if (fallback && fallback.tempLimitC > 0) setTempLimit(fallback.tempLimitC);
@@ -197,7 +205,7 @@ export function GpuTune() {
     if (!info || !info.available || seeded.current) return;
     seeded.current = true;
     setPowerW(Math.round(info.powerLimitW));
-    setFanPct(info.fanSpeedPct > 0 ? info.fanSpeedPct : 50);
+    setFanPct(Math.max(MANUAL_FAN_FLOOR_PCT, info.fanSpeedPct > 0 ? info.fanSpeedPct : 50));
     if (info.tempLimitC > 0) setTempLimit(info.tempLimitC);
     const active = profiles.find((p) => p.id === activeId);
     if (active) loadDraft(active.settings, info);
@@ -441,7 +449,7 @@ export function GpuTune() {
               <Slider
                 label="手动转速"
                 value={fanPct}
-                min={0}
+                min={MANUAL_FAN_FLOOR_PCT}
                 max={100}
                 unit="%"
                 disabled={fanAuto || !info?.supportsFanControl}

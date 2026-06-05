@@ -1,6 +1,6 @@
 //! Process enumeration with live metrics.
 
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -21,8 +21,8 @@ use windows::Win32::Security::{
 use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN;
 use windows::Win32::System::Threading::{
     GetProcessAffinityMask, GetProcessHandleCount, GetProcessTimes, IsWow64Process2, OpenProcess,
-    OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_TERMINATE,
-    TerminateProcess,
+    OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_TERMINATE, TerminateProcess,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
@@ -90,6 +90,77 @@ pub struct ProcInfo {
 /// PDH success return code (`ERROR_SUCCESS`).
 const PDH_SUCCESS: u32 = 0;
 
+// ---------------------------------------------------------------------------
+// Critical-process guard (shared by end_task / set_priority / set_affinity).
+//
+// The app runs ELEVATED, so the IPC commands can open and mutate (or terminate)
+// any process — including the OS kernel and the user-mode boot/security
+// processes whose death blue-screens or hard-hangs Windows. We refuse to
+// operate on those regardless of what the frontend sends.
+// ---------------------------------------------------------------------------
+
+/// PIDs that must never be touched: 0 (System Idle) and 4 (System / kernel).
+const CRITICAL_PIDS: &[u32] = &[0, 4];
+
+/// Image names (lowercase) of user-mode processes critical to Windows; killing,
+/// repriotizing, or reaffinitizing any of these can hang or crash the machine.
+const CRITICAL_PROCESS_NAMES: &[&str] = &[
+    "system",
+    "registry",
+    "smss.exe",
+    "csrss.exe",
+    "wininit.exe",
+    "services.exe",
+    "lsass.exe",
+    "winlogon.exe",
+];
+
+/// Resolve a PID's executable file name (e.g. `"lsass.exe"`), lowercased.
+/// `None` when the process can't be opened/queried. Never panics.
+fn image_name_lower(pid: u32) -> Option<String> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false.into(), pid).ok()?;
+        let mut buf = [0u16; 260]; // MAX_PATH
+        let mut len = buf.len() as u32; // in/out: capacity in, written length out
+        let ok = QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len)
+            .is_ok();
+        let _ = CloseHandle(handle);
+        if !ok || len == 0 {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
+        let name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    }
+}
+
+/// Reject any operation targeting a process critical to Windows stability.
+///
+/// Blocks PIDs 0 and 4 outright, and any process whose image name matches the
+/// case-insensitive [`CRITICAL_PROCESS_NAMES`] list (smss/csrss/wininit/
+/// services/lsass/winlogon). Returns a clear `Err` so the command surface fails
+/// loudly instead of silently destabilizing the OS. Used as the single gate at
+/// every mutating command entry point.
+pub fn guard_critical_pid(pid: u32) -> CoreResult<()> {
+    if CRITICAL_PIDS.contains(&pid) {
+        return Err(CoreError::Msg(format!(
+            "拒绝操作受保护的系统进程 (PID {pid})"
+        )));
+    }
+    if let Some(name) = image_name_lower(pid) {
+        if CRITICAL_PROCESS_NAMES.iter().any(|c| *c == name) {
+            return Err(CoreError::Msg(format!(
+                "拒绝操作关键系统进程: {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Persistent PDH query for per-process GPU utilization.
 ///
 /// PDH exposes `\GPU Engine(*)\Utilization Percentage` with one wildcard
@@ -128,6 +199,8 @@ impl GpuQuery {
                 .collect();
             let mut util = PDH_HCOUNTER::default();
             if PdhAddEnglishCounterW(query, PCWSTR(path.as_ptr()), 0, &mut util) != PDH_SUCCESS {
+                // Close the query we just opened before bailing, or the handle leaks.
+                let _ = PdhCloseQuery(query);
                 return None;
             }
 
@@ -393,6 +466,8 @@ fn open_gpu_engine_query() -> Option<GpuEngineQuery> {
             .collect();
         let mut util = PDH_HCOUNTER::default();
         if PdhAddEnglishCounterW(query, PCWSTR(path.as_ptr()), 0, &mut util) != PDH_SUCCESS {
+            // Close the query we just opened before bailing, or the handle leaks.
+            let _ = PdhCloseQuery(query);
             return None;
         }
         let _ = PdhCollectQueryData(query);
@@ -604,8 +679,9 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
     out
 }
 
-/// Terminate a process (End task).
+/// Terminate a process (End task). Refuses critical system processes.
 pub fn kill(pid: u32) -> CoreResult<()> {
+    guard_critical_pid(pid)?;
     unsafe {
         let handle = OpenProcess(PROCESS_TERMINATE, false.into(), pid)?;
         let result = TerminateProcess(handle, 1);

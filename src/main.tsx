@@ -18,7 +18,15 @@ function logFatal(label: string, detail: string) {
   if (isOsd) return; // never paint an error plate over the transparent overlay
   const el = document.getElementById("root");
   if (el && !el.querySelector("[data-fatal]")) {
-    el.innerHTML = `<pre data-fatal style="color:#fbb;background:#1a0f12;padding:16px;white-space:pre-wrap;font:12px ui-monospace,monospace;height:100%;overflow:auto;margin:0">CorePilot — ${label}\n\n${detail}</pre>`;
+    // Build the error plate with safe DOM APIs. The label/detail are set via
+    // `textContent` so an attacker-controlled error message can NEVER be parsed
+    // as HTML (this webview is elevated and can call privileged `invoke`).
+    const pre = document.createElement("pre");
+    pre.setAttribute("data-fatal", "");
+    pre.style.cssText =
+      "color:#fbb;background:#1a0f12;padding:16px;white-space:pre-wrap;font:12px ui-monospace,monospace;height:100%;overflow:auto;margin:0";
+    pre.textContent = `CorePilot — ${label}\n\n${detail}`;
+    el.replaceChildren(pre);
   }
 }
 window.addEventListener("error", (e) => logFatal(e.message, (e.error && e.error.stack) || ""));
