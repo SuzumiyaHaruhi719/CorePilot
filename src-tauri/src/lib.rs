@@ -213,6 +213,8 @@ pub fn run() {
             tray::set_close_to_tray,
             commands::set_acrylic,
             commands::set_window_opacity,
+            commands::get_autostart,
+            commands::set_autostart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

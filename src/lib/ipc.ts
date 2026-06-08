@@ -436,6 +436,11 @@ export const api = {
   setAcrylic: (enabled: boolean) => invoke<void>("set_acrylic", { enabled }),
   /** Set whole-window opacity (30–100%). Auto-applied on change + persisted. */
   setWindowOpacity: (percent: number) => invoke<void>("set_window_opacity", { percent }),
+  /** Whether "开机自启动" is on (a logon scheduled task exists). */
+  getAutostart: () => invoke<boolean>("get_autostart"),
+  /** Enable/disable launching CorePilot elevated at Windows logon (scheduled task,
+   *  no UAC prompt). Source of truth is the OS task, not a persisted setting. */
+  setAutostart: (enable: boolean) => invoke<void>("set_autostart", { enable }),
 };
 
 /**

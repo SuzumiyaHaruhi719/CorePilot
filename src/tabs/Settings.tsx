@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
 import { Segmented } from "../components/ui/Segmented";
@@ -571,6 +571,16 @@ export function Settings() {
   const tf = useTf();
   const [stylesOpen, setStylesOpen] = useState(false);
   const activeStyle = THEME_STYLES.find((s) => s.id === settings.themeStyle);
+  // 开机自启动 — reflects the actual OS scheduled task (not a persisted setting):
+  // query it on mount, write through on toggle (optimistic, revert on failure).
+  const [autostartOn, setAutostartOn] = useState(false);
+  useEffect(() => {
+    api.getAutostart().then(setAutostartOn).catch(() => undefined);
+  }, []);
+  const toggleAutostart = (v: boolean) => {
+    setAutostartOn(v);
+    api.setAutostart(v).catch(() => setAutostartOn(!v));
+  };
 
   return (
     <>
@@ -714,6 +724,13 @@ export function Settings() {
               checked={settings.closeToTray}
               onChange={(value) => settings.update({ closeToTray: value })}
             />
+          </SettingRow>
+
+          <SettingRow
+            title="开机自启动"
+            desc="登录 Windows 时自动以管理员身份启动（计划任务方式，不弹 UAC）；配合“关闭后保留到托盘”可在开机后静默后台运行"
+          >
+            <Toggle checked={autostartOn} onChange={(value) => toggleAutostart(value)} />
           </SettingRow>
 
           <SettingRow title="语言 / Language">

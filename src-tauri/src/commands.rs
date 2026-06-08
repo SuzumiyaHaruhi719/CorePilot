@@ -270,3 +270,97 @@ pub async fn pick_exe_files() -> Vec<String> {
         .map(|files| files.iter().map(|f| f.file_name().to_lowercase()).collect())
         .unwrap_or_default()
 }
+
+/// Scheduled-task name used for "开机自启动". A logon-triggered task with HIGHEST
+/// privileges is the correct autostart mechanism for an elevated
+/// (requireAdministrator) app: it launches CorePilot ELEVATED at logon with NO UAC
+/// prompt. A plain `HKCU\…\Run` entry can't auto-elevate a requireAdministrator app,
+/// so it would instead pop a UAC prompt (or be blocked) on every boot.
+const AUTOSTART_TASK: &str = "CorePilotAutostart";
+
+/// Whether "开机自启动" is currently enabled (i.e. the logon scheduled task exists).
+#[tauri::command]
+pub fn get_autostart() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("schtasks")
+            .args(["/query", "/tn", AUTOSTART_TASK])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW — never flash a console
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+/// Enable/disable "开机自启动" by creating/deleting a logon-triggered, highest-
+/// privileges scheduled task that runs THIS executable — so CorePilot launches
+/// elevated at logon with no UAC prompt. Pairs with "关闭后保留到托盘" for a silent
+/// background start.
+#[tauri::command]
+pub fn set_autostart(enable: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const NO_WINDOW: u32 = 0x0800_0000;
+        if enable {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let exe = exe.to_string_lossy().to_string();
+            // A real Windows path can't contain a double quote; refuse anything odd
+            // so we never inject extra tokens into the schtasks command line.
+            if exe.contains('"') {
+                return Err("可执行文件路径包含非法字符".into());
+            }
+            // schtasks /tr needs the program path quoted (Program Files has spaces).
+            // raw_arg writes the command line verbatim, so we emit `/tr "\"<exe>\""`
+            // → schtasks stores the action as a quoted path. (Command's own arg
+            // escaping of embedded quotes is version-fragile, hence raw_arg.)
+            let mut cmd = std::process::Command::new("schtasks");
+            cmd.raw_arg("/create")
+                .raw_arg("/f")
+                .raw_arg("/tn")
+                .raw_arg(AUTOSTART_TASK)
+                .raw_arg("/tr")
+                .raw_arg(format!("\"\\\"{exe}\\\"\""))
+                .raw_arg("/sc")
+                .raw_arg("onlogon")
+                .raw_arg("/rl")
+                .raw_arg("highest")
+                .creation_flags(NO_WINDOW);
+            let out = cmd.output().map_err(|e| format!("创建开机自启动任务失败: {e}"))?;
+            if !out.status.success() {
+                return Err(format!(
+                    "创建开机自启动任务失败: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+        } else {
+            let out = std::process::Command::new("schtasks")
+                .args(["/delete", "/f", "/tn", AUTOSTART_TASK])
+                .creation_flags(NO_WINDOW)
+                .output()
+                .map_err(|e| format!("删除开机自启动任务失败: {e}"))?;
+            // Deleting a task that doesn't exist is fine (idempotent "off").
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let missing = err.contains("does not exist")
+                    || err.contains("cannot find")
+                    || err.contains("找不到")
+                    || err.contains("不存在");
+                if !missing {
+                    return Err(format!("删除开机自启动任务失败: {}", err.trim()));
+                }
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = enable;
+        Ok(())
+    }
+}
