@@ -71,6 +71,8 @@ export function CoreAssignment() {
 
   const optimizationEnabled = useUi((s) => s.optimizationEnabled);
   const toggleOptimization = useUi((s) => s.toggleOptimization);
+  const optimizeOnStartup = useUi((s) => s.optimizeOnStartup);
+  const setOptimizeOnStartup = useUi((s) => s.setOptimizeOnStartup);
 
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("cpu");
@@ -600,6 +602,8 @@ export function CoreAssignment() {
           fullMask={fullMask}
           optimizationEnabled={optimizationEnabled}
           onToggleOptimization={handleToggleOptimization}
+          optimizeOnStartup={optimizeOnStartup}
+          onToggleOptimizeOnStartup={() => setOptimizeOnStartup(!optimizeOnStartup)}
           onExport={exportGroups}
           onImport={importGroupsFromFile}
         />

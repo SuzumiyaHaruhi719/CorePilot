@@ -122,6 +122,21 @@ function App() {
     };
   }, []);
 
+  // Auto-enable affinity optimization on launch if the user opted in (GroupRail's
+  // "auto-apply on next launch"). The ui store persists only `optimizeOnStartup`,
+  // so wait for hydration before reading it, then flip on the session's
+  // optimization — the affinity enforcer (above) starts enforcing immediately.
+  useEffect(() => {
+    const applyOpt = () => {
+      if (useUi.getState().optimizeOnStartup) useUi.getState().setOptimization(true);
+    };
+    if (useUi.persist.hasHydrated()) {
+      applyOpt();
+      return;
+    }
+    return useUi.persist.onFinishHydration(applyOpt);
+  }, []);
+
   // Re-show the OSD overlay on launch if it was left enabled OR desktop mode is
   // on (the overlay window must exist for either; store is async → wait for it).
   useEffect(() => {

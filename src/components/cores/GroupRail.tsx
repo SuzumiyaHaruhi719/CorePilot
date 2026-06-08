@@ -1,4 +1,4 @@
-import { Download, ListTree, Plus, Power, Upload } from "lucide-react";
+import { Check, Download, ListTree, Plus, Power, Upload } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { CSSProperties } from "react";
 import { cn } from "../../lib/cn";
@@ -15,6 +15,8 @@ interface GroupRailProps {
   fullMask: bigint;
   optimizationEnabled: boolean;
   onToggleOptimization: () => void;
+  optimizeOnStartup: boolean;
+  onToggleOptimizeOnStartup: () => void;
   onExport: () => void;
   onImport: () => void;
 }
@@ -34,6 +36,8 @@ export function GroupRail({
   fullMask,
   optimizationEnabled,
   onToggleOptimization,
+  optimizeOnStartup,
+  onToggleOptimizeOnStartup,
   onExport,
   onImport,
 }: GroupRailProps) {
@@ -157,6 +161,23 @@ export function GroupRail({
       </div>
 
       <div className="space-y-2 border-t border-line p-2.5">
+        <button
+          type="button"
+          role="checkbox"
+          aria-checked={optimizeOnStartup}
+          onClick={onToggleOptimizeOnStartup}
+          className="no-drag flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[11px] text-dim transition-colors hover:text-muted"
+        >
+          <span
+            className={cn(
+              "grid h-[15px] w-[15px] shrink-0 place-items-center rounded border transition-colors",
+              optimizeOnStartup ? "border-accent bg-accent-bright text-white" : "border-line",
+            )}
+          >
+            {optimizeOnStartup && <Check size={10} strokeWidth={3} />}
+          </span>
+          {tf("下次启动时自动应用", "Auto-apply on next launch")}
+        </button>
         <motion.button
           whileHover={{ scale: 1.015 }}
           whileTap={{ scale: 0.97 }}

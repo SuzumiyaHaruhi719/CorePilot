@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { createJSONStorage, persist } from "zustand/middleware";
+import { tauriStorage } from "../lib/persist";
 
 export type TabId = "cores" | "taskmgr" | "monitor" | "osd" | "gpu" | "fans" | "optimize" | "tuning" | "settings";
 
@@ -13,20 +15,41 @@ interface UiState {
   monitorSub: MonitorSub;
   setMonitorSub: (sub: MonitorSub) => void;
   optimizationEnabled: boolean;
+  /** When true, affinity optimization auto-enables on the NEXT app launch. This is
+   *  the ONLY persisted ui field (auto-saved) — `optimizationEnabled`, `tab` and
+   *  `monitorSub` stay session-only, so a restart never silently re-pins affinity
+   *  unless the user opted in here. */
+  optimizeOnStartup: boolean;
   toggleOptimization: () => void;
   setOptimization: (value: boolean) => void;
+  setOptimizeOnStartup: (value: boolean) => void;
 }
 
-export const useUi = create<UiState>((set) => ({
-  tab: "cores",
-  setTab: (tab) => set({ tab }),
-  monitorSub: "live",
-  setMonitorSub: (monitorSub) => set({ monitorSub }),
-  // Off by default: auto-pinning every matching process on launch can pile a whole
-  // CCD group onto ONE CCD (saturating it while the other idles). The user opts in
-  // via the toggle when they want affinity enforcement; until then both CCDs run
-  // everything (the normal Windows scheduler).
-  optimizationEnabled: false,
-  toggleOptimization: () => set((s) => ({ optimizationEnabled: !s.optimizationEnabled })),
-  setOptimization: (optimizationEnabled) => set({ optimizationEnabled }),
-}));
+export const useUi = create<UiState>()(
+  persist(
+    (set) => ({
+      tab: "cores",
+      setTab: (tab) => set({ tab }),
+      monitorSub: "live",
+      setMonitorSub: (monitorSub) => set({ monitorSub }),
+      // Off by default: auto-pinning every matching process on launch can pile a whole
+      // CCD group onto ONE CCD (saturating it while the other idles). The user opts in
+      // via the toggle (or the "auto-apply on next launch" checkbox) when they want
+      // affinity enforcement; until then both CCDs run everything (Windows scheduler).
+      optimizationEnabled: false,
+      optimizeOnStartup: false,
+      toggleOptimization: () => set((s) => ({ optimizationEnabled: !s.optimizationEnabled })),
+      setOptimization: (optimizationEnabled) => set({ optimizationEnabled }),
+      setOptimizeOnStartup: (optimizeOnStartup) => set({ optimizeOnStartup }),
+    }),
+    {
+      name: "corepilot-ui",
+      version: 1,
+      storage: createJSONStorage(() => tauriStorage),
+      // Persist ONLY the startup preference (auto-saved). tab / monitorSub /
+      // optimizationEnabled are intentionally session-only: a restart shouldn't
+      // restore a tab or silently re-enable optimization unless auto-apply is on.
+      partialize: (s) => ({ optimizeOnStartup: s.optimizeOnStartup }),
+    },
+  ),
+);
