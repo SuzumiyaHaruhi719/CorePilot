@@ -307,7 +307,6 @@ pub fn start_sampler(app: AppHandle) {
                 // never block on a metric read.
                 let target = STATE.lock().target_pid;
                 let flags = LAYOUT_FLAGS.load(Ordering::Relaxed);
-                let row_colors = *ROW_COLORS.lock();
 
                 match target {
                     Some(pid) if pid != 0 => {
@@ -329,6 +328,13 @@ pub fn start_sampler(app: AppHandle) {
                         } else if let Some(writer) = STATE.lock().writer.as_ref() {
                             // Re-borrow the writer for the publish. The lock is
                             // held only for the duration of the seqlock write.
+                            // Read the palette WHILE holding STATE so it can't
+                            // interleave with overlay_set_palette's update+publish —
+                            // the sampler can't clobber a just-pushed palette with a
+                            // stale snapshot ("reflect immediately" stays true). No
+                            // deadlock: overlay_set_palette never holds ROW_COLORS
+                            // while awaiting STATE.
+                            let row_colors = *ROW_COLORS.lock();
                             publish_metrics(writer, &app, pid, flags, row_colors);
                         }
                     }
