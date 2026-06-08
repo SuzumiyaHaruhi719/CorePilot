@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import { api, type FanCalibration, type FanChannelConfig, type FanCurvePoint, type FanMode } from "../lib/ipc";
+import { api, type CalibPoint, type FanCalibration, type FanChannelConfig, type FanCurvePoint, type FanMode } from "../lib/ipc";
 import { tauriStorage } from "../lib/persist";
 
 /** Per-fan configuration as edited in the UI (keyed by control id). */
@@ -10,6 +10,11 @@ export interface FanConfig {
   tempSourceId: string | null;
   curve: FanCurvePoint[];
   minDuty: number;
+  /** Curve-mode ramp-up smoothing: 0 = Smooth (slow ease toward the target),
+   *  100 = Immediate (jump to the target in one tick, today's behavior). */
+  spinUpPct: number;
+  /** Curve-mode ramp-down smoothing: 0 = Smooth, 100 = Immediate. */
+  spinDownPct: number;
 }
 
 /**
@@ -28,27 +33,40 @@ export const DEFAULT_CURVE: FanCurvePoint[] = [
 ];
 
 export function defaultConfig(): FanConfig {
-  return { mode: "auto", manualPct: 50, tempSourceId: null, curve: DEFAULT_CURVE, minDuty: 20 };
+  return { mode: "auto", manualPct: 50, tempSourceId: null, curve: DEFAULT_CURVE, minDuty: 20, spinUpPct: 100, spinDownPct: 100 };
 }
 
-// Both curves hit 100 % at 70 °C — the full-speed threshold for the Ryzen 9
-// 9950X3D (keeps the hot V-Cache CCD in check before it throttles).
+// Silent / Standard / Turbo modelled on ASUS Fan Xpert's CPU-fan presets: a
+// quiet low-temp hold that ramps to full, progressively more aggressive.
 
-/** Quiet: barely audible at idle, holds low, then ramps hard into 70 °C → full. */
-const QUIET_CURVE: FanCurvePoint[] = [
+/** Silent: 20% idle, gentle ramp, full only by ~78 °C — quietest. */
+const SILENT_CURVE: FanCurvePoint[] = [
   { tempC: 30, duty: 20 },
-  { tempC: 45, duty: 30 },
+  { tempC: 45, duty: 33 },
   { tempC: 55, duty: 45 },
-  { tempC: 63, duty: 65 },
-  { tempC: 70, duty: 100 },
+  { tempC: 65, duty: 60 },
+  { tempC: 72, duty: 80 },
+  { tempC: 78, duty: 100 },
 ];
 
-/** Turbo: aggressive — high baseline, full speed by 70 °C. */
+/** Standard: balanced — ~22% idle, full by ~73 °C. */
+const STANDARD_CURVE: FanCurvePoint[] = [
+  { tempC: 30, duty: 22 },
+  { tempC: 40, duty: 33 },
+  { tempC: 50, duty: 45 },
+  { tempC: 60, duty: 60 },
+  { tempC: 70, duty: 80 },
+  { tempC: 73, duty: 100 },
+];
+
+/** Turbo: aggressive — 30% idle, full by ~72 °C. */
 const TURBO_CURVE: FanCurvePoint[] = [
-  { tempC: 30, duty: 45 },
-  { tempC: 50, duty: 70 },
-  { tempC: 60, duty: 88 },
-  { tempC: 70, duty: 100 },
+  { tempC: 30, duty: 30 },
+  { tempC: 40, duty: 40 },
+  { tempC: 50, duty: 49 },
+  { tempC: 60, duty: 61 },
+  { tempC: 68, duty: 80 },
+  { tempC: 72, duty: 100 },
 ];
 
 /** Built-in one-click presets. Quiet/Turbo are temperature curves (they need a
@@ -63,7 +81,8 @@ export interface FanPreset {
 }
 
 export const FAN_PRESETS: FanPreset[] = [
-  { id: "preset-quiet", name: "Quiet", mode: "curve", curve: QUIET_CURVE },
+  { id: "preset-silent", name: "Silent", mode: "curve", curve: SILENT_CURVE },
+  { id: "preset-standard", name: "Standard", mode: "curve", curve: STANDARD_CURVE },
   { id: "preset-turbo", name: "Turbo", mode: "curve", curve: TURBO_CURVE },
   { id: "preset-fullblast", name: "Full Blast", mode: "manual", manualPct: 100 },
 ];
@@ -76,18 +95,123 @@ export const FAN_PRESETS: FanPreset[] = [
  */
 export const MIN_SAFE_DUTY = 20;
 
-/** Build a no-stall curve from a calibrated start duty: idle at the fan's
- *  quietest stable speed (30 °C), then ramp to full by 70 °C (the 9950X3D
- *  full-speed threshold), with all duties at or above the safe floor. */
+/**
+ * Each temperature node of a calibrated curve targets a FRACTION OF THE FAN'S
+ * MEASURED MAX RPM (real airflow), not a raw PWM duty. The duty that achieves
+ * each fraction is then looked up from the calibration's own (duty→RPM) samples.
+ *
+ * Why: a curve point that reads "50%" should mean ~50% of the fan's real top
+ * speed — the user's mental model ("duty should track RPM"). On the reported
+ * NCT6701D the fan tops out ~3000 RPM but ~80% PWM already shows ~1393 RPM, i.e.
+ * RPM is far from linear in duty (and the chip's tachometer may under-report).
+ * Targeting RPM% and inverting through the measured samples corrects that for
+ * THIS fan regardless of the absolute RPM scale: on a fan whose RPM is linear in
+ * duty (a correctly-reporting one) the mapping is ~identity, so it never regrabs
+ * a well-behaved fan; on a non-linear / half-reading one it picks the lower duty
+ * that already delivers the intended airflow.
+ *
+ * `(tempC, rpmFraction)` — quiet idle, gentle mid-range, full airflow by 85 °C.
+ */
+const CALIB_RPM_TARGETS: { tempC: number; frac: number }[] = [
+  { tempC: 40, frac: 0.0 }, // idle: the fan's quietest stable speed (start duty)
+  { tempC: 60, frac: 0.35 },
+  { tempC: 75, frac: 0.65 },
+  { tempC: 85, frac: 1.0 }, // full airflow
+];
+
+/** Lowest count of usable (rpm>0) calibration samples needed to trust the
+ *  measured duty→RPM mapping; below this we fall back to the start-duty curve. */
+const MIN_USABLE_SAMPLES = 3;
+
+/**
+ * Invert the measured (duty → RPM) samples: return the PWM duty that achieves
+ * `frac` of `maxRpm`. Samples are sorted by duty and linearly interpolated; the
+ * result is clamped to [`minStartDuty`, 100] so a curve never drops a fan below
+ * the speed at which it reliably spins. `frac` is clamped to [0, 1].
+ *
+ * `frac = 0` maps to `minStartDuty` (idle at the quietest stable speed). For a
+ * fan whose RPM rises linearly with duty this is ~`frac × 100`; for a non-linear
+ * or under-reporting fan it returns the (lower) duty that already delivers that
+ * airflow — which is exactly the fix for "duty disproportionate to RPM".
+ */
+function dutyForRpmFraction(
+  points: CalibPoint[],
+  frac: number,
+  minStartDuty: number,
+  maxRpm: number,
+): number {
+  const f = Math.max(0, Math.min(1, frac));
+  const lo = Math.max(MIN_SAFE_DUTY, minStartDuty);
+  if (f <= 0 || maxRpm <= 0) return lo;
+
+  const target = f * maxRpm;
+  // Sort by duty and keep only finite, spinning samples.
+  const usable = points
+    .filter((p) => Number.isFinite(p.duty) && Number.isFinite(p.rpm) && p.rpm > 0)
+    .sort((a, b) => a.duty - b.duty);
+  if (usable.length === 0) return Math.min(100, Math.max(lo, Math.round(f * 100)));
+
+  // Below the first sample's RPM → use its duty (already clamped to the floor).
+  if (target <= usable[0].rpm) return Math.max(lo, Math.round(usable[0].duty));
+  // At/above the top measured RPM → full duty (can't spin it faster than max).
+  const top = usable[usable.length - 1];
+  if (target >= top.rpm) return 100;
+
+  // Find the bracketing samples and interpolate duty against RPM.
+  for (let i = 0; i < usable.length - 1; i++) {
+    const a = usable[i];
+    const b = usable[i + 1];
+    if (target >= a.rpm && target <= b.rpm) {
+      const span = b.rpm - a.rpm;
+      const duty = span <= 0 ? b.duty : a.duty + ((target - a.rpm) / span) * (b.duty - a.duty);
+      return Math.max(lo, Math.min(100, Math.round(duty)));
+    }
+  }
+  return 100;
+}
+
+/** Build a GENTLE no-stall curve from a calibrated start duty: idle at the fan's
+ *  quietest stable speed, ramp slowly through the mid-range, and only hit full
+ *  near 85 °C. The old curve hit ~70% of the span by 60 °C and full by 70 °C,
+ *  which drove stiff fans to 90%+ duty at everyday temps — way too loud. Keeps
+ *  the floor at/above the start duty (capped) so the fan still spins up. Used as
+ *  a fallback when the calibration didn't capture enough RPM samples to map by
+ *  airflow (see `calibratedCurveFromPoints`). */
 function calibratedCurve(minStartDuty: number): FanCurvePoint[] {
-  const lo = Math.round(Math.max(MIN_SAFE_DUTY, Math.min(minStartDuty, 60)));
+  const lo = Math.round(Math.max(MIN_SAFE_DUTY, Math.min(minStartDuty, 50)));
   const span = 100 - lo;
   return [
-    { tempC: 30, duty: lo },
-    { tempC: 50, duty: Math.round(lo + span * 0.35) },
-    { tempC: 60, duty: Math.round(lo + span * 0.7) },
-    { tempC: 70, duty: 100 },
+    { tempC: 40, duty: lo },
+    { tempC: 60, duty: Math.round(lo + span * 0.28) },
+    { tempC: 75, duty: Math.round(lo + span * 0.6) },
+    { tempC: 85, duty: 100 },
   ];
+}
+
+/**
+ * Build a calibrated temperature→duty curve whose nodes target a fraction of the
+ * fan's MEASURED max RPM (real airflow) rather than raw PWM duty — see
+ * `CALIB_RPM_TARGETS` / `dutyForRpmFraction`. Falls back to the start-duty curve
+ * when the sweep captured too few spinning samples to trust the mapping. The
+ * resulting curve's Y axis is still PWM duty (so the editor + engine are
+ * unchanged); the nodes are simply placed at the duty that yields the intended
+ * RPM, so a fan whose RPM lags its duty no longer sits near full for mid airflow.
+ */
+function calibratedCurveFromPoints(cal: FanCalibration, minStartDuty: number): FanCurvePoint[] {
+  const usable = cal.points.filter((p) => Number.isFinite(p.rpm) && p.rpm > 0);
+  if (usable.length < MIN_USABLE_SAMPLES || cal.maxRpm <= 0) {
+    return calibratedCurve(minStartDuty);
+  }
+  const curve = CALIB_RPM_TARGETS.map(({ tempC, frac }) => ({
+    tempC,
+    duty: dutyForRpmFraction(cal.points, frac, minStartDuty, cal.maxRpm),
+  }));
+  // Enforce a non-decreasing duty profile: the inversion is monotonic in theory,
+  // but measurement noise at adjacent RPM targets could invert two neighbours.
+  for (let i = 1; i < curve.length; i++) {
+    if (curve[i].duty < curve[i - 1].duty) curve[i].duty = curve[i - 1].duty;
+  }
+  return curve;
 }
 
 /** A saved, named snapshot of all fan configs for one-click switching. */
@@ -120,6 +244,10 @@ function toBackend(configs: Record<string, FanConfig>): FanChannelConfig[] {
     tempSourceId: c.tempSourceId,
     curve: c.curve,
     minDuty: c.minDuty,
+    // Coalesce so profiles saved before these fields existed still ramp
+    // instantly (100 = Immediate = today's behavior).
+    spinUpPct: c.spinUpPct ?? 100,
+    spinDownPct: c.spinDownPct ?? 100,
   }));
 }
 
@@ -129,6 +257,12 @@ interface FanProfileState {
   /** Custom display names per control id (e.g. "CPU", "水泵"). UI-only; not sent
    *  to the backend engine. */
   labels: Record<string, string>;
+  /** Control ids that have reported RPM > 0 at least once (PERSISTED), so a real
+   *  fan stays listed across relaunches even while idle/stopped, while empty
+   *  headers (which never spin) stay hidden. */
+  spunFans: string[];
+  /** Record control ids seen spinning (rpm > 0). Persisted + idempotent. */
+  markSpun: (ids: string[]) => void;
   /** Patch one fan's config and push the whole set to the backend engine. */
   setConfig: (controlId: string, patch: Partial<FanConfig>) => void;
   setApplyOnStartup: (value: boolean) => void;
@@ -180,9 +314,17 @@ export const useFanProfiles = create<FanProfileState>()(
     (set, get) => ({
       configs: {},
       labels: {},
+      spunFans: [],
       applyOnStartup: false,
       lastError: null,
       clearError: () => set({ lastError: null }),
+      markSpun: (ids) =>
+        set((s) => {
+          const next = new Set(s.spunFans);
+          let changed = false;
+          for (const id of ids) if (!next.has(id)) { next.add(id); changed = true; }
+          return changed ? { spunFans: [...next] } : {};
+        }),
       setConfig: (controlId, patch) => {
         const prev = get().configs[controlId] ?? defaultConfig();
         const next = { ...prev, ...patch };
@@ -268,7 +410,11 @@ export const useFanProfiles = create<FanProfileState>()(
           configs[cal.controlId] = {
             ...prev,
             mode: "curve",
-            curve: calibratedCurve(lo),
+            // Map each curve node to a fraction of the fan's MEASURED max RPM
+            // (real airflow) and invert it through the sweep's duty→RPM samples,
+            // so "mid curve" means mid airflow — not a high duty that the fan's
+            // (possibly under-reported / non-linear) RPM lags far behind.
+            curve: calibratedCurveFromPoints(cal, lo),
             minDuty: lo,
             tempSourceId: prev.tempSourceId ?? defaultTempSourceId,
           };

@@ -20,7 +20,7 @@ import { TabHeader } from "../components/ui/TabHeader";
 import { useMetricsHistory } from "../hooks/useMetricsHistory";
 import { useSensors } from "../hooks/useSensors";
 import { formatBytes } from "../lib/format";
-import { hueColor } from "../lib/colors";
+import { hueColor, accentHue } from "../lib/colors";
 import { useTf } from "../lib/i18n";
 import { easeOut } from "../lib/motion";
 import { useUi, type MonitorSub } from "../store/ui";
@@ -228,7 +228,7 @@ function LiveDashboard() {
           icon={Cpu}
           label="CPU"
           value={cpuNow}
-          hue={280}
+          hue={accentHue()}
           hist={cpu}
           caption={coreCount != null ? tf(`${coreCount} 线程 · 占用率`, `${coreCount} threads · usage`) : "占用率"}
           readouts={[

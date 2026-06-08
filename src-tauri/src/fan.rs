@@ -53,6 +53,14 @@ static FAN_CONFIG: Lazy<Mutex<Vec<FanChannelConfig>>> = Lazy::new(|| Mutex::new(
 /// the sidecar with redundant writes and to detect auto-mode transitions.
 static LAST: Lazy<Mutex<HashMap<String, (String, i32)>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Current applied duty per control id while in CURVE mode (the smoothed value the
+/// fan is actually being driven toward its target from). Decoupled from `LAST`
+/// (which is rounded + shared with manual/auto) so the ramp accumulates at full
+/// precision and ignores the 2% write-hysteresis. Entries are seeded on the first
+/// curve tick (or after a mode change) so a fan starts easing from where it is,
+/// not from 0.
+static CURVE_DUTY: Lazy<Mutex<HashMap<String, f32>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
 static ENGINE_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// True while an AI calibration sweep is running; pauses the engine so it does
@@ -103,6 +111,14 @@ pub struct CurvePoint {
     pub duty: f32,
 }
 
+/// Default for the spin-up/spin-down smoothing fields: 100 = Immediate, i.e. the
+/// fan reaches its curve target in a single tick. Used as the serde default so
+/// configs saved/sent before these fields existed deserialize to today's exact
+/// (instant) behavior.
+fn default_spin_pct() -> f32 {
+    100.0
+}
+
 /// Per-fan configuration pushed from the frontend.
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -119,6 +135,15 @@ pub struct FanChannelConfig {
     /// Minimum duty floor (a fan is never driven below this).
     #[serde(default)]
     pub min_duty: f32,
+    /// Curve-mode ramp-UP smoothing, 0 (Smooth) .. 100 (Immediate). Caps how far
+    /// the applied duty may rise toward the curve target each tick. Only used in
+    /// curve mode; ignored by manual/auto.
+    #[serde(default = "default_spin_pct")]
+    pub spin_up_pct: f32,
+    /// Curve-mode ramp-DOWN smoothing, 0 (Smooth) .. 100 (Immediate). Caps how far
+    /// the applied duty may fall toward the curve target each tick.
+    #[serde(default = "default_spin_pct")]
+    pub spin_down_pct: f32,
 }
 
 // --- wiring from sensors.rs (the sidecar owner) --------------------------------
@@ -279,6 +304,47 @@ fn interp(curve: &[CurvePoint], temp: f32) -> f32 {
     last.duty
 }
 
+// --- curve ramp smoothing -------------------------------------------------------
+
+/// Smallest per-tick duty step at the "Smooth" extreme (spinPct = 0), in duty %.
+/// Must be > 0 so even fully-smooth still creeps toward the target instead of
+/// freezing; ~1%/tick at the ~2 s tick means a full 0→100 swing eases over ~3 min.
+const MIN_RAMP_STEP: f32 = 1.0;
+
+/// Max per-tick duty step for a given smoothing percentage. `spin_pct` is clamped
+/// to [0,100]; the step grows linearly from [`MIN_RAMP_STEP`] (Smooth) to 100 — a
+/// full-range jump — at 100 (Immediate). Because the step reaches the entire 0–100
+/// duty range at 100, the applied duty always reaches the target in one tick there,
+/// preserving the pre-smoothing (instant) behavior exactly.
+fn max_ramp_step(spin_pct: f32) -> f32 {
+    let p = spin_pct.clamp(0.0, 100.0) / 100.0;
+    MIN_RAMP_STEP + p * (100.0 - MIN_RAMP_STEP)
+}
+
+/// Move `current` toward `target` by at most the step implied by the smoothing
+/// percentages: `spin_up_pct` governs rising (target above current), `spin_down_pct`
+/// governs falling. At 100 the step spans the full range, so the result is exactly
+/// `target` (instant) — identical to today's behavior. Lower values cap the step so
+/// the duty eases over several ticks.
+fn ramp_toward(current: f32, target: f32, spin_up_pct: f32, spin_down_pct: f32) -> f32 {
+    let delta = target - current;
+    if delta == 0.0 {
+        return target;
+    }
+    let step = if delta > 0.0 {
+        max_ramp_step(spin_up_pct)
+    } else {
+        max_ramp_step(spin_down_pct)
+    };
+    if delta.abs() <= step {
+        target
+    } else if delta > 0.0 {
+        current + step
+    } else {
+        current - step
+    }
+}
+
 // --- engine --------------------------------------------------------------------
 
 /// One pass: turn each configured fan's mode into a sidecar command.
@@ -302,6 +368,7 @@ fn apply_once() {
     };
 
     let mut last = LAST.lock();
+    let mut curve_duty = CURVE_DUTY.lock();
     for c in &cfgs {
         let floor = c.min_duty.clamp(0.0, 100.0);
         match c.mode.as_str() {
@@ -309,6 +376,9 @@ fn apply_once() {
                 let target = c.manual_pct.clamp(floor, 100.0);
                 send_set(&c.control_id, target);
                 last.insert(c.control_id.clone(), ("manual".to_string(), target.round() as i32));
+                // Leaving curve mode: drop the smoothed state so a later return to
+                // curve re-seeds from the fan's live position, not a stale value.
+                curve_duty.remove(&c.control_id);
             }
             "curve" => {
                 // Fail safe: if the curve's temperature source is unconfigured,
@@ -328,23 +398,46 @@ fn apply_once() {
                         send_auto(&c.control_id);
                         last.insert(c.control_id.clone(), ("auto".to_string(), 0));
                     }
+                    // Header handed back to BIOS — forget the ramp so re-acquiring
+                    // the curve eases from where the fan actually is.
+                    curve_duty.remove(&c.control_id);
                     continue;
                 };
                 let target = interp(&c.curve, t).clamp(floor, 100.0);
-                let di = target.round() as i32;
+                // Smooth the approach to the target. Seed the per-channel applied
+                // duty on first entry (or after a mode change away from curve)
+                // from the last known curve duty, else straight to the target so
+                // the very first apply isn't a forced ramp from 0.
+                let prev_curve = last.get(&c.control_id).map(|(m, _)| m == "curve").unwrap_or(false);
+                let current = match curve_duty.get(&c.control_id) {
+                    Some(&v) if prev_curve => v,
+                    _ => target,
+                };
+                // Always re-clamp the smoothed value to the floor so the minimum-duty
+                // guarantee holds even mid-ramp.
+                let next = ramp_toward(current, target, c.spin_up_pct, c.spin_down_pct)
+                    .clamp(floor, 100.0);
+                curve_duty.insert(c.control_id.clone(), next);
+
+                let di = next.round() as i32;
                 let changed = match last.get(&c.control_id) {
-                    // Hysteresis: only re-issue when mode changed or duty moved >=2%.
+                    // Hysteresis: only re-issue when mode changed or duty moved >=2%…
                     Some((mode, prev)) => mode != "curve" || (di - prev).abs() >= 2,
                     None => true,
                 };
-                if changed {
-                    send_set(&c.control_id, target);
+                // …but while a ramp is still in progress (smoothed value hasn't yet
+                // reached the target) keep issuing each tick so sub-2% steps aren't
+                // swallowed by the hysteresis and the fan actually eases.
+                let ramping = (next - target).abs() > f32::EPSILON;
+                if changed || ramping {
+                    send_set(&c.control_id, next);
                     last.insert(c.control_id.clone(), ("curve".to_string(), di));
                 }
             }
             _ => {
                 // auto: hand back to BIOS, but only once per transition.
                 let already_auto = last.get(&c.control_id).map(|(m, _)| m == "auto").unwrap_or(false);
+                curve_duty.remove(&c.control_id);
                 if !already_auto {
                     send_auto(&c.control_id);
                     last.insert(c.control_id.clone(), ("auto".to_string(), 0));
@@ -482,6 +575,11 @@ fn sanitize_config(c: &FanChannelConfig) -> Option<FanChannelConfig> {
         temp_source_id: c.temp_source_id.clone(),
         curve,
         min_duty: clamp_finite(c.min_duty, 0.0, 100.0),
+        // Smoothing percentages: clamp to [0,100] (NaN → 0 = fully Smooth, which
+        // still creeps via MIN_RAMP_STEP and so can never freeze a fan). Missing
+        // fields are defaulted to 100 = Immediate by serde before we get here.
+        spin_up_pct: clamp_finite(c.spin_up_pct, 0.0, 100.0),
+        spin_down_pct: clamp_finite(c.spin_down_pct, 0.0, 100.0),
     })
 }
 
@@ -724,7 +822,10 @@ pub async fn fan_calibrate(
     CALIBRATING.store(false, Ordering::SeqCst);
     // Force the engine to re-apply the user's real config now (LAST is stale after
     // the sweep drove the fans directly, so clear it first to defeat hysteresis).
+    // Also drop the smoothed curve duties so each fan re-seeds its ramp from the
+    // post-sweep live position rather than a pre-sweep value.
     LAST.lock().clear();
+    CURVE_DUTY.lock().clear();
     apply_once();
 
     match result {

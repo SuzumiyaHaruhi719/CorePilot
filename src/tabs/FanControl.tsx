@@ -24,7 +24,7 @@ const MODE_OPTIONS: { value: FanMode; label: string }[] = [
 ];
 
 /** Icon per built-in preset id (kept here so the store stays icon-free). */
-const PRESET_ICON = { "preset-quiet": Moon, "preset-turbo": Gauge, "preset-fullblast": Wind } as const;
+const PRESET_ICON = { "preset-silent": Moon, "preset-standard": Gauge, "preset-turbo": Wind, "preset-fullblast": Fan } as const;
 
 /** Linear interpolation of a fan curve (mirrors the Rust engine) for the live
  *  operating-point marker. */
@@ -70,6 +70,7 @@ interface ChannelCardProps {
 }
 
 function ChannelCard({ channel, config, temps, label, onChange, onRename }: ChannelCardProps) {
+  const tf = useTf();
   const locked = !channel.controllable;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -118,9 +119,9 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
           <span
             className={cn(
               "grid h-9 w-9 place-items-center rounded-lg transition-colors duration-200",
-              spinning ? "bg-cyan/20 text-cyan glow-sm" : "bg-surface3 text-dim",
+              spinning ? "bg-accent/20 text-accent glow-sm" : "bg-surface3 text-dim",
             )}
-            style={spinning ? ({ "--glow": "var(--color-cyan)" } as React.CSSProperties) : undefined}
+            style={spinning ? ({ "--glow": "var(--color-accent)" } as React.CSSProperties) : undefined}
           >
             <Fan size={17} className={spinning ? "animate-spin-slow" : ""} />
           </span>
@@ -159,7 +160,7 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
         <div className="flex items-stretch gap-2">
           <div className="rounded-lg border border-line bg-surface2/50 px-2.5 py-1 text-right">
             <div className="hud-label text-[8.5px] text-dim">转速</div>
-            <div className="nums text-[15px] font-semibold leading-tight text-cyan" style={{ textShadow: rpm != null && !isLightTheme() ? "0 0 10px color-mix(in oklch, var(--color-cyan) 30%, transparent)" : undefined }}>
+            <div className="nums text-[15px] font-semibold leading-tight text-accent" style={{ textShadow: rpm != null && !isLightTheme() ? "0 0 10px color-mix(in oklch, var(--color-accent) 30%, transparent)" : undefined }}>
               {rpm ?? "—"}
               <span className="ml-0.5 text-[9.5px] font-normal text-dim">RPM</span>
             </div>
@@ -250,6 +251,37 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
                 unit="%"
                 onChange={(v) => onChange({ minDuty: v })}
               />
+
+              {/* Spin up / down time — how fast the fan ramps toward its curve
+                  target. Smooth (0) eases over several ticks; Immediate (100)
+                  jumps straight there (the default / classic behavior). */}
+              <div>
+                <Slider
+                  label={tf("风扇加速时间", "Fan Spin Up Time")}
+                  value={config.spinUpPct ?? 100}
+                  min={0}
+                  max={100}
+                  onChange={(v) => onChange({ spinUpPct: v })}
+                />
+                <div className="mt-0.5 flex justify-between text-[10.5px] text-dim">
+                  <span>{tf("平缓", "Smooth")}</span>
+                  <span>{tf("立即", "Immediate")}</span>
+                </div>
+              </div>
+
+              <div>
+                <Slider
+                  label={tf("风扇减速时间", "Fan Spin Down Time")}
+                  value={config.spinDownPct ?? 100}
+                  min={0}
+                  max={100}
+                  onChange={(v) => onChange({ spinDownPct: v })}
+                />
+                <div className="mt-0.5 flex justify-between text-[10.5px] text-dim">
+                  <span>{tf("平缓", "Smooth")}</span>
+                  <span>{tf("立即", "Immediate")}</span>
+                </div>
+              </div>
             </div>
           )}
         </>
@@ -262,13 +294,14 @@ export function FanControl() {
   const t = useT();
   const tf = useTf();
   const pollMs = useSettings((s) => s.pollMs);
-  const { configs, labels, applyOnStartup, setConfig, setApplyOnStartup, setLabel, profiles, activeProfileId, pendingProfileId, saveProfile, updateActiveProfile, applyProfile, applyPreset, applyCalibration, resetToDefault, deleteProfile, lastError, clearError } =
+  const { configs, labels, spunFans, markSpun, applyOnStartup, setConfig, setApplyOnStartup, setLabel, profiles, activeProfileId, pendingProfileId, saveProfile, updateActiveProfile, applyProfile, applyPreset, applyCalibration, resetToDefault, deleteProfile, lastError, clearError } =
     useFanProfiles();
   const [delProfile, setDelProfile] = useState<{ id: string; name: string } | null>(null);
   const [info, setInfo] = useState<FanInfo | null>(null);
-  // Control ids that have shown a valid (>0) RPM at least once this session.
-  // Headers that have never spun are hidden (no fan connected) until they do.
-  const [seen, setSeen] = useState<Set<string>>(() => new Set());
+  // Control ids that have shown a valid (>0) RPM at least once — PERSISTED in the
+  // store (spunFans), so a real fan stays listed across relaunches even when idle,
+  // while empty headers (never spun) stay hidden until they actually turn.
+  const seen = new Set(spunFans);
   const [showAll, setShowAll] = useState(false);
   const [showSave, setShowSave] = useState(false);
   const [newName, setNewName] = useState("");
@@ -301,17 +334,11 @@ export function FanControl() {
         .then((i) => {
           if (!alive) return;
           setInfo(i);
-          // Remember any header that is currently spinning, so a fan that idles
-          // back to 0 (BIOS fan-stop) stays visible instead of vanishing.
+          // Remember any header currently spinning (PERSISTED via markSpun), so a
+          // fan that idles back to 0 (BIOS fan-stop) or survives a relaunch stays
+          // visible. Idempotent — only writes when a new id first spins.
           const spinning = i.channels.filter((c) => (c.rpm ?? 0) > 0).map((c) => c.id);
-          if (spinning.length) {
-            setSeen((prev) => {
-              let changed = false;
-              const next = new Set(prev);
-              for (const id of spinning) if (!next.has(id)) { next.add(id); changed = true; }
-              return changed ? next : prev;
-            });
-          }
+          if (spinning.length) markSpun(spinning);
         })
         .catch(() => undefined);
     void tick();
@@ -329,10 +356,11 @@ export function FanControl() {
   const temps = info?.temps ?? [];
   const presetTempSourceId =
     (temps.find((t) => /cpu|package|tctl|tdie|核/i.test(t.name)) ?? temps[0])?.id ?? null;
-  // Show a header when it currently reports RPM, has spun this session, OR the
-  // user has explicitly claimed it with a custom label — so a fan you manage never
-  // vanishes just because a low curve momentarily stopped it. Unclaimed, never-spun
-  // headers (empty ports) stay hidden until they actually turn.
+  // Show a header that's currently reporting RPM, has EVER spun (persisted in
+  // spunFans — so a real fan stays listed across relaunches even while idle/stopped),
+  // or has a custom label. Empty headers (controllable ports with no fan → always
+  // 0 RPM) never enter spunFans, so they stay hidden (no phantom 0-RPM fans) until
+  // they actually turn — or via 显示全部.
   const visibleChannels = showAll
     ? channels
     : channels.filter((c) => (c.rpm ?? 0) > 0 || seen.has(c.id) || !!labels[c.id]);
@@ -425,7 +453,6 @@ export function FanControl() {
                   {calibrating ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />} AI 智能校准
                 </Button>
                 <Button
-                  variant="subtle"
                   onClick={() => resetToDefault(controllableIds, presetTempSourceId)}
                   disabled={calibrating || controllableIds.length === 0}
                   title="撤销 AI 校准 / 自定义，恢复内置默认曲线"
@@ -625,7 +652,7 @@ export function FanControl() {
 
           {channels.length === 0 ? (
             <div className="flex items-center gap-2.5 rounded-xl border border-dashed border-line bg-surface2/30 px-3.5 py-3 text-[11.5px] text-dim">
-              <Fan size={14} className="animate-spin-slow text-cyan" /> 正在读取风扇接口…
+              <Fan size={14} className="animate-spin-slow text-accent" /> 正在读取风扇接口…
             </div>
           ) : visibleChannels.length === 0 ? (
             <div className="flex items-center gap-2.5 rounded-xl border border-dashed border-line bg-surface2/30 px-3.5 py-3 text-[11.5px] text-dim">
@@ -731,8 +758,8 @@ export function FanControl() {
       >
         <p className="text-[13px] leading-relaxed text-muted">
           {tf(
-            `将依次把每个可调风扇从 0 拉到 100% 扫描转速（约 ${controllableIds.length} 个风扇 × 30 秒），测出每个风扇的起转转速与最高转速，并生成专属曲线（怠速取最低稳定转速、70°C 全速）。`,
-            `Each adjustable fan is swept 0 → 100% to measure RPM (about ${controllableIds.length} fans × 30 s), finding each fan's start and max RPM, then building a tailored curve (idle at the lowest stable speed, full speed at 70°C).`,
+            `将依次把每个可调风扇从 0 拉到 100% 扫描转速（约 ${controllableIds.length} 个风扇 × 30 秒），测出每个风扇的起转转速与最高转速，并生成平缓的专属曲线（怠速取最低稳定转速，缓慢爬升、85°C 才全速，避免日常温度下空转过响）。`,
+            `Each adjustable fan is swept 0 → 100% to measure RPM (about ${controllableIds.length} fans × 30 s), finding each fan's start and max RPM, then building a GENTLE tailored curve (idle at the lowest stable speed, slow ramp, full only at 85°C so it isn't loud at everyday temps).`,
           )}
         </p>
         <p className="mt-2 text-[11.5px] text-dim">
@@ -755,7 +782,10 @@ export function FanControl() {
         ) : (
           <>
             <p className="mb-3 text-[12.5px] leading-relaxed text-muted">
-              已为每个风扇生成专属曲线（怠速取最低稳定转速，70°C 全速）并自动应用。
+              {tf(
+                "已按每个风扇的实测转速生成专属曲线并自动应用：曲线节点对应「最高转速的百分比」(实际风量)，而非原始占空比——所以中段不再因占空比虚高而过响。如某风扇仍偏高，点「重置默认曲线」即可还原。",
+                "Tailored curves were generated from each fan's MEASURED RPM and applied: curve nodes now target a percentage of that fan's max RPM (real airflow) rather than raw PWM duty — so the mid-range no longer runs loud just because duty outpaces RPM. If a fan still feels high, click “Reset to default curve”.",
+              )}
             </p>
             <div className="space-y-1.5">
               {(calibResults ?? []).map((c) => (

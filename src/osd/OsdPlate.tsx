@@ -6,14 +6,10 @@ import { OSD_CATEGORY_ORDER, OSD_METRICS, type OsdCategory, type OsdData } from 
  *  order) so e.g. all GPU readings stay in a single "GPU" group regardless of
  *  the order they were enabled. */
 
-const CAT_COLOR: Record<OsdCategory, string> = {
-  fps: "text-accent-bright",
-  cpu: "text-accent-bright",
-  gpu: "text-vcache",
-  mem: "text-cyan",
-  disk: "text-freq",
-  net: "text-ok",
-};
+// Colored category labels follow the active theme's accent (brightened a touch
+// for the always-dark plate) so the OSD recolors with each theme. Metric values
+// stay white for legibility and the plate background stays dark.
+const OSD_ACCENT = "color-mix(in oklch, var(--color-accent) 80%, white)";
 const CAT_LABEL: Record<OsdCategory, string> = {
   fps: "FPS",
   cpu: "CPU",
@@ -64,7 +60,7 @@ export function OsdPlate({ metrics, style, scale, opacity, rounded, data }: OsdP
     >
       {groups.map((g) => (
         <div key={g.cat} className={cn("flex items-center gap-1.5", vertical && "w-full")}>
-          <span className={cn("nums font-bold uppercase tracking-wide", CAT_COLOR[g.cat])}>
+          <span className="nums font-bold uppercase tracking-wide" style={{ color: OSD_ACCENT }}>
             {CAT_LABEL[g.cat]}
           </span>
           {g.items.map((def) => (

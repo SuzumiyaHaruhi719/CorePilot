@@ -9,7 +9,8 @@
 //! settings) and is mirrored to the backend via [`set_close_to_tray`]; the
 //! window close handler in `lib.rs` reads it through [`TrayPrefs`].
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
@@ -21,13 +22,28 @@ use tauri::{
 /// close handler; written by [`set_close_to_tray`]. Defaults to `true` so an
 /// accidental window close keeps the app alive even before the frontend has
 /// synced its persisted value.
+/// A WebView2 renderer that's been HIDDEN (tray) freezes, and after a long stint
+/// the OS can discard it (memory saver / "sleeping tabs") → the window restores
+/// BLANK/white. We time how long the main window has been hidden so the tray
+/// restore can reload it past this threshold.
+const TRAY_RELOAD_AFTER_MS: u64 = 120_000;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 pub struct TrayPrefs {
     close_to_tray: AtomicBool,
+    /// Epoch-ms when the main window was hidden to the tray; 0 while it's visible.
+    hidden_at_ms: AtomicU64,
 }
 
 impl Default for TrayPrefs {
     fn default() -> Self {
-        Self { close_to_tray: AtomicBool::new(true) }
+        Self { close_to_tray: AtomicBool::new(true), hidden_at_ms: AtomicU64::new(0) }
     }
 }
 
@@ -35,6 +51,18 @@ impl TrayPrefs {
     /// Whether closing the main window should hide it to the tray (vs. exit).
     pub fn close_to_tray(&self) -> bool {
         self.close_to_tray.load(Ordering::Relaxed)
+    }
+
+    /// Record that the main window was just hidden to the tray.
+    pub fn mark_hidden(&self) {
+        self.hidden_at_ms.store(now_ms(), Ordering::Relaxed);
+    }
+
+    /// Milliseconds the window has been hidden, then clear the marker. Returns 0
+    /// when it wasn't hidden via the tray (e.g. a plain show/focus).
+    pub fn hidden_ms(&self) -> u64 {
+        let at = self.hidden_at_ms.swap(0, Ordering::Relaxed);
+        if at == 0 { 0 } else { now_ms().saturating_sub(at) }
     }
 }
 
@@ -54,11 +82,19 @@ pub fn set_close_to_tray(prefs: tauri::State<'_, TrayPrefs>, enabled: bool) {
 /// behaves like a normal window afterwards.
 fn show_main<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
+        // If it sat hidden long enough that WebView2 may have frozen/discarded the
+        // renderer (→ blank/white window on restore), reload the content so it
+        // always comes back painted. Quick hide/show toggles stay under the
+        // threshold and skip the reload (no flash).
+        let reload = app.state::<TrayPrefs>().hidden_ms() > TRAY_RELOAD_AFTER_MS;
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_always_on_top(true);
         let _ = window.set_focus();
         let _ = window.set_always_on_top(false);
+        if reload {
+            let _ = window.eval("window.location.reload()");
+        }
     }
 }
 

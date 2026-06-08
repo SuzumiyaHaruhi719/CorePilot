@@ -1,13 +1,34 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { listen } from "@tauri-apps/api/event";
 import App from "./App";
 import { OsdOverlay } from "./osd/OsdOverlay";
+import { useSettings, type Theme, type ThemeStyle } from "./store/settings";
 import "./index.css";
 
 // The transparent overlay window loads the same bundle with `?osd`; render only
 // the lightweight overlay there (and make the page background transparent).
 const isOsd = new URLSearchParams(window.location.search).has("osd");
-if (isOsd) document.documentElement.classList.add("osd-window");
+if (isOsd) {
+  document.documentElement.classList.add("osd-window");
+  // App (which owns the theme effect) never mounts in the OSD webview, so apply
+  // the persisted theme to this window's <html> here — then the overlay's accent
+  // tokens match the chosen theme. The main window emits "osd:theme" on a theme
+  // change so an already-open OSD recolors live.
+  const applyOsdTheme = (theme: Theme, themeStyle: ThemeStyle) => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.dataset.themeStyle = themeStyle;
+  };
+  const applyPersisted = () => {
+    const s = useSettings.getState();
+    applyOsdTheme(s.theme, s.themeStyle);
+  };
+  if (useSettings.persist.hasHydrated()) applyPersisted();
+  else void useSettings.persist.onFinishHydration(applyPersisted);
+  void listen<{ theme: Theme; themeStyle: ThemeStyle }>("osd:theme", (e) =>
+    applyOsdTheme(e.payload.theme, e.payload.themeStyle),
+  );
+}
 
 // Global safety net: log any uncaught error/rejection to the console (visible in
 // the dev terminal / WebView devtools) and, for the main window, surface a fatal

@@ -146,11 +146,11 @@ export function OsdConfig() {
   function setEnabled(enabled: boolean) {
     osd.setEnabled(enabled);
     setOverlayErr(null);
-    // Keep the overlay window up if desktop mode still wants it. If the native
-    // window fails to open, roll the toggle back so the UI doesn't claim the
-    // overlay is on when it isn't.
+    // Keep the overlay window up if desktop mode still wants it. Surface an error
+    // if the native call fails, but DON'T roll the toggle back — a transient
+    // rejection shouldn't silently switch the overlay the user just enabled off
+    // (that broke the desktop OSD). The intent persists; the banner shows the issue.
     api.osdSetVisible(enabled || osd.desktopMode).catch(() => {
-      osd.setEnabled(!enabled);
       setOverlayErr(tf("叠加层窗口打开失败", "Failed to open the overlay window"));
     });
   }
@@ -347,11 +347,10 @@ export function OsdConfig() {
               onChange={(v) => {
                 osd.update({ desktopMode: v });
                 setOverlayErr(null);
-                // Desktop mode needs the overlay window too — show it now (or
-                // hide if both this and the in-game master are off). Roll back +
-                // surface the error if the native window fails to open.
+                // Desktop mode needs the overlay window too — show it now (or hide
+                // if both this and the in-game master are off). Surface an error on
+                // failure but keep the user's choice (don't auto-disable).
                 api.osdSetVisible(v || osd.enabled).catch(() => {
-                  osd.update({ desktopMode: !v });
                   setOverlayErr(tf("叠加层窗口打开失败", "Failed to open the overlay window"));
                 });
               }}

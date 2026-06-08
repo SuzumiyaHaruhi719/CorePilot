@@ -151,6 +151,10 @@ pub fn run() {
                 {
                     api.prevent_close();
                     let _ = window.hide();
+                    // Remember when it went to the tray: a long-hidden WebView2
+                    // renderer can be discarded → blank on restore, so show_main
+                    // reloads it past a threshold.
+                    window.state::<tray::TrayPrefs>().mark_hidden();
                 }
             }
         })

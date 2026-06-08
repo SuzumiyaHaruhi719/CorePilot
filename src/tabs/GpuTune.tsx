@@ -23,7 +23,7 @@ import { Slider } from "../components/ui/Slider";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
-import { hueColor, isLightTheme } from "../lib/colors";
+import { accentHue, hueColor, isLightTheme } from "../lib/colors";
 import { useT, useTf } from "../lib/i18n";
 import { formatBytes } from "../lib/format";
 import { hoverPop } from "../lib/motion";
@@ -355,7 +355,7 @@ export function GpuTune() {
               <span className="h-px flex-1 bg-line" />
             </div>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-              <StatTile icon={Cpu} label="核心频率" value={info ? String(info.graphicsClock) : "—"} sub="MHz" hue={274} />
+              <StatTile icon={Cpu} label="核心频率" value={info ? String(info.graphicsClock) : "—"} sub="MHz" hue={accentHue()} />
               <StatTile icon={MemoryStick} label="显存频率" value={info ? String(info.memClock) : "—"} sub="MHz" hue={224} />
               <StatTile
                 icon={Thermometer}
@@ -378,7 +378,7 @@ export function GpuTune() {
                 label="显存"
                 value={info ? formatBytes(info.memUsedBytes, 1) : "—"}
                 sub={info ? `/ ${formatBytes(info.memTotalBytes, 0)}` : ""}
-                hue={280}
+                hue={accentHue()}
               />
               <StatTile
                 icon={Cpu}

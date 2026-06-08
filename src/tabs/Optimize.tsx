@@ -8,7 +8,7 @@ import { TabHeader } from "../components/ui/TabHeader";
 import { hoverPop } from "../lib/motion";
 import { cn } from "../lib/cn";
 import { formatBytes } from "../lib/format";
-import { hueColor } from "../lib/colors";
+import { hueColor, accentHue } from "../lib/colors";
 import { useTf } from "../lib/i18n";
 import { api, type MemDetail } from "../lib/ipc";
 import { Tuning } from "./Tuning";
@@ -263,7 +263,7 @@ export function Optimize() {
                 / {mem ? formatBytes(mem.total) : "—"}
               </span>
             </div>
-            <div className="nums text-[15px] font-semibold" style={{ color: hueColor(loadPct > 80 ? 22 : 274, 72, 0.16) }}>
+            <div className="nums text-[15px] font-semibold" style={{ color: hueColor(loadPct > 80 ? 22 : accentHue(), 72, 0.16) }}>
               {loadPct}%
             </div>
           </div>
@@ -344,7 +344,7 @@ export function Optimize() {
               icon={MemoryStick}
               title="释放内存"
               desc="清空所有进程的工作集，回收驻留内存"
-              hue={274}
+              hue={accentHue()}
               onRun={runFree}
             />
             <ActionCard

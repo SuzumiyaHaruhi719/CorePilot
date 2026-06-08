@@ -16,6 +16,7 @@ import { maskFromIds, popcount } from "../lib/cpu";
 import { maskToCpuList } from "../lib/format";
 import { api, type CpuTopology, type ProcInfo } from "../lib/ipc";
 import { groupForProcess, maskToBigInt, useGroups, type GroupRule } from "../store/groups";
+import { useSettings } from "../store/settings";
 import { useUi } from "../store/ui";
 
 /**
@@ -41,6 +42,21 @@ export function CoreAssignment() {
   const tf = useTf();
   const [topo, setTopo] = useState<CpuTopology | null>(null);
   const { processes, loading, error } = useProcesses();
+  const ccdNoticeSeen = useSettings((s) => s.ccdNoticeSeen);
+  const setSettings = useSettings((s) => s.update);
+  const [ccdNoticeVisible, setCcdNoticeVisible] = useState(false);
+
+  // CCD cluster notice: show once on first run, then auto-dismiss after a few
+  // seconds and remember it (persisted) so it never reappears.
+  useEffect(() => {
+    if (!topo || ccdNoticeSeen) return;
+    setCcdNoticeVisible(true);
+    const t = setTimeout(() => {
+      setCcdNoticeVisible(false);
+      setSettings({ ccdNoticeSeen: true });
+    }, 9000);
+    return () => clearTimeout(t);
+  }, [topo, ccdNoticeSeen, setSettings]);
 
   const groups = useGroups((s) => s.groups);
   const selectedId = useGroups((s) => s.selectedId);
@@ -547,6 +563,37 @@ export function CoreAssignment() {
         title="进程核心分配"
         subtitle="将进程分组并绑定到指定 CPU 核心 / 线程 — CCD 感知调度"
       />
+      <AnimatePresence>
+        {topo && ccdNoticeVisible && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden"
+          >
+            <div
+              className={
+                "mx-4 mb-1 flex items-center gap-2 rounded-lg border px-3 py-1.5 text-[11.5px] " +
+                (topo.ccds.length > 1 ? "border-line bg-surface2/40 text-muted" : "border-warn/35 bg-warn/[0.07] text-warn")
+              }
+            >
+              <Cpu size={13} className="shrink-0" />
+              <span className="min-w-0">
+                {topo.ccds.length > 1
+                  ? tf(
+                      `检测到 ${topo.ccds.length} 个核心簇（CCD）· 支持按 CCD 分配核心`,
+                      `${topo.ccds.length} core clusters (CCDs) detected · CCD-aware core assignment supported`,
+                    )
+                  : tf(
+                      "单核心簇 CPU（如 9800X3D / 多数 Intel）：所有核心等价，按 CCD 分配收益有限，但仍可将进程固定到指定核心。",
+                      "Single-cluster CPU (e.g. 9800X3D / most Intel): all cores are equivalent, so CCD grouping has limited benefit — you can still pin processes to specific cores.",
+                    )}
+              </span>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       <div className="flex min-h-0 flex-1">
         <GroupRail
           processes={processes}

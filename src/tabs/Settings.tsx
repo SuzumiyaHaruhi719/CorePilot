@@ -28,21 +28,16 @@ import { Segmented } from "../components/ui/Segmented";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
-import { hueColor } from "../lib/colors";
 import { useT, useTf } from "../lib/i18n";
 import { api, type NetCheck, type ProcInfo } from "../lib/ipc";
 import {
-  ACCENT_HUE,
   THEME_STYLES,
   useSettings,
-  type AccentName,
   type GlowLevel,
   type Language,
   type Theme,
 } from "../store/settings";
 import { useRecordTargets } from "../store/recordTargets";
-
-const ACCENTS: AccentName[] = ["violet", "cyan", "teal", "amber", "rose"];
 
 interface SettingRowProps {
   title: string;
@@ -428,8 +423,15 @@ function PerfRecordTargetsCard() {
           <span className="nums rounded-md bg-surface3 px-1.5 py-0.5 text-[10.5px] text-dim">{targets.length}</span>
         )}
       </button>
-      {!collapsed && (
-        <>
+      <AnimatePresence initial={false}>
+        {!collapsed && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden"
+          >
       <div className="mb-3 mt-2 text-[12px] leading-relaxed text-dim">
         控制哪些程序会被记录性能报告（独立于 OSD 显示名单）：白名单 = 强制记录（即使未被识别为游戏），黑名单
         = 从不记录（即使被识别为游戏）。
@@ -502,8 +504,9 @@ function PerfRecordTargetsCard() {
           ))}
         </div>
       )}
-        </>
-      )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Pick a target from the currently-running processes. */}
       <Modal open={pickerOpen} onClose={() => setPickerOpen(false)} title="从运行中的进程选择">
@@ -566,6 +569,8 @@ export function Settings() {
   const settings = useSettings();
   const t = useT();
   const tf = useTf();
+  const [stylesOpen, setStylesOpen] = useState(false);
+  const activeStyle = THEME_STYLES.find((s) => s.id === settings.themeStyle);
 
   return (
     <>
@@ -583,7 +588,10 @@ export function Settings() {
               id="theme"
               value={settings.theme}
               onChange={(v) =>
-                settings.update({ theme: v as Theme, themeStyle: v === "light" ? "porcelain" : "graphite" })
+                settings.update({
+                  theme: v as Theme,
+                  themeStyle: v === "light" ? "porcelain" : "graphite",
+                })
               }
               options={[
                 { value: "dark", label: "深色" },
@@ -591,65 +599,56 @@ export function Settings() {
               ]}
             />
           </SettingRow>
-          <div className="px-1 py-2">
-            <div className="mb-2 flex items-baseline gap-2">
+          <div className="border-b border-line/60 py-2">
+            <button
+              onClick={() => setStylesOpen((o) => !o)}
+              aria-expanded={stylesOpen}
+              className="no-drag flex w-full items-center gap-2 text-left"
+            >
               <span className="text-[13px] font-medium text-ink">{t("主题风格")}</span>
-              <span className="text-[11px] text-dim">{t("选择主题风格")}</span>
-            </div>
-            <div className="grid grid-cols-2 gap-2.5">
-              {THEME_STYLES.map((s) => {
-                const active = settings.themeStyle === s.id;
-                return (
-                  <button
-                    key={s.id}
-                    onClick={() => settings.update({ theme: s.mode, themeStyle: s.id })}
-                    aria-pressed={active}
-                    className={cn(
-                      "no-drag cursor-pointer rounded-xl border p-3 text-left transition-colors",
-                      active ? "border-accent/60 bg-accent/10 glow-sm" : "border-line bg-surface2/40 hover:border-line-strong hover:bg-surface3",
-                    )}
-                  >
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <span className="text-[13px] font-semibold text-ink">{t(s.name)}</span>
-                      <span className="hud-label text-[8.5px] text-dim">{s.mode === "dark" ? t("深色") : t("浅色")}</span>
-                    </div>
-                    <div className="mb-2 flex gap-1.5">
-                      {s.swatches.map((c, i) => (
-                        <span key={i} className="h-6 flex-1 rounded-md ring-1 ring-inset ring-line" style={{ background: c }} />
-                      ))}
-                    </div>
-                    <div className="text-[11px] leading-relaxed text-dim">{t(s.desc)}</div>
-                  </button>
-                );
-              })}
-            </div>
+              <span className="text-[11px] text-dim">· {activeStyle ? t(activeStyle.name) : ""}</span>
+              <ChevronRight size={15} className={cn("ml-auto shrink-0 text-dim transition-transform duration-200", stylesOpen && "rotate-90")} />
+            </button>
+            <AnimatePresence initial={false}>
+              {stylesOpen && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: "auto", opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+                  className="overflow-hidden"
+                >
+                  <div className="grid grid-cols-2 gap-2.5 pt-2.5">
+                    {THEME_STYLES.map((s) => {
+                      const active = settings.themeStyle === s.id;
+                      return (
+                        <button
+                          key={s.id}
+                          onClick={() => settings.update({ theme: s.mode, themeStyle: s.id })}
+                          aria-pressed={active}
+                          className={cn(
+                            "no-drag cursor-pointer rounded-xl border p-3 text-left transition-colors",
+                            active ? "border-accent/60 bg-accent/10 glow-sm" : "border-line bg-surface2/40 hover:border-line-strong hover:bg-surface3",
+                          )}
+                        >
+                          <div className="mb-2 flex items-center justify-between gap-2">
+                            <span className="text-[13px] font-semibold text-ink">{t(s.name)}</span>
+                            <span className="hud-label text-[8.5px] text-dim">{s.mode === "dark" ? t("深色") : t("浅色")}</span>
+                          </div>
+                          <div className="mb-2 flex gap-1.5">
+                            {s.swatches.map((c, i) => (
+                              <span key={i} className="h-6 flex-1 rounded-md ring-1 ring-inset ring-line" style={{ background: c }} />
+                            ))}
+                          </div>
+                          <div className="text-[11px] leading-relaxed text-dim">{t(s.desc)}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
-          <SettingRow title="强调色" desc="主题主色调，实时应用">
-            <div className="flex gap-2">
-              {ACCENTS.map((accent) => {
-                const active = settings.accent === accent;
-                return (
-                  <motion.button
-                    key={accent}
-                    title={accent}
-                    aria-label={`${tf("强调色", "Accent color")}: ${accent}`}
-                    aria-pressed={active}
-                    whileHover={{ scale: 1.15 }}
-                    whileTap={{ scale: 0.9 }}
-                    onClick={() => settings.update({ accent })}
-                    className={cn(
-                      "grid h-7 w-7 cursor-pointer place-items-center rounded-full border-2 transition",
-                      active ? "border-ink glow" : "border-transparent hover:border-line-strong",
-                    )}
-                    style={{ background: hueColor(ACCENT_HUE[accent], 72, 0.16) }}
-                  >
-                    {active && <Check size={13} strokeWidth={3} className="text-white drop-shadow" />}
-                  </motion.button>
-                );
-              })}
-            </div>
-          </SettingRow>
-
           <SettingRow title="发光强度" desc="界面柔和发光效果">
             <Segmented
               id="glow"

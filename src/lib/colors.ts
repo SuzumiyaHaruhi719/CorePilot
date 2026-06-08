@@ -15,6 +15,26 @@ export function isLightTheme(): boolean {
 }
 
 /**
+ * OKLCH hue of the ACTIVE theme's accent (keyed off `data-theme-style` on
+ * <html>). Lets "primary" telemetry (CPU %, GPU clock, VRAM, CPU temp, etc.)
+ * track the theme accent instead of a fixed violet that clashes per theme.
+ * Mirrors the accent hues in THEME_STYLES / index.css. Reads the DOM live, so
+ * re-render to pick up a theme switch (same contract as hueColor).
+ */
+const STYLE_ACCENT_HUE: Record<string, number> = {
+  graphite: 50, // warm orange
+  cyberpunk: 101, // neon yellow
+  midnight: 274, // violet-blue
+  terminal: 144, // phosphor green
+  porcelain: 235, // light blue
+  sandstone: 48, // terracotta
+};
+export function accentHue(): number {
+  const style = typeof document !== "undefined" ? document.documentElement.dataset.themeStyle : undefined;
+  return (style ? STYLE_ACCENT_HUE[style] : undefined) ?? 50;
+}
+
+/**
  * Telemetry/identity color for a hue, tuned per theme. The dark HUD uses bright
  * (~80% L) neon hues; on a light background those wash out, so light mode drops
  * lightness and adds chroma for vivid, AA-legible lines, dots and fills. Used by

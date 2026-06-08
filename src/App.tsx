@@ -1,10 +1,11 @@
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { useEffect, useRef, useState, type ReactElement } from "react";
+import { emit } from "@tauri-apps/api/event";
 import { NavRail } from "./components/shell/NavRail";
 import { StatusBar } from "./components/shell/StatusBar";
 import { TitleBar } from "./components/shell/TitleBar";
 import { api, type Overview } from "./lib/ipc";
-import { ACCENT_HUE, useSettings } from "./store/settings";
+import { useSettings } from "./store/settings";
 import { useAffinityEnforcer } from "./hooks/useAffinityEnforcer";
 import { useOsdHotkey } from "./hooks/useOsdHotkey";
 import { usePerfRecorder } from "./hooks/usePerfRecorder";
@@ -53,7 +54,6 @@ const TABS: Record<TabId, () => ReactElement> = {
 
 function App() {
   const tab = useUi((s) => s.tab);
-  const accent = useSettings((s) => s.accent);
   const acrylic = useSettings((s) => s.acrylic);
   const windowOpacity = useSettings((s) => s.windowOpacity);
   const glow = useSettings((s) => s.glow);
@@ -100,16 +100,24 @@ function App() {
   // is async (tauri-plugin-store) → wait for hydration before reading state.
   // A failed push records `lastError` in the store, surfaced on the Fan page.
   useEffect(() => {
+    let retry: ReturnType<typeof setTimeout> | undefined;
     const applyFans = () => {
-      if (useFanProfiles.getState().applyOnStartup) {
-        useFanProfiles.getState().push();
-      }
+      if (!useFanProfiles.getState().applyOnStartup) return;
+      useFanProfiles.getState().push();
+      // A fresh-boot push can land BEFORE sensord has enumerated the writable fan
+      // headers, so the backend rejects every config ("unknown/non-controllable
+      // control id") and curves never take effect. Re-push once it's had time to
+      // come up; the second push is a no-op if the first already succeeded.
+      retry = setTimeout(() => {
+        if (useFanProfiles.getState().applyOnStartup) useFanProfiles.getState().push();
+      }, 5000);
     };
-    if (useFanProfiles.persist.hasHydrated()) {
-      applyFans();
-      return;
-    }
-    return useFanProfiles.persist.onFinishHydration(applyFans);
+    const un = useFanProfiles.persist.hasHydrated() ? undefined : useFanProfiles.persist.onFinishHydration(applyFans);
+    if (useFanProfiles.persist.hasHydrated()) applyFans();
+    return () => {
+      un?.();
+      if (retry) clearTimeout(retry);
+    };
   }, []);
 
   // Re-show the OSD overlay on launch if it was left enabled OR desktop mode is
@@ -125,28 +133,6 @@ function App() {
     }
     return useOsd.persist.onFinishHydration(showIfEnabled);
   }, []);
-
-  useEffect(() => {
-    const root = document.documentElement.style;
-    // Only the neutral baselines (graphite/porcelain) follow the accent-hue
-    // picker. The designed styles (midnight/sandstone/terminal) ship their own
-    // signature accent from CSS, so clear the inline override to let it stand.
-    if (themeStyle !== "graphite" && themeStyle !== "porcelain") {
-      root.removeProperty("--color-accent");
-      root.removeProperty("--color-accent-bright");
-      return;
-    }
-    const hue = ACCENT_HUE[accent];
-    // Theme-aware lightness/chroma: the bright dark-mode accent is too light on a
-    // light background, so light mode uses a darker, more saturated accent.
-    if (theme === "light") {
-      root.setProperty("--color-accent", `oklch(45% 0.255 ${hue})`);
-      root.setProperty("--color-accent-bright", `oklch(51% 0.24 ${hue})`);
-    } else {
-      root.setProperty("--color-accent", `oklch(67% 0.185 ${hue})`);
-      root.setProperty("--color-accent-bright", `oklch(77% 0.16 ${hue})`);
-    }
-  }, [accent, theme, themeStyle]);
 
   useEffect(() => {
     document.documentElement.dataset.acrylic = String(acrylic);
@@ -176,6 +162,9 @@ function App() {
     const apply = () => {
       root.dataset.theme = theme;
       root.dataset.themeStyle = themeStyle;
+      // Recolor the OSD overlay window (a separate webview that never mounts App)
+      // to match the active theme.
+      void emit("osd:theme", { theme, themeStyle });
     };
     type VTDoc = Document & { startViewTransition?: (cb: () => void) => { ready: Promise<void> } };
     const startVT = (document as VTDoc).startViewTransition?.bind(document);

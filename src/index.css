@@ -179,8 +179,8 @@ html {
   html[data-acrylic="true"] body {
     background:
       radial-gradient(60% 56% at 6% -8%, color-mix(in oklch, var(--color-accent) 32%, transparent), transparent 58%),
-      radial-gradient(56% 54% at 106% 4%, oklch(80% 0.13 205 / 0.24), transparent 60%),
-      radial-gradient(60% 56% at 100% 106%, oklch(78% 0.12 285 / 0.22), transparent 62%),
+      radial-gradient(56% 54% at 106% 4%, color-mix(in oklch, var(--color-cyan) 26%, transparent), transparent 60%),
+      radial-gradient(60% 56% at 100% 106%, color-mix(in oklch, var(--color-accent-bright) 22%, transparent), transparent 62%),
       var(--color-base);
   }
   /* Layer 1 — cards: more translucent so the colour field clearly bleeds through
@@ -483,8 +483,8 @@ html[data-theme="light"] {
   --color-muted: oklch(36.5% 0.04 285);
   --color-dim: oklch(48% 0.035 285);
 
-  --color-accent: oklch(45% 0.255 293);
-  --color-accent-bright: oklch(51% 0.24 295);
+  --color-accent: oklch(52% 0.17 235);
+  --color-accent-bright: oklch(58% 0.155 237);
   --color-rose: oklch(47% 0.245 12);
   --color-rose-bright: oklch(53% 0.235 14);
   --color-cyan: oklch(45% 0.18 218);
@@ -614,6 +614,155 @@ body {
    the designed styles below own their accent (see App.tsx).
    ============================================================ */
 
+/* 石墨 / Graphite — TRUE neutral black. The @theme baseline is violet-tinted
+   (hue 285, chroma 0.028 → reads purple under an eyedropper), so graphite must
+   neutralize EVERY surface token to chroma 0, not just the accent. Pure black /
+   charcoal surfaces + a warm ORANGE accent (matching the reference). */
+html[data-theme-style="graphite"] {
+  --color-base: oklch(9% 0 0);
+  --color-surface: oklch(13.5% 0 0);
+  --color-surface2: oklch(18.5% 0 0);
+  --color-surface3: oklch(24% 0 0);
+  --color-elevated: oklch(16% 0 0);
+  --color-line: oklch(100% 0 0 / 0.08);
+  --color-line-strong: oklch(80% 0.07 55 / 0.22); /* faint warm (orange) edge */
+  --color-ink: oklch(96% 0 0);
+  --color-muted: oklch(72% 0 0);
+  --color-dim: oklch(55% 0 0);
+  --color-accent: oklch(70% 0.175 50);
+  --color-accent-bright: oklch(77% 0.16 55);
+}
+
+/* 赛博朋克 / Cyberpunk — CP2077 classic BLACK·YELLOW·BLUE (web-confirmed: broom
+   yellow #FCEE0A + electric cyan #02D7F2 on black). #00060e night base, blue-black
+   surfaces (hue ~235, NEVER violet), #fee801 neon-yellow primary accent, cyan
+   edges + #54c1e6 cyan / #39c4b6 teal telemetry. Black + yellow + blue, no purple. */
+html[data-theme-style="cyberpunk"] {
+  --color-base: #00060e;
+  --color-surface: oklch(17% 0.045 235);
+  --color-surface2: oklch(22% 0.05 233);
+  --color-surface3: oklch(27.5% 0.052 231);
+  --color-elevated: oklch(19.5% 0.048 234);
+  --color-line: oklch(82% 0.08 220 / 0.12);
+  --color-line-strong: oklch(78% 0.13 218 / 0.4); /* electric-blue edge */
+  --color-ink: oklch(96% 0.012 230);
+  --color-muted: oklch(73% 0.022 228);
+  --color-dim: oklch(56% 0.028 230);
+  --color-accent: #fee801;
+  --color-accent-bright: #fff45a;
+  --color-cyan: #54c1e6;
+  --color-vcache: #39c4b6;
+}
+
+/* Bright-accent dark styles use a near-black accent base, so primary buttons /
+   accent fills (which ship white text) get DARK text instead — white-on-neon is
+   illegible. Targets the gradient-accent button surface. */
+html[data-theme-style="graphite"] .grad-accent,
+html[data-theme-style="terminal"] .grad-accent,
+html[data-theme-style="cyberpunk"] .grad-accent {
+  color: oklch(16% 0.02 100);
+  text-shadow: none;
+}
+
+/* ============================================================
+   赛博朋克 POLISH (co-designed with Codex) — CSS-only CP2077 flourishes, scoped
+   to the cyberpunk theme and NEVER the transparent OSD overlay (:not(.osd-window)).
+   All motion gated under prefers-reduced-motion + the in-app reduce-motion flag.
+   ============================================================ */
+
+/* Faint CRT scanlines over the whole UI (very low opacity, never intercept input). */
+html[data-theme-style="cyberpunk"]:not(.osd-window) body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    oklch(100% 0 0 / 0.03) 0px,
+    oklch(100% 0 0 / 0.03) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: overlay;
+}
+
+/* Slow neon scan-sweep band drifting down the screen (CRT refresh) — infrequent. */
+html[data-theme-style="cyberpunk"]:not(.osd-window) body::after {
+  content: "";
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: -18%;
+  height: 18%;
+  z-index: 8999;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in oklch, var(--color-cyan) 16%, transparent),
+    color-mix(in oklch, var(--color-accent) 7%, transparent),
+    transparent
+  );
+  filter: blur(1px);
+  opacity: 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  html[data-theme-style="cyberpunk"]:not(.osd-window) body::after {
+    animation: cyberpunk-scan-sweep 8.5s linear infinite;
+  }
+}
+html[data-reduce-motion="true"][data-theme-style="cyberpunk"] body::after {
+  animation: none;
+  display: none;
+}
+@keyframes cyberpunk-scan-sweep {
+  0%, 80% { opacity: 0; transform: translateY(0); }
+  84% { opacity: 0.22; }
+  100% { opacity: 0; transform: translateY(660%); }
+}
+
+/* Stronger (still faint) dual-color neon HUD grid — yellow fine grid + cyan coarse. */
+html[data-theme-style="cyberpunk"] .hud-grid {
+  opacity: 0.85;
+  background-image:
+    linear-gradient(color-mix(in oklch, var(--color-accent) 9%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in oklch, var(--color-accent) 9%, transparent) 1px, transparent 1px),
+    linear-gradient(color-mix(in oklch, var(--color-cyan) 13%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in oklch, var(--color-cyan) 13%, transparent) 1px, transparent 1px);
+  background-size: 40px 40px, 40px 40px, 200px 200px, 200px 200px;
+  -webkit-mask-image: radial-gradient(120% 100% at 50% 0%, #000 30%, transparent 84%);
+  mask-image: radial-gradient(120% 100% at 50% 0%, #000 30%, transparent 84%);
+}
+
+/* Neon card edges — inset cyan hairline + faint yellow outer + top sheen + soft
+   glow. Pure box-shadow + background-image, so NO size/layout change. */
+html[data-theme-style="cyberpunk"] .glass {
+  background-image:
+    linear-gradient(135deg, color-mix(in oklch, var(--color-accent) 6%, transparent), transparent 36%),
+    linear-gradient(180deg, color-mix(in oklch, var(--color-cyan) 5%, transparent), transparent 48%);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklch, var(--color-cyan) 28%, transparent),
+    inset 0 1px 0 oklch(100% 0 0 / 0.06),
+    0 0 0 1px color-mix(in oklch, var(--color-accent) 6%, transparent),
+    0 18px 40px -26px oklch(0% 0 0 / 0.9),
+    0 0 calc(20px * var(--glow-o, 1)) color-mix(in oklch, var(--color-cyan) 10%, transparent);
+}
+
+/* Brighter neon corner brackets + restrained neon glow on headings. */
+html[data-theme-style="cyberpunk"] .hud-frame::before,
+html[data-theme-style="cyberpunk"] .hud-frame::after {
+  width: 15px;
+  height: 15px;
+  border-color: color-mix(in oklch, var(--color-accent) 72%, transparent);
+  filter: drop-shadow(0 0 5px color-mix(in oklch, var(--color-accent) 28%, transparent));
+}
+html[data-theme-style="cyberpunk"] :where(h1, h2, .hud-label) {
+  text-shadow:
+    0 0 8px color-mix(in oklch, var(--color-accent) 16%, transparent),
+    0 0 16px color-mix(in oklch, var(--color-cyan) 11%, transparent);
+}
+
 /* 午夜 / Midnight — deeper, bluer dark with a cool violet-blue accent. */
 html[data-theme-style="midnight"] {
   --color-base: oklch(10.5% 0.045 270);
@@ -646,18 +795,20 @@ html[data-theme-style="sandstone"] {
   --color-accent-bright: oklch(49% 0.17 52);
 }
 
-/* 终端 / Terminal — near-black telemetry HUD with phosphor-green accent. */
+/* 终端 / Terminal — NEUTRAL near-black surfaces (no green wash!) with phosphor
+   green only as the accent, line-glow and ink hint. Surfaces keep chroma ≈0 so
+   the UI reads as a black terminal, not a green tint. */
 html[data-theme-style="terminal"] {
-  --color-base: oklch(9.8% 0.018 155);
-  --color-surface: oklch(14.5% 0.026 158);
-  --color-surface2: oklch(19% 0.034 158);
-  --color-surface3: oklch(24.5% 0.044 158);
-  --color-elevated: oklch(16.8% 0.032 158);
-  --color-line: oklch(94% 0.05 150 / 0.09);
-  --color-line-strong: oklch(82% 0.12 145 / 0.24);
-  --color-ink: oklch(95.5% 0.018 148);
-  --color-muted: oklch(73% 0.045 150);
-  --color-dim: oklch(56% 0.055 150);
-  --color-accent: oklch(76% 0.19 145);
-  --color-accent-bright: oklch(86% 0.18 142);
+  --color-base: oklch(12% 0.004 160);
+  --color-surface: oklch(16% 0.005 160);
+  --color-surface2: oklch(21% 0.006 160);
+  --color-surface3: oklch(27% 0.008 162);
+  --color-elevated: oklch(18.5% 0.006 160);
+  --color-line: oklch(100% 0 0 / 0.08);
+  --color-line-strong: oklch(82% 0.1 145 / 0.20);
+  --color-ink: oklch(96% 0.008 160);
+  --color-muted: oklch(72% 0.014 155);
+  --color-dim: oklch(55% 0.016 155);
+  --color-accent: oklch(82% 0.2 144);
+  --color-accent-bright: oklch(89% 0.18 142);
 }

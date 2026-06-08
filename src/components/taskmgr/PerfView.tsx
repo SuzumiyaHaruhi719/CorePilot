@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useMetricsHistory } from "../../hooks/useMetricsHistory";
 import { useSensors } from "../../hooks/useSensors";
 import { cn } from "../../lib/cn";
+import { accentHue } from "../../lib/colors";
 import { formatBytes } from "../../lib/format";
 import { useTf } from "../../lib/i18n";
 import { api, type CpuTopology, type GpuOcInfo, type Overview } from "../../lib/ipc";
@@ -147,7 +148,7 @@ export function PerfView() {
               {overview?.cpuName ?? "—"}
             </div>
             <div className="my-2">
-              <Sparkline data={cpu} max={100} hue={280} height={84} />
+              <Sparkline data={cpu} max={100} hue={accentHue()} height={84} />
             </div>
             <div className="grid grid-cols-3 gap-2">
               <Stat label="频率" value={fmtCpuClock(sensors?.cpuClock)} />

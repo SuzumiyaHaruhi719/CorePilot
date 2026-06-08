@@ -228,6 +228,10 @@ export interface FanChannelConfig {
   tempSourceId?: string | null;
   curve?: FanCurvePoint[];
   minDuty?: number;
+  /** Curve-mode ramp-up smoothing: 0 = Smooth, 100 = Immediate (instant). */
+  spinUpPct?: number;
+  /** Curve-mode ramp-down smoothing: 0 = Smooth, 100 = Immediate (instant). */
+  spinDownPct?: number;
 }
 
 /** One measured (duty %, RPM) sample from an AI calibration sweep. */

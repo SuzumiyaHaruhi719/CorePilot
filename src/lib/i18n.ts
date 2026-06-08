@@ -72,10 +72,11 @@ export const EN: Record<string, string> = {
   // Settings rows
   "主题": "Theme", "深色 HUD 或浅色界面": "Dark HUD or light interface", "深色": "Dark", "浅色": "Light",
   "主题风格": "Theme style", "选择主题风格": "Choose a palette",
-  "石墨": "Graphite", "午夜": "Midnight", "终端": "Terminal", "瓷白": "Porcelain", "砂岩": "Sandstone",
-  "冷色深色调，适合长时间使用。": "Cool dark tone, easy on the eyes for long sessions.",
+  "石墨": "Graphite", "午夜": "Midnight", "终端": "Terminal", "赛博朋克": "Cyberpunk", "瓷白": "Porcelain", "砂岩": "Sandstone",
+  "冷色深色调 + 暖橙强调，适合长时间使用。": "Cool dark surfaces + warm orange accent — easy for long sessions.",
   "更深更蓝的午夜界面，冷紫蓝强调色。": "Deeper, bluer midnight UI with a cool violet accent.",
-  "近黑遥测终端 + 磷光绿，极客风。": "Near-black telemetry terminal with phosphor green — geek mode.",
+  "近黑终端 + 磷光绿，极客风。": "Near-black terminal + phosphor green — geek mode.",
+  "赛博朋克 2077 霓虹黄，暗夜街头。": "Cyberpunk 2077 neon yellow — neon-noir streets.",
   "高对比度浅色，简洁清爽。": "High-contrast light — clean and crisp.",
   "暖色浅色调，明亮环境更舒适。": "Warm light tone — easier in bright rooms.",
   "强调色": "Accent color",
@@ -491,6 +492,188 @@ function walk(root: Node, en: boolean) {
   }
 }
 
+// ── Neural "脉络亮起熄灭" language-switch animation ─────────────────────────
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+interface NeuralNode {
+  x: number;
+  y: number;
+}
+
+/** Read a CSS custom property off :root, falling back to a default. */
+function readVar(name: string, fallback: string): string {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+/** Procedurally place neuron nodes at random viewport positions. */
+function makeNodes(count: number, w: number, h: number): NeuralNode[] {
+  const nodes: NeuralNode[] = [];
+  // Keep nodes off the very edge so the glow isn't clipped.
+  const padX = w * 0.06;
+  const padY = h * 0.06;
+  for (let i = 0; i < count; i++) {
+    nodes.push({
+      x: padX + Math.random() * (w - padX * 2),
+      y: padY + Math.random() * (h - padY * 2),
+    });
+  }
+  return nodes;
+}
+
+/** Connect each node to its 2–3 nearest neighbours; dedupe undirected edges. */
+function makeEdges(nodes: NeuralNode[]): Array<[number, number]> {
+  const edges = new Set<string>();
+  nodes.forEach((node, i) => {
+    const neighbours = nodes
+      .map((other, j) => ({ j, d: (other.x - node.x) ** 2 + (other.y - node.y) ** 2 }))
+      .filter((n) => n.j !== i)
+      .sort((a, b) => a.d - b.d)
+      .slice(0, 2 + Math.floor(Math.random() * 2)); // 2–3 nearest
+    for (const n of neighbours) {
+      const key = i < n.j ? `${i}-${n.j}` : `${n.j}-${i}`;
+      edges.add(key);
+    }
+  });
+  return [...edges].map((k) => k.split("-").map(Number) as [number, number]);
+}
+
+/**
+ * Build a full-screen overlay where a neural network ignites (synapses draw via
+ * stroke-dashoffset, nodes glow in), the text swaps at the ignition peak, then the
+ * whole thing extinguishes. Pure WAAPI timing; self-cleaning. Returns a disposer.
+ */
+function runNeuralSwitch(runWalk: () => void): () => void {
+  const w = window.innerWidth || document.documentElement.clientWidth || 1280;
+  const h = window.innerHeight || document.documentElement.clientHeight || 720;
+  const accent = readVar("--color-accent", "oklch(62% 0.225 293)");
+  const cyan = readVar("--color-cyan", "oklch(80% 0.13 218)");
+
+  const overlay = document.createElement("div");
+  overlay.setAttribute("aria-hidden", "true");
+  Object.assign(overlay.style, {
+    position: "fixed",
+    inset: "0",
+    pointerEvents: "none",
+    zIndex: "9600",
+    contain: "strict",
+  } as CSSStyleDeclaration);
+
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("width", String(w));
+  svg.setAttribute("height", String(h));
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  Object.assign(svg.style, { width: "100%", height: "100%", display: "block" } as CSSStyleDeclaration);
+  overlay.appendChild(svg);
+
+  const nodeCount = 14 + Math.floor(Math.random() * 5); // 14–18
+  const nodes = makeNodes(nodeCount, w, h);
+  const edges = makeEdges(nodes);
+
+  const lineEls: SVGLineElement[] = [];
+  edges.forEach(([a, b]) => {
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", String(nodes[a].x));
+    line.setAttribute("y1", String(nodes[a].y));
+    line.setAttribute("x2", String(nodes[b].x));
+    line.setAttribute("y2", String(nodes[b].y));
+    const useCyan = Math.random() < 0.35;
+    line.setAttribute("stroke", useCyan ? cyan : accent);
+    line.setAttribute("stroke-width", "1.2");
+    line.setAttribute("stroke-linecap", "round");
+    line.style.filter = `drop-shadow(0 0 3px ${useCyan ? cyan : accent})`;
+    svg.appendChild(line);
+    lineEls.push(line);
+  });
+
+  const nodeEls: SVGCircleElement[] = [];
+  nodes.forEach((node, i) => {
+    const c = document.createElementNS(SVG_NS, "circle");
+    c.setAttribute("cx", String(node.x));
+    c.setAttribute("cy", String(node.y));
+    c.setAttribute("r", String(2.4 + Math.random() * 2.2));
+    const useCyan = i % 4 === 0;
+    c.setAttribute("fill", useCyan ? cyan : accent);
+    c.style.filter = `drop-shadow(0 0 6px ${useCyan ? cyan : accent})`;
+    c.style.transformBox = "fill-box";
+    c.style.transformOrigin = "center";
+    svg.appendChild(c);
+    nodeEls.push(c);
+  });
+
+  document.body.appendChild(overlay);
+
+  const STAGGER = 18; // ms between synapses lighting up (organic propagation)
+  const DRAW_MS = 340;
+  const IGNITE_PEAK = 260; // text swaps here
+  const EXTINGUISH_MS = 300;
+  // Cap the cascade so a dense graph still finishes inside the ~800–950ms budget.
+  const MAX_HOLD = 600;
+
+  // IGNITE: synapses "draw" via dashoffset; nodes fade/scale in with a glow.
+  lineEls.forEach((line, i) => {
+    const len = line.getTotalLength();
+    line.style.strokeDasharray = String(len);
+    line.style.strokeDashoffset = String(len);
+    line.animate(
+      [
+        { strokeDashoffset: len, opacity: 0.2 },
+        { strokeDashoffset: 0, opacity: 1 },
+      ],
+      { duration: DRAW_MS, delay: i * STAGGER, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "both" },
+    );
+  });
+
+  nodeEls.forEach((c, i) => {
+    c.animate(
+      [
+        { opacity: 0, transform: "scale(0.2)" },
+        { opacity: 1, transform: "scale(1.25)", offset: 0.7 },
+        { opacity: 1, transform: "scale(1)" },
+      ],
+      { duration: 320, delay: i * STAGGER * 0.8, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "both" },
+    );
+  });
+
+  let swapped = false;
+  const swap = () => {
+    if (swapped) return;
+    swapped = true;
+    runWalk();
+  };
+
+  // Swap text at the ignition peak.
+  const swapTimer = window.setTimeout(swap, IGNITE_PEAK);
+
+  // EXTINGUISH: hold the lit network briefly, then fade the whole overlay out.
+  const lastDelay = Math.max(lineEls.length - 1, 0) * STAGGER + DRAW_MS;
+  const holdUntil = Math.min(Math.max(lastDelay, IGNITE_PEAK + 220), MAX_HOLD);
+  let removed = false;
+  const cleanup = () => {
+    if (removed) return;
+    removed = true;
+    window.clearTimeout(swapTimer);
+    window.clearTimeout(fadeTimer);
+    overlay.remove();
+  };
+
+  const fade = overlay.animate([{ opacity: 1 }, { opacity: 0 }], {
+    duration: EXTINGUISH_MS,
+    delay: holdUntil,
+    easing: "ease-in",
+    fill: "forwards",
+  });
+  fade.onfinish = cleanup;
+  // Safety net in case onfinish never fires (e.g. animation cancelled).
+  const fadeTimer = window.setTimeout(cleanup, holdUntil + EXTINGUISH_MS + 80);
+
+  // Disposer: ensure the swap still happens and the overlay is removed on unmount.
+  return () => {
+    swap();
+    cleanup();
+  };
+}
+
 /**
  * Mount once in <App>. Applies the dictionary to the whole DOM on a language
  * change (with a brief fade for a smooth switch) and keeps newly rendered nodes
@@ -501,38 +684,22 @@ export function useGlobalI18n(): void {
   const langFirst = useRef(true);
   useEffect(() => {
     const en = lang === "en";
-    const reduce = document.documentElement.dataset.reduceMotion === "true";
-    type VTDoc = Document & { startViewTransition?: (cb: () => void) => { ready: Promise<void> } };
-    const startVT = (document as VTDoc).startViewTransition?.bind(document);
+    const reduceAttr = document.documentElement.dataset.reduceMotion === "true";
+    const reduceMq =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduce = reduceAttr || reduceMq;
     const runWalk = () => walk(document.body, en);
 
-    if (langFirst.current || reduce || !startVT) {
+    let disposeNeural: (() => void) | undefined;
+    if (langFirst.current || reduce) {
       // First mount (no change to animate) or reduced motion → swap instantly.
       langFirst.current = false;
       runWalk();
     } else {
-      // Premium "HUD shutter": the old text collapses to the centre line while the
-      // new translated DOM expands out from it (Web Animations on the VT snapshots).
-      const vt = startVT(runWalk);
-      vt.ready
-        .then(() => {
-          const timing: KeyframeAnimationOptions = { duration: 320, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "both" };
-          document.documentElement.animate(
-            [
-              { opacity: 1, transform: "scale(1)", clipPath: "inset(0% 0 0% 0)" },
-              { opacity: 0.18, transform: "scale(0.992)", clipPath: "inset(48% 0 48% 0)" },
-            ],
-            { ...timing, pseudoElement: "::view-transition-old(root)" },
-          );
-          document.documentElement.animate(
-            [
-              { opacity: 0.18, transform: "scale(1.006)", clipPath: "inset(50% 0 50% 0)" },
-              { opacity: 1, transform: "scale(1)", clipPath: "inset(0% 0 0% 0)" },
-            ],
-            { ...timing, pseudoElement: "::view-transition-new(root)" },
-          );
-        })
-        .catch(() => undefined);
+      // "神经脉络亮起熄灭" — a neural network ignites across the viewport, swaps the
+      // language at the ignition peak, then extinguishes.
+      disposeNeural = runNeuralSwitch(runWalk);
     }
 
     let raf = 0;
@@ -556,6 +723,7 @@ export function useGlobalI18n(): void {
     return () => {
       if (raf) window.cancelAnimationFrame(raf);
       observer.disconnect();
+      disposeNeural?.();
     };
   }, [lang]);
 }

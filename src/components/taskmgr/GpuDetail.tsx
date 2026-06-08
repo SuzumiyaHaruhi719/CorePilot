@@ -2,6 +2,7 @@ import { MonitorPlay } from "lucide-react";
 import { motion } from "motion/react";
 import { useEffect, useState } from "react";
 import { cn } from "../../lib/cn";
+import { accentHue } from "../../lib/colors";
 import { formatBytes } from "../../lib/format";
 import { api, type GpuOcInfo } from "../../lib/ipc";
 import { Sparkline } from "../charts/Sparkline";
@@ -115,7 +116,7 @@ export function GpuDetail() {
             {info ? formatBytes(info.memUsedBytes) : "—"} / {info ? formatBytes(info.memTotalBytes) : "—"}
           </span>
         </div>
-        <Sparkline data={vramHist} max={100} hue={280} height={56} />
+        <Sparkline data={vramHist} max={100} hue={accentHue()} height={56} />
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">

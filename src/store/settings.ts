@@ -2,21 +2,10 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import { tauriStorage } from "../lib/persist";
 
-export type AccentName = "violet" | "cyan" | "teal" | "amber" | "rose";
-
-/** OKLCH hue per accent — applied at runtime to `--color-accent`. */
-export const ACCENT_HUE: Record<AccentName, number> = {
-  violet: 280,
-  cyan: 220,
-  teal: 182,
-  amber: 75,
-  rose: 12,
-};
-
 export type GlowLevel = "soft" | "medium" | "intense";
 export type Theme = "dark" | "light";
 /** Named palette presets, layered over the dark/light base via `data-theme-style`. */
-export type ThemeStyle = "graphite" | "midnight" | "terminal" | "porcelain" | "sandstone";
+export type ThemeStyle = "graphite" | "midnight" | "terminal" | "cyberpunk" | "porcelain" | "sandstone";
 export type Language = "zh" | "en";
 
 /** Theme-style metadata for the Settings picker. `mode` is the base (dark/light)
@@ -31,16 +20,16 @@ export interface ThemeStyleDef {
 
 /** The selectable theme styles, shown as cards in Settings. Co-designed w/ Codex. */
 export const THEME_STYLES: ThemeStyleDef[] = [
-  { id: "graphite", name: "石墨", mode: "dark", desc: "冷色深色调，适合长时间使用。", swatches: ["oklch(13.5% 0.028 285)", "oklch(23% 0.042 288)", "oklch(62% 0.225 293)"] },
+  { id: "graphite", name: "石墨", mode: "dark", desc: "纯黑中性表面 + 暖橙强调，适合长时间使用。", swatches: ["oklch(9% 0 0)", "oklch(18.5% 0 0)", "oklch(70% 0.175 50)"] },
   { id: "midnight", name: "午夜", mode: "dark", desc: "更深更蓝的午夜界面，冷紫蓝强调色。", swatches: ["oklch(10.5% 0.045 270)", "oklch(20.5% 0.075 270)", "oklch(68% 0.2 274)"] },
-  { id: "terminal", name: "终端", mode: "dark", desc: "近黑遥测终端 + 磷光绿，极客风。", swatches: ["oklch(9.8% 0.018 155)", "oklch(19% 0.034 158)", "oklch(76% 0.19 145)"] },
-  { id: "porcelain", name: "瓷白", mode: "light", desc: "高对比度浅色，简洁清爽。", swatches: ["oklch(98.6% 0.004 285)", "oklch(94% 0.01 287)", "oklch(45% 0.255 293)"] },
+  { id: "terminal", name: "终端", mode: "dark", desc: "近黑终端 + 磷光绿，极客风。", swatches: ["oklch(12% 0.004 160)", "oklch(21% 0.006 160)", "oklch(82% 0.2 144)"] },
+  { id: "cyberpunk", name: "赛博朋克", mode: "dark", desc: "赛博朋克 2077 黑·黄·蓝，暗夜街头。", swatches: ["#00060e", "#54c1e6", "#fee801"] },
+  { id: "porcelain", name: "瓷白", mode: "light", desc: "高对比度浅色，淡蓝强调，简洁清爽。", swatches: ["oklch(98.6% 0.004 285)", "oklch(94% 0.01 287)", "oklch(52% 0.17 235)"] },
   { id: "sandstone", name: "砂岩", mode: "light", desc: "暖色浅色调，明亮环境更舒适。", swatches: ["oklch(97.4% 0.023 83)", "oklch(94.8% 0.032 81)", "oklch(42% 0.155 48)"] },
 ];
 export type PerfCard = "cpu" | "mem" | "gpu" | "disk" | "net" | "power";
 
 interface SettingsState {
-  accent: AccentName;
   /** UI theme. `dark` is the original Premium Gaming HUD; `light` is the full
    *  light redraw (applied via `data-theme` on <html>). */
   theme: Theme;
@@ -65,6 +54,8 @@ interface SettingsState {
   autoShowReport: boolean;
   /** Send a Windows notification when a game is detected / its report is saved. */
   gameNotify: boolean;
+  /** True once the CCD-cluster notice has shown & auto-dismissed (first run only). */
+  ccdNoticeSeen: boolean;
   update: (patch: Partial<Omit<SettingsState, "update" | "togglePerfCard">>) => void;
   togglePerfCard: (card: PerfCard) => void;
 }
@@ -75,7 +66,6 @@ interface SettingsState {
 export const useSettings = create<SettingsState>()(
   persist(
     (set) => ({
-      accent: "violet",
       theme: "dark",
       themeStyle: "graphite",
       glow: "medium",
@@ -90,6 +80,7 @@ export const useSettings = create<SettingsState>()(
       bgRecord: false,
       autoShowReport: true,
       gameNotify: true,
+      ccdNoticeSeen: false,
       update: (patch) => set(patch),
       togglePerfCard: (card) =>
         set((s) => ({ perfCards: { ...s.perfCards, [card]: !s.perfCards[card] } })),
