@@ -115,6 +115,15 @@ const CRITICAL_PROCESS_NAMES: &[&str] = &[
     "winlogon.exe",
 ];
 
+/// True if an image name (any case) is one of the Windows-critical user-mode
+/// processes we refuse to re-affinitize / reprioritize / kill. Cheap (no
+/// `OpenProcess`) so the process list can mark these rows non-settable without a
+/// syscall — keeping the "settable" flag in sync with [`guard_critical_pid`].
+pub fn is_critical_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    CRITICAL_PROCESS_NAMES.contains(&n.as_str())
+}
+
 /// Resolve a PID's executable file name (e.g. `"lsass.exe"`), lowercased.
 /// `None` when the process can't be opened/queried. Never panics.
 fn image_name_lower(pid: u32) -> Option<String> {
@@ -647,9 +656,10 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
                     Some(p.to_string_lossy().to_string())
                 }
             });
+            let name = process.name().to_string_lossy().to_string();
             ProcInfo {
                 pid: id,
-                name: process.name().to_string_lossy().to_string(),
+                name: name.clone(),
                 cpu,
                 mem: process.memory(),
                 threads: threads.get(&id).copied().unwrap_or(0),
@@ -664,7 +674,12 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
                 gpu_engine,
                 gpu_adapter,
                 description: description_for(exe),
-                settable: settable_for(id),
+                // A process is only "settable" if we can both open it for
+                // SET_INFORMATION *and* aren't refusing it as Windows-critical
+                // (lsass/winlogon/services/…). Without the name check, SeDebug
+                // lets OpenProcess succeed on those, so they'd look assignable in
+                // the UI yet silently fail at the guard — confusing the user.
+                settable: settable_for(id) && !is_critical_name(&name),
                 parent_pid: process.parent().map(|p| p.as_u32()).unwrap_or(0),
                 exe_path,
             }

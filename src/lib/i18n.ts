@@ -198,6 +198,8 @@ export const EN: Record<string, string> = {
   "期间风扇会明显变速、可能有噪音，属正常现象；校准时建议不要运行重负载。完成后自动应用。":
     "Fans will change speed audibly during this — that's normal; avoid heavy load while calibrating. Applied automatically when done.",
   "校准失败": "Calibration failed", "正在校准": "Calibrating", "确定删除配置": "Delete the profile",
+  "重置默认曲线": "Reset to default curve",
+  "撤销 AI 校准 / 自定义，恢复内置默认曲线": "Undo AI calibration / custom tweaks; restore the built-in default curve",
   "删除风扇配置": "Delete fan profile", "确定删除超频配置": "Delete the OC profile",
   "删除超频配置": "Delete OC profile",
   "吗？此操作不可撤销（当前风扇设置不受影响）。": "? This can't be undone (current fan settings are unaffected).",

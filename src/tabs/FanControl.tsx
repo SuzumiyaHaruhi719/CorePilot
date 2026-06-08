@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Eye, EyeOff, Fan, Gauge, Info, Layers, Loader2, Moon, Pencil, RefreshCw, Save, Sparkles, Thermometer, Trash2, Wind } from "lucide-react";
+import { AlertTriangle, Check, Eye, EyeOff, Fan, Gauge, Info, Layers, Loader2, Moon, Pencil, RefreshCw, RotateCcw, Save, Sparkles, Thermometer, Trash2, Wind } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -261,7 +261,7 @@ export function FanControl() {
   const t = useT();
   const tf = useTf();
   const pollMs = useSettings((s) => s.pollMs);
-  const { configs, labels, applyOnStartup, setConfig, setApplyOnStartup, setLabel, profiles, activeProfileId, pendingProfileId, saveProfile, updateActiveProfile, applyProfile, applyPreset, applyCalibration, deleteProfile, lastError, clearError } =
+  const { configs, labels, applyOnStartup, setConfig, setApplyOnStartup, setLabel, profiles, activeProfileId, pendingProfileId, saveProfile, updateActiveProfile, applyProfile, applyPreset, applyCalibration, resetToDefault, deleteProfile, lastError, clearError } =
     useFanProfiles();
   const [delProfile, setDelProfile] = useState<{ id: string; name: string } | null>(null);
   const [info, setInfo] = useState<FanInfo | null>(null);
@@ -422,6 +422,14 @@ export function FanControl() {
                   title="逐个风扇扫描转速，自动生成专属曲线（约 30 秒/风扇）"
                 >
                   {calibrating ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />} AI 智能校准
+                </Button>
+                <Button
+                  variant="subtle"
+                  onClick={() => resetToDefault(controllableIds, presetTempSourceId)}
+                  disabled={calibrating || controllableIds.length === 0}
+                  title="撤销 AI 校准 / 自定义，恢复内置默认曲线"
+                >
+                  <RotateCcw size={13} /> 重置默认曲线
                 </Button>
                 <Button onClick={updateActiveProfile} disabled={!activeProfileId} title="覆盖保存到当前所选配置">
                   <Save size={13} /> 保存当前

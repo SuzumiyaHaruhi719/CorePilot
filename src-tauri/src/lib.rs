@@ -40,8 +40,17 @@ use tauri::Manager;
 ///   (timers fire at most once, incoming events stall) — exactly our symptom.
 /// * `IntensiveWakeUpThrottling` — the "≤1 wake per minute" clamp applied to
 ///   pages hidden for >5 min.
+///
+/// `--no-proxy-server` is the third critical one: CorePilot only ever loads LOCAL
+/// assets (the embedded UI is served from `http://tauri.localhost`), but WebView2
+/// otherwise inherits the system proxy. A system proxy like Clash whose bypass
+/// list doesn't cover the dotted `tauri.localhost` host routes the app's own
+/// assets through the proxy, which can't serve them — the window comes up black.
+/// Disabling the proxy for our local-only WebView fixes that regardless of the
+/// user's proxy config (backend network ops are unaffected — they're native).
 pub const WEBVIEW_ARGS: &str = "--disable-background-timer-throttling \
      --disable-renderer-backgrounding --disable-backgrounding-occluded-windows \
+     --no-proxy-server \
      --disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

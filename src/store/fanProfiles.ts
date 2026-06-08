@@ -12,12 +12,18 @@ export interface FanConfig {
   minDuty: number;
 }
 
-/** A sensible silent-ish default curve (°C → duty %). */
+/**
+ * Balanced, quiet-but-safe default curve (°C → duty %), modelled on the widely
+ * used Fan Control (Rem0o) community guidance: idle at 30% (also NVIDIA's manual
+ * floor — newer GeForce cards ignore <30% and only do 0-RPM in auto mode), a
+ * gentle mid-range, then full speed by 85 °C. Works for case/CPU/AIO and GPU fans.
+ */
 export const DEFAULT_CURVE: FanCurvePoint[] = [
-  { tempC: 30, duty: 20 },
-  { tempC: 50, duty: 35 },
-  { tempC: 65, duty: 55 },
-  { tempC: 78, duty: 80 },
+  { tempC: 30, duty: 30 },
+  { tempC: 45, duty: 38 },
+  { tempC: 55, duty: 50 },
+  { tempC: 65, duty: 65 },
+  { tempC: 75, duty: 85 },
   { tempC: 85, duty: 100 },
 ];
 
@@ -146,6 +152,9 @@ interface FanProfileState {
   /** Turn AI-calibration results into a tailored no-stall curve per fan (idle at
    *  the measured start duty, full speed by 70 °C) and push them to the engine. */
   applyCalibration: (calibs: FanCalibration[], defaultTempSourceId: string | null) => void;
+  /** Undo AI calibration / custom tweaks: reset every channel to the built-in
+   *  DEFAULT_CURVE (curve mode, default floor) and push to the engine. */
+  resetToDefault: (channelIds: string[], defaultTempSourceId: string | null) => void;
   deleteProfile: (id: string) => void;
   /** Push the current config set to the backend engine. */
   push: () => void;
@@ -265,6 +274,26 @@ export const useFanProfiles = create<FanProfileState>()(
           };
         }
         // Tuned state isn't a named preset, so clear any active-preset highlight.
+        set({ configs, activeProfileId: null, pendingProfileId: null });
+        api
+          .fanSetConfig(toBackend(configs))
+          .then(() => set({ lastError: null }))
+          .catch((e) => set({ lastError: applyErrorMessage(e) }));
+      },
+      resetToDefault: (channelIds, defaultTempSourceId) => {
+        const cur = get().configs;
+        const configs = { ...cur };
+        for (const id of channelIds) {
+          const prev = cur[id] ?? defaultConfig();
+          configs[id] = {
+            ...prev,
+            mode: "curve",
+            curve: DEFAULT_CURVE.map((p) => ({ ...p })),
+            minDuty: MIN_SAFE_DUTY,
+            tempSourceId: prev.tempSourceId ?? defaultTempSourceId,
+          };
+        }
+        // Reverting to the stock curve isn't a named preset / calibration.
         set({ configs, activeProfileId: null, pendingProfileId: null });
         api
           .fanSetConfig(toBackend(configs))
