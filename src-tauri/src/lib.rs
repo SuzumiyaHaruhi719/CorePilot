@@ -208,6 +208,7 @@ pub fn run() {
             overlay_inject::overlay_detach,
             overlay_inject::overlay_status,
             overlay_inject::overlay_set_auto,
+            overlay_inject::overlay_set_palette,
             perf_recorder::perf_recorder_config,
             tray::set_close_to_tray,
             commands::set_acrylic,

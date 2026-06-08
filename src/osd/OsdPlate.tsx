@@ -1,5 +1,5 @@
 import { cn } from "../lib/cn";
-import { accentHue } from "../lib/colors";
+import { osdCategoryColor, osdPlateAccent } from "../lib/osdPalette";
 import { OSD_CATEGORY_ORDER, OSD_METRICS, type OsdCategory, type OsdData } from "../lib/osd";
 
 /** The metrics plate, shared by the live overlay window and the config preview.
@@ -7,17 +7,9 @@ import { OSD_CATEGORY_ORDER, OSD_METRICS, type OsdCategory, type OsdData } from 
  *  order) so e.g. all GPU readings stay in a single "GPU" group regardless of
  *  the order they were enabled. */
 
-// Each metric category gets a DISTINCT color, spread across the hue wheel
-// starting at the active theme's accent hue — so the labels form a theme-derived
-// gradient palette (e.g. yellow→cyan in cyberpunk, orange→teal in graphite) that
-// recolors per theme while keeping every group visually distinct. Bright + modest
-// chroma to read on the always-dark plate; metric values stay white, plate dark.
-function osdCatColor(cat: OsdCategory): string {
-  const i = Math.max(0, OSD_CATEGORY_ORDER.indexOf(cat));
-  const span = OSD_CATEGORY_ORDER.length > 1 ? OSD_CATEGORY_ORDER.length - 1 : 1;
-  const hue = (accentHue() + (i / span) * 140) % 360;
-  return `oklch(80% 0.16 ${hue})`;
-}
+// Metric label colors come from the per-theme OSD palette (osdPalette.ts) — the
+// SAME source the native injected overlay uses, so every OSD surface matches the
+// active theme (e.g. cyberpunk = yellow + electric cyan/blue, never green).
 const CAT_LABEL: Record<OsdCategory, string> = {
   fps: "FPS",
   cpu: "CPU",
@@ -60,15 +52,18 @@ export function OsdPlate({ metrics, style, scale, opacity, rounded, data }: OsdP
         maxWidth: "none",
         whiteSpace: "nowrap",
         fontSize: `${Math.round(13 * scale)}px`,
-        background: `rgba(8, 10, 16, ${opacity})`,
+        background: `rgba(6, 9, 16, ${opacity})`,
         padding: `${Math.round(6 * scale)}px ${Math.round(10 * scale)}px`,
         textShadow: "0 1px 3px rgba(0,0,0,0.92)",
-        border: opacity > 0.05 ? "1px solid rgba(255,255,255,0.08)" : "none",
+        // Themed accent edge (CP2077 cyan/yellow, terminal green, …) so the plate
+        // reads as the active theme instead of a flat black slab. ~35% alpha keeps
+        // it subtle; the window is content-sized so an outer glow would be clipped.
+        border: opacity > 0.05 ? `1px solid ${osdPlateAccent()}59` : "none",
       }}
     >
       {groups.map((g) => (
         <div key={g.cat} className={cn("flex items-center gap-1.5", vertical && "w-full")}>
-          <span className="nums font-bold uppercase tracking-wide" style={{ color: osdCatColor(g.cat) }}>
+          <span className="nums font-bold uppercase tracking-wide" style={{ color: osdCategoryColor(g.cat) }}>
             {CAT_LABEL[g.cat]}
           </span>
           {g.items.map((def) => (

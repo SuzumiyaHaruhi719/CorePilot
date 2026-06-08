@@ -40,6 +40,10 @@ interface SettingsState {
   /** Whole-window opacity, 30–100 (%). Applied via the backend on change. */
   windowOpacity: number;
   reduceMotion: boolean;
+  /** GPU-accelerated UI rendering. Off → strip backdrop-filter blur, continuous
+   *  animations and heavy compositing so the app barely touches the GPU while a
+   *  game runs (also a hard escape hatch for any compositor-related stutter). */
+  gpuRender: boolean;
   language: Language;
   pollMs: number;
   perfCards: Record<PerfCard, boolean>;
@@ -72,6 +76,7 @@ export const useSettings = create<SettingsState>()(
       acrylic: true,
       windowOpacity: 100,
       reduceMotion: false,
+      gpuRender: true,
       language: "zh",
       pollMs: 1500,
       perfCards: { cpu: true, mem: true, gpu: true, disk: true, net: true, power: true },

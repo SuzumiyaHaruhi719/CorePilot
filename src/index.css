@@ -674,59 +674,11 @@ html[data-theme-style="cyberpunk"] .grad-accent {
    All motion gated under prefers-reduced-motion + the in-app reduce-motion flag.
    ============================================================ */
 
-/* Faint CRT scanlines over the whole UI (very low opacity, never intercept input). */
-html[data-theme-style="cyberpunk"]:not(.osd-window) body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 9000;
-  pointer-events: none;
-  background: repeating-linear-gradient(
-    to bottom,
-    oklch(100% 0 0 / 0.03) 0px,
-    oklch(100% 0 0 / 0.03) 1px,
-    transparent 1px,
-    transparent 3px
-  );
-  /* NB: no mix-blend-mode. A blended full-screen overlay above a backdrop-filter
-     UI forces a full-page recomposite every frame (the main lag/freeze cause). At
-     0.03 alpha the plain overlay looks the same but is essentially free. */
-}
-
-/* Slow neon scan-sweep band drifting down the screen (CRT refresh) — infrequent. */
-html[data-theme-style="cyberpunk"]:not(.osd-window) body::after {
-  content: "";
-  position: fixed;
-  left: 0;
-  right: 0;
-  top: -18%;
-  height: 18%;
-  z-index: 8999;
-  pointer-events: none;
-  background: linear-gradient(
-    to bottom,
-    transparent,
-    color-mix(in oklch, var(--color-cyan) 16%, transparent),
-    color-mix(in oklch, var(--color-accent) 7%, transparent),
-    transparent
-  );
-  filter: blur(1px);
-  opacity: 0;
-}
-@media (prefers-reduced-motion: no-preference) {
-  html[data-theme-style="cyberpunk"]:not(.osd-window) body::after {
-    animation: cyberpunk-scan-sweep 8.5s linear infinite;
-  }
-}
-html[data-reduce-motion="true"][data-theme-style="cyberpunk"] body::after {
-  animation: none;
-  display: none;
-}
-@keyframes cyberpunk-scan-sweep {
-  0%, 80% { opacity: 0; transform: translateY(0); }
-  84% { opacity: 0.22; }
-  100% { opacity: 0; transform: translateY(660%); }
-}
+/* CRT scanlines + scan-sweep were REMOVED: the faint full-screen 1px line pattern
+   read as "莫名其妙的线" across the whole UI, and an animated full-screen overlay is
+   a needless GPU cost. The neon card edges, corner brackets, dual-color HUD grid,
+   heading glow and yellow→cyan brand wordmark below carry the CP2077 look with no
+   line/scanline overlay at all. */
 
 /* Stronger (still faint) dual-color neon HUD grid — yellow fine grid + cyan coarse. */
 html[data-theme-style="cyberpunk"] .hud-grid {
@@ -831,4 +783,34 @@ html[data-theme-style="terminal"] {
   --color-dim: oklch(55% 0.016 155);
   --color-accent: oklch(82% 0.2 144);
   --color-accent-bright: oklch(89% 0.18 142);
+}
+
+/* ============================================================
+   GPU 渲染 OFF — low-GPU rendering mode (设置 → GPU 渲染). Drops the two genuinely
+   GPU-expensive operations so CorePilot barely touches the graphics card while a
+   game runs (and as a hard escape hatch for any WebView compositor stutter):
+     1. real-time backdrop-filter blur on glass surfaces, and
+     2. the large-radius blurred ambient orbs + animated grid in the app backdrop.
+   Static colors, borders, neon edges, glows and JS (Framer) transitions are kept,
+   so the UI looks the same minus the live blur. Outside @layer for reliable wins.
+   ============================================================ */
+html[data-gpu-render="false"] .glass,
+html[data-gpu-render="false"] .glass-2,
+html[data-gpu-render="false"] .glass .glass {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+/* Without the live blur behind them, make acrylic surfaces opaque again so panels
+   keep contrast (background-color only → preserves any themed background-image such
+   as the cyberpunk neon card gradient). */
+html[data-gpu-render="false"][data-acrylic="true"] .glass {
+  background-color: var(--color-surface);
+}
+html[data-gpu-render="false"][data-acrylic="true"] .glass-2,
+html[data-gpu-render="false"][data-acrylic="true"] .glass .glass {
+  background-color: var(--color-surface2);
+}
+/* Remove the big blurred color orbs + HUD grid (a continuous full-screen layer). */
+html[data-gpu-render="false"] .app-backdrop {
+  display: none;
 }

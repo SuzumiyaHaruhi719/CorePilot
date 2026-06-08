@@ -692,6 +692,13 @@ export function Settings() {
             />
           </SettingRow>
 
+          <SettingRow title="GPU 渲染（界面与动效）" desc="开启时用 GPU 加速亚克力模糊、光晕与动画；关闭后改用极简渲染，几乎不占用显卡——游戏时避免与游戏抢 GPU，也可消除合成器卡顿">
+            <Toggle
+              checked={settings.gpuRender}
+              onChange={(value) => settings.update({ gpuRender: value })}
+            />
+          </SettingRow>
+
           <SettingRow title="后台记录性能曲线" desc="关闭任务管理器后仍在后台记录 CPU / GPU / 内存 / 磁盘 / 网络，下次打开图表即为完整曲线（会略增空闲占用）">
             <Toggle
               checked={settings.bgRecord}

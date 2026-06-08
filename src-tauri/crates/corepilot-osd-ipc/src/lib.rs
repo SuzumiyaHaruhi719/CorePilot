@@ -25,7 +25,10 @@ use windows::Win32::System::Memory::{
 /// other value treats the block as absent/garbage and draws nothing.
 pub const COREPILOT_OSD_MAGIC: u32 = 0x4350_4F53;
 /// Layout version. Bump on any incompatible change to [`OsdSharedBlock`].
-pub const COREPILOT_OSD_VERSION: u32 = 1;
+/// v2: added `row_colors_rgba` (per-row OSD palette). The app writer and injected
+/// DLL MUST be rebuilt together — `is_valid()` requires an exact version match, so
+/// a v2 app with a stale v1 DLL (or vice-versa) makes the overlay draw nothing.
+pub const COREPILOT_OSD_VERSION: u32 = 2;
 
 /// Per-session mapping name. `Local\` (not `Global\`) is correct because the game
 /// and CorePilot run in the same interactive session; it avoids needing the
@@ -50,6 +53,21 @@ pub mod show {
     pub const RAM: u32 = 1 << 5;
     pub const DISK: u32 = 1 << 6;
     pub const NET: u32 = 1 << 7;
+}
+
+/// Row-type index into [`OsdSharedBlock::row_colors_rgba`] — one slot per metric
+/// row the overlay can draw, in the order `build_rows` emits them. Lets the OSD
+/// color each row independently (e.g. cyberpunk yellow FPS + cyan/blue GPU).
+pub mod row {
+    pub const FPS: usize = 0;
+    pub const FRAMETIME: usize = 1;
+    pub const CPU: usize = 2;
+    pub const GPU: usize = 3;
+    pub const VRAM: usize = 4;
+    pub const RAM: usize = 5;
+    pub const DISK: usize = 6;
+    pub const NET: usize = 7;
+    pub const COUNT: usize = 8;
 }
 
 /// Fixed-layout, versioned block living in shared memory. `#[repr(C)]` so both
@@ -77,8 +95,12 @@ pub struct OsdSharedBlock {
     pub pos_x: f32,
     pub pos_y: f32,
     pub scale: f32,
-    /// Packed 0xRRGGBBAA text colour.
+    /// Packed 0xRRGGBBAA text colour (fallback / uncategorised rows).
     pub color_rgba: u32,
+    /// Packed 0xRRGGBBAA per row type (indexed by [`row`]). 0 = unset → that row
+    /// falls back to `color_rgba`. Lets the overlay paint the active theme's
+    /// palette (e.g. yellow FPS/CPU + cyan/blue GPU/RAM/NET) instead of one color.
+    pub row_colors_rgba: [u32; row::COUNT],
 
     // --- metrics (NaN / u32::MAX = unavailable) ---
     pub fps: f32,
@@ -122,6 +144,7 @@ impl Default for OsdSharedBlock {
             pos_y: 16.0,
             scale: 1.0,
             color_rgba: 0xFFFF_FFFF,
+            row_colors_rgba: [0; row::COUNT],
             fps: f32::NAN,
             frametime_ms: f32::NAN,
             low1_fps: f32::NAN,

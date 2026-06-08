@@ -408,6 +408,11 @@ export const api = {
    *  OSD only while it's the active window (hidden on alt-tab, ejected on exit). */
   overlaySetAuto: (enable: boolean, layoutFlags?: number) =>
     invoke<void>("overlay_set_auto", { enable, layoutFlags }),
+  /** Push the per-theme OSD row-color palette (8 packed 0xRRGGBBAA entries, in IPC
+   *  row order) to the injected-overlay writer so the in-game overlay matches the
+   *  active theme. Safe no-op when injection isn't active. */
+  overlaySetPalette: (rowColors: number[]) =>
+    invoke<void>("overlay_set_palette", { rowColors }),
   /**
    * Push perf-recorder config to the backend recorder thread (which does the
    * actual sampling). Called on mount and whenever the relevant stores change.

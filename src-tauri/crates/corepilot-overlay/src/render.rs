@@ -16,7 +16,7 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use corepilot_osd_ipc::{anchor, show, OsdShared, OsdSharedBlock};
+use corepilot_osd_ipc::{anchor, row, show, OsdShared, OsdSharedBlock};
 use imgui::{Condition, Ui, WindowFlags};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 
@@ -130,14 +130,25 @@ fn anchored_position(block: &OsdSharedBlock, display: [f32; 2]) -> ([f32; 2], [f
     }
 }
 
+/// One OSD row: its rendered text plus the row-type index used to look up a
+/// per-row color in `row_colors_rgba` (None = uncategorised, e.g. the custom
+/// game-name line, which uses the flat fallback color).
+struct Row {
+    kind: Option<usize>,
+    text: String,
+}
+
 /// Build the ordered list of metric rows enabled in `layout_flags`. Each row is a
 /// single compact line in RTSS style. Pure string-building so it stays cheap.
-fn build_rows(block: &OsdSharedBlock) -> Vec<String> {
-    let mut rows: Vec<String> = Vec::new();
+fn build_rows(block: &OsdSharedBlock) -> Vec<Row> {
+    let mut rows: Vec<Row> = Vec::new();
     let flags = block.layout_flags;
 
     if flags & show::FPS != 0 {
-        rows.push(format!("FPS {}", int_or_dash(block.fps)));
+        rows.push(Row {
+            kind: Some(row::FPS),
+            text: format!("FPS {}", int_or_dash(block.fps)),
+        });
     }
     if flags & show::FRAMETIME != 0 {
         // Frametime plus the 1%/0.1% lows when present, e.g. "5.5ms  1% 120  .1% 98".
@@ -148,17 +159,23 @@ fn build_rows(block: &OsdSharedBlock) -> Vec<String> {
         if block.low01_fps.is_finite() {
             line.push_str(&format!("  .1% {}", int_or_dash(block.low01_fps)));
         }
-        rows.push(line);
+        rows.push(Row {
+            kind: Some(row::FRAMETIME),
+            text: line,
+        });
     }
     if flags & show::CPU != 0 {
         // CPU 37% 61° 94W 5.5GHz — each field dropped to "—" when unavailable.
-        rows.push(format!(
-            "CPU {} {} {} {}",
-            pct_or_dash(block.cpu_load),
-            temp_or_dash(block.cpu_temp),
-            watts_or_dash(block.cpu_power_w),
-            clock_or_dash(block.cpu_clock_mhz),
-        ));
+        rows.push(Row {
+            kind: Some(row::CPU),
+            text: format!(
+                "CPU {} {} {} {}",
+                pct_or_dash(block.cpu_load),
+                temp_or_dash(block.cpu_temp),
+                watts_or_dash(block.cpu_power_w),
+                clock_or_dash(block.cpu_clock_mhz),
+            ),
+        });
     }
     if flags & show::GPU != 0 {
         // GPU 81% 57° 404W — clock/mem/fan are shown on the GPU line too when set.
@@ -172,13 +189,16 @@ fn build_rows(block: &OsdSharedBlock) -> Vec<String> {
             line.push(' ');
             line.push_str(&clock_or_dash(block.gpu_clock_mhz));
         }
-        rows.push(line);
+        rows.push(Row {
+            kind: Some(row::GPU),
+            text: line,
+        });
     }
     if flags & show::VRAM != 0 {
-        rows.push(format!(
-            "VRAM {}",
-            mem_pair_g(block.vram_used_mb, block.vram_total_mb)
-        ));
+        rows.push(Row {
+            kind: Some(row::VRAM),
+            text: format!("VRAM {}", mem_pair_g(block.vram_used_mb, block.vram_total_mb)),
+        });
     }
     if flags & show::RAM != 0 {
         // RAM as a percentage of total when both sides are known, else a dash.
@@ -190,26 +210,49 @@ fn build_rows(block: &OsdSharedBlock) -> Vec<String> {
         } else {
             f32::NAN
         };
-        rows.push(format!("RAM {}", pct_or_dash(pct)));
+        rows.push(Row {
+            kind: Some(row::RAM),
+            text: format!("RAM {}", pct_or_dash(pct)),
+        });
     }
     if flags & show::DISK != 0 {
-        rows.push(format!("DISK {}", pct_or_dash(block.disk_pct)));
+        rows.push(Row {
+            kind: Some(row::DISK),
+            text: format!("DISK {}", pct_or_dash(block.disk_pct)),
+        });
     }
     if flags & show::NET != 0 {
-        rows.push(format!(
-            "NET ↓{} ↑{}",
-            bps_or_dash(block.net_down_bps),
-            bps_or_dash(block.net_up_bps)
-        ));
+        rows.push(Row {
+            kind: Some(row::NET),
+            text: format!(
+                "NET ↓{} ↑{}",
+                bps_or_dash(block.net_down_bps),
+                bps_or_dash(block.net_up_bps)
+            ),
+        });
     }
 
     // Optional free-form line (e.g. the game's display name), if the app set one.
     let custom = block.custom_text_str();
     if !custom.is_empty() {
-        rows.push(custom.to_string());
+        rows.push(Row {
+            kind: None,
+            text: custom.to_string(),
+        });
     }
 
     rows
+}
+
+/// Pick a row's draw color: its per-type slot in `row_colors_rgba` when set
+/// (non-zero), else the flat `color_rgba` fallback (also used for uncategorised
+/// rows). This is what paints the in-game overlay in the active theme's palette.
+fn row_color(block: &OsdSharedBlock, kind: Option<usize>) -> [f32; 4] {
+    let rgba = kind
+        .and_then(|i| block.row_colors_rgba.get(i).copied())
+        .filter(|c| *c != 0)
+        .unwrap_or(block.color_rgba);
+    rgba_to_f32s(rgba)
 }
 
 /// Draw the single OSD window for this frame. Called only when the block is
@@ -217,7 +260,6 @@ fn build_rows(block: &OsdSharedBlock) -> Vec<String> {
 fn draw_overlay(ui: &Ui, block: &OsdSharedBlock) {
     let display = ui.io().display_size;
     let (pos, pivot) = anchored_position(block, display);
-    let color = rgba_to_f32s(block.color_rgba);
 
     // Click-through, no chrome, no background, auto-sized to its text. Combined
     // with the IPC contract this is the in-frame "plate" the user sees.
@@ -242,8 +284,10 @@ fn draw_overlay(ui: &Ui, block: &OsdSharedBlock) {
             };
             ui.set_window_font_scale(scale);
 
-            for row in build_rows(block) {
-                ui.text_colored(color, row);
+            // Each row in its own themed color (yellow FPS, cyan/blue GPU, …),
+            // falling back to the flat color for unset slots / the custom line.
+            for r in build_rows(block) {
+                ui.text_colored(row_color(block, r.kind), &r.text);
             }
         });
 }
@@ -281,7 +325,9 @@ mod tests {
         b.layout_flags = show::FPS; // only FPS
         b.fps = 144.0;
         let rows = build_rows(&b);
-        assert_eq!(rows, vec!["FPS 144".to_string()]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "FPS 144");
+        assert_eq!(rows[0].kind, Some(row::FPS));
     }
 
     #[test]
@@ -290,7 +336,8 @@ mod tests {
         b.layout_flags = show::CPU;
         // All CPU fields left at NaN default => every field a dash.
         let rows = build_rows(&b);
-        assert_eq!(rows, vec!["CPU — — — —".to_string()]);
+        assert_eq!(rows[0].text, "CPU — — — —");
+        assert_eq!(rows[0].kind, Some(row::CPU));
     }
 
     #[test]
@@ -302,7 +349,7 @@ mod tests {
         b.cpu_power_w = 94.0;
         b.cpu_clock_mhz = 5500.0;
         let rows = build_rows(&b);
-        assert_eq!(rows, vec!["CPU 37% 61° 94W 5.5GHz".to_string()]);
+        assert_eq!(rows[0].text, "CPU 37% 61° 94W 5.5GHz");
     }
 
     #[test]
@@ -312,7 +359,7 @@ mod tests {
         b.vram_used_mb = 12 * 1024;
         b.vram_total_mb = 24 * 1024;
         let rows = build_rows(&b);
-        assert_eq!(rows, vec!["VRAM 12/24G".to_string()]);
+        assert_eq!(rows[0].text, "VRAM 12/24G");
     }
 
     #[test]
@@ -322,6 +369,22 @@ mod tests {
         b.fps = 60.0;
         b.set_custom_text("赛博朋克2077");
         let rows = build_rows(&b);
-        assert_eq!(rows, vec!["FPS 60".to_string(), "赛博朋克2077".to_string()]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].text, "FPS 60");
+        assert_eq!(rows[1].text, "赛博朋克2077");
+        assert_eq!(rows[1].kind, None);
+    }
+
+    #[test]
+    fn row_color_uses_palette_then_falls_back() {
+        let mut b = base_block();
+        b.color_rgba = 0xFFFF_FFFF; // white fallback
+        b.row_colors_rgba[row::CPU] = 0xFFE600FF; // themed yellow for CPU
+        // CPU row uses its palette slot…
+        let cpu = row_color(&b, Some(row::CPU));
+        assert!((cpu[0] - 1.0).abs() < 1e-3 && (cpu[1] - 0.9).abs() < 0.05 && cpu[2] < 0.05);
+        // …an unset slot (GPU = 0) and the custom line (None) use the fallback.
+        assert_eq!(row_color(&b, Some(row::GPU)), rgba_to_f32s(0xFFFF_FFFF));
+        assert_eq!(row_color(&b, None), rgba_to_f32s(0xFFFF_FFFF));
     }
 }

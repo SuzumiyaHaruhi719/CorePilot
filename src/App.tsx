@@ -5,6 +5,7 @@ import { NavRail } from "./components/shell/NavRail";
 import { StatusBar } from "./components/shell/StatusBar";
 import { TitleBar } from "./components/shell/TitleBar";
 import { api, type Overview } from "./lib/ipc";
+import { osdRowColorsRgba } from "./lib/osdPalette";
 import { useSettings } from "./store/settings";
 import { useAffinityEnforcer } from "./hooks/useAffinityEnforcer";
 import { useOsdHotkey } from "./hooks/useOsdHotkey";
@@ -60,6 +61,7 @@ function App() {
   const theme = useSettings((s) => s.theme);
   const themeStyle = useSettings((s) => s.themeStyle);
   const reduceMotion = useSettings((s) => s.reduceMotion);
+  const gpuRender = useSettings((s) => s.gpuRender);
   const closeToTray = useSettings((s) => s.closeToTray);
   const [overview, setOverview] = useState<Overview | null>(null);
   useAffinityEnforcer(overview ? (1n << BigInt(overview.logicalCpus)) - 1n : 0n);
@@ -205,6 +207,19 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.reduceMotion = String(reduceMotion);
   }, [reduceMotion]);
+
+  // GPU-render toggle → mirrored to the DOM so the low-GPU CSS mode can drop the
+  // backdrop-filter blur + the blurred ambient backdrop orbs (see index.css).
+  useEffect(() => {
+    document.documentElement.dataset.gpuRender = String(gpuRender);
+  }, [gpuRender]);
+
+  // Keep the NATIVE injected overlay's per-row colors in sync with the theme so
+  // the in-game OSD shows the active theme's palette (cyberpunk yellow+blue, …).
+  // Safe no-op when injection isn't active; runs on mount + every theme change.
+  useEffect(() => {
+    api.overlaySetPalette(osdRowColorsRgba(themeStyle)).catch(() => undefined);
+  }, [themeStyle]);
 
   // Mirror the "close to tray" preference to the backend window-close handler.
   useEffect(() => {

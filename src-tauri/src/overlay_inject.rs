@@ -35,7 +35,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
-use corepilot_osd_ipc::{anchor, show, OsdShared};
+use corepilot_osd_ipc::{anchor, row, show, OsdShared};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -105,6 +105,12 @@ static STATE: Lazy<Mutex<OverlayState>> = Lazy::new(|| {
 /// caller-supplied flags (derived from the user's OSD metric selection).
 static LAYOUT_FLAGS: AtomicU32 = AtomicU32::new(DEFAULT_LAYOUT_FLAGS);
 
+/// Per-row OSD colors (packed 0xRRGGBBAA, indexed by the IPC `row` order) the
+/// sampler stamps into the block so the injected overlay paints each row in the
+/// active theme's color. All-zero until the frontend pushes a palette via
+/// [`overlay_set_palette`]; a zero slot falls back to the flat color in the DLL.
+static ROW_COLORS: Mutex<[u32; row::COUNT]> = Mutex::new([0; row::COUNT]);
+
 /// Ensures the sampler thread is spawned at most once.
 static SAMPLER_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -168,7 +174,7 @@ fn opt_f64_as_f32(v: Option<f64>) -> f32 {
 /// seqlock with `enabled = 1`. The metric→field mapping mirrors the frontend
 /// `src/lib/osd.ts` (`OSD_METRICS` / `fetchOsdData`) one-for-one so the in-frame
 /// overlay and the window overlay always agree on sources and fallbacks.
-fn publish_metrics(writer: &OsdShared, app: &AppHandle, pid: u32, flags: u32) {
+fn publish_metrics(writer: &OsdShared, app: &AppHandle, pid: u32, flags: u32, row_colors: [u32; row::COUNT]) {
     // --- system CPU + memory (shared `System` in AppState) ---
     let metrics = {
         let state = app.state::<AppState>();
@@ -225,6 +231,7 @@ fn publish_metrics(writer: &OsdShared, app: &AppHandle, pid: u32, flags: u32) {
         b.enabled = 1;
         b.target_pid = pid;
         b.layout_flags = flags;
+        b.row_colors_rgba = row_colors;
         b.anchor = anchor::TOP_LEFT;
         // Placement/scale/colour keep the block defaults (top-left, scale 1,
         // white). The DLL renders relative to the back buffer; fine-grained
@@ -300,6 +307,7 @@ pub fn start_sampler(app: AppHandle) {
                 // never block on a metric read.
                 let target = STATE.lock().target_pid;
                 let flags = LAYOUT_FLAGS.load(Ordering::Relaxed);
+                let row_colors = *ROW_COLORS.lock();
 
                 match target {
                     Some(pid) if pid != 0 => {
@@ -321,7 +329,7 @@ pub fn start_sampler(app: AppHandle) {
                         } else if let Some(writer) = STATE.lock().writer.as_ref() {
                             // Re-borrow the writer for the publish. The lock is
                             // held only for the duration of the seqlock write.
-                            publish_metrics(writer, &app, pid, flags);
+                            publish_metrics(writer, &app, pid, flags, row_colors);
                         }
                     }
                     _ => write_disabled(),
@@ -612,6 +620,31 @@ pub fn overlay_set_auto(_app: AppHandle, enable: bool, layout_flags: Option<u32>
         write_disabled();
         AUTO_LAST_FG.store(0, Ordering::Relaxed);
     }
+}
+
+/// Push the per-theme OSD row-color palette (packed 0xRRGGBBAA, indexed by the IPC
+/// `row` order: FPS, FRAMETIME, CPU, GPU, VRAM, RAM, DISK, NET). The sampler stamps
+/// these into every subsequent block write, and we reflect them on the resident
+/// overlay immediately so a theme switch recolors the in-game OSD without waiting
+/// for the next tick. A zero slot makes the DLL fall back to the flat text color.
+#[tauri::command]
+pub fn overlay_set_palette(row_colors: Vec<u32>) -> Result<(), String> {
+    if row_colors.len() != row::COUNT {
+        return Err(format!(
+            "overlay_set_palette: expected {} colors, got {}",
+            row::COUNT,
+            row_colors.len()
+        ));
+    }
+    let mut arr = [0u32; row::COUNT];
+    arr.copy_from_slice(&row_colors);
+    *ROW_COLORS.lock() = arr;
+    // Reflect immediately on the resident overlay (no-op when the writer mapping is
+    // absent). Holds STATE.lock() across the seqlock write, like push_layout_flags.
+    if let Some(writer) = STATE.lock().writer.as_ref() {
+        writer.write(|b| b.row_colors_rgba = arr);
+    }
+    Ok(())
 }
 
 /// Report the overlay status for a specific `pid`, or — when `pid` is `None` — for
