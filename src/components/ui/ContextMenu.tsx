@@ -3,6 +3,7 @@ import type { LucideIcon } from "lucide-react";
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn";
+import { useT } from "../../lib/i18n";
 
 export interface MenuItem {
   label: string;
@@ -27,6 +28,7 @@ const ITEM_HEIGHT = 33;
 const MENU_WIDTH = 200;
 
 export function ContextMenu({ state, onClose }: ContextMenuProps) {
+  const t = useT();
   useEffect(() => {
     if (!state) return;
     const close = () => onClose();
@@ -86,7 +88,7 @@ export function ContextMenu({ state, onClose }: ContextMenuProps) {
               )}
             >
               {item.icon && <item.icon size={14} className="shrink-0" />}
-              {item.label}
+              {t(item.label)}
             </button>
           ))}
         </motion.div>

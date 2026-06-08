@@ -81,6 +81,15 @@ internal static class Program
     /// <summary>Tick (ms) of the last chip reopen, for the cooldown above.</summary>
     private static long _lastReopenTick = -StaleReopenCooldownMs;
 
+    /// <summary>Cold-start recovery: the chip can power up (or be left by an abrupt
+    /// prior exit) with an already-stale fan bank, so the very first reads are 0 and
+    /// <see cref="_sawMoboFan"/> never flips — which would leave the normal reopen
+    /// gate dormant forever. We allow this many reopens BEFORE we've ever seen a
+    /// spinning fan; a reopen refreshes the bank and usually yields real RPM. A
+    /// genuinely fanless board simply exhausts these and then stops thrashing.</summary>
+    private const int MaxColdStartReopens = 10;
+    private static int _coldStartReopens;
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         // Default options reject NaN/Infinity; we sanitize to null beforehand so
@@ -140,8 +149,12 @@ internal static class Program
                 // across the reopen and the engine re-applies via the rebuilt map;
                 // ResetTouched runs on the exit paths so nothing is left pinned.)
                 long nowTick = Environment.TickCount64;
+                // Reopen when the board has spun this session (normal stale-bank
+                // refresh) OR during cold start (first reads already 0, so
+                // _sawMoboFan hasn't flipped yet) — bounded so a fanless board stops.
+                bool coldStart = !_sawMoboFan && _coldStartReopens < MaxColdStartReopens;
                 if (stale
-                    && _sawMoboFan
+                    && (_sawMoboFan || coldStart)
                     && computer != null
                     && nowTick - _lastReopenTick >= _reopenCooldownMs)
                 {
@@ -151,8 +164,18 @@ internal static class Program
                         computer = OpenComputer();
                     }
                     _lastReopenTick = nowTick;
+                    if (coldStart)
+                    {
+                        _coldStartReopens++;
+                    }
                     line = BuildSample(computer, visitor, out bool stillStale);
-                    _reopenCooldownMs = stillStale ? StaleReopenCooldownMs : LiveReopenCooldownMs;
+                    // Cold-start retries stay quick (catch the fresh-read window);
+                    // once fans are confirmed (or cold-start is exhausted) fall back
+                    // to the adaptive cooldown (live when refreshing, long on a real
+                    // fan-stop so we never churn the driver).
+                    _reopenCooldownMs = (!_sawMoboFan && _coldStartReopens < MaxColdStartReopens)
+                        ? LiveReopenCooldownMs
+                        : stillStale ? StaleReopenCooldownMs : LiveReopenCooldownMs;
                 }
             }
             catch

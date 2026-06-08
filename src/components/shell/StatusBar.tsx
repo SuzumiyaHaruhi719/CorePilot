@@ -3,11 +3,13 @@ import { motion } from "motion/react";
 import { formatBytes } from "../../lib/format";
 import { useSharedMetrics } from "../../hooks/useSharedTelemetry";
 import { useUi } from "../../store/ui";
+import { useT } from "../../lib/i18n";
 import { AnimatedNumber } from "../ui/AnimatedNumber";
 
 export function StatusBar() {
   const metrics = useSharedMetrics();
   const optimizationEnabled = useUi((s) => s.optimizationEnabled);
+  const t = useT();
 
   const memPct = metrics ? (metrics.memUsed / metrics.memTotal) * 100 : 0;
 
@@ -22,7 +24,7 @@ export function StatusBar() {
       </div>
       <div className="flex items-center gap-1.5">
         <MemoryStick size={13} className="text-cyan" />
-        <span>内存</span>
+        <span>{t("内存")}</span>
         <span className="nums font-semibold text-ink">{metrics ? formatBytes(metrics.memUsed) : "—"}</span>
         <span className="nums text-dim">
           / {metrics ? formatBytes(metrics.memTotal) : "—"} · {memPct.toFixed(0)}%
@@ -38,14 +40,14 @@ export function StatusBar() {
             >
               <ShieldCheck size={13} />
             </motion.span>
-            <span className="text-ok">优化已启用</span>
+            <span className="text-ok">{t("优化已启用")}</span>
           </>
         ) : (
           <>
             <span className="text-dim">
               <ShieldOff size={13} />
             </span>
-            <span className="text-dim">优化已停用</span>
+            <span className="text-dim">{t("优化已停用")}</span>
           </>
         )}
       </div>

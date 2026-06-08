@@ -2,6 +2,7 @@ import {
   Activity,
   Check,
   CheckCircle2,
+  ChevronRight,
   FolderOpen,
   ListPlus,
   Loader2,
@@ -25,6 +26,7 @@ import { Segmented } from "../components/ui/Segmented";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
+import { useT } from "../lib/i18n";
 import { api, type NetCheck, type ProcInfo } from "../lib/ipc";
 import {
   ACCENT_HUE,
@@ -44,11 +46,12 @@ interface SettingRowProps {
 }
 
 function SettingRow({ title, desc, children }: SettingRowProps) {
+  const t = useT();
   return (
     <div className="flex items-center justify-between gap-6 border-b border-line/60 py-3.5 last:border-0">
       <div>
-        <div className="text-[13.5px] font-medium text-ink">{title}</div>
-        {desc && <div className="text-[12px] text-dim">{desc}</div>}
+        <div className="text-[13.5px] font-medium text-ink">{t(title)}</div>
+        {desc && <div className="text-[12px] text-dim">{t(desc)}</div>}
       </div>
       <div className="no-drag shrink-0">{children}</div>
     </div>
@@ -57,10 +60,11 @@ function SettingRow({ title, desc, children }: SettingRowProps) {
 
 /** Uppercase HUD section header that sits at the top of a settings group. */
 function SectionHeader({ icon: Icon, label }: { icon: LucideIcon; label: string }) {
+  const t = useT();
   return (
     <div className="flex items-center gap-2 border-b border-line/60 py-3">
       <Icon size={13} className="text-accent-bright" />
-      <span className="hud-label text-[10.5px] text-dim">{label}</span>
+      <span className="hud-label text-[10.5px] text-dim">{t(label)}</span>
       <span className="h-px flex-1 bg-line/50" />
     </div>
   );
@@ -347,6 +351,7 @@ function PerfRecordTargetsCard() {
   const [procs, setProcs] = useState<ProcInfo[]>([]);
   const [procLoading, setProcLoading] = useState(false);
   const [procQuery, setProcQuery] = useState("");
+  const [collapsed, setCollapsed] = useState(true);
 
   function submitAdd() {
     const n = addName.trim();
@@ -402,8 +407,20 @@ function PerfRecordTargetsCard() {
 
   return (
     <div className="border-b border-line/60 py-3.5 last:border-0">
-      <div className="mb-1 text-[13.5px] font-medium text-ink">性能记录名单 / 白·黑名单</div>
-      <div className="mb-3 text-[12px] leading-relaxed text-dim">
+      <button
+        type="button"
+        onClick={() => setCollapsed((c) => !c)}
+        className="no-drag flex w-full cursor-pointer items-center gap-2 text-left"
+      >
+        <ChevronRight size={15} className={cn("shrink-0 text-dim transition-transform", !collapsed && "rotate-90")} />
+        <span className="text-[13.5px] font-medium text-ink">性能记录名单 / 白·黑名单</span>
+        {targets.length > 0 && (
+          <span className="nums rounded-md bg-surface3 px-1.5 py-0.5 text-[10.5px] text-dim">{targets.length}</span>
+        )}
+      </button>
+      {!collapsed && (
+        <>
+      <div className="mb-3 mt-2 text-[12px] leading-relaxed text-dim">
         控制哪些程序会被记录性能报告（独立于 OSD 显示名单）：白名单 = 强制记录（即使未被识别为游戏），黑名单
         = 从不记录（即使被识别为游戏）。
       </div>
@@ -473,6 +490,8 @@ function PerfRecordTargetsCard() {
             </div>
           ))}
         </div>
+      )}
+        </>
       )}
 
       {/* Pick a target from the currently-running processes. */}

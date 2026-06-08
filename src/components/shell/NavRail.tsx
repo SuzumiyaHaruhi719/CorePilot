@@ -2,6 +2,7 @@ import { Cpu, Fan, Gauge, ListTree, MonitorPlay, Rocket, Settings as SettingsIco
 import type { LucideIcon } from "lucide-react";
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
+import { useT } from "../../lib/i18n";
 import { springSmooth } from "../../lib/motion";
 import { useUi, type TabId } from "../../store/ui";
 import { ClickRipple } from "../ui/Ripple";
@@ -31,6 +32,7 @@ const ITEM_VARIANTS = { hover: { scale: 1.06, y: -2 }, tap: { scale: 0.96 } };
 export function NavRail() {
   const tab = useUi((s) => s.tab);
   const setTab = useUi((s) => s.setTab);
+  const t = useT();
 
   return (
     <nav
@@ -79,7 +81,7 @@ export function NavRail() {
                 active ? "text-ink" : "text-dim",
               )}
             >
-              {item.label}
+              {t(item.label)}
             </span>
             <ClickRipple />
           </motion.button>

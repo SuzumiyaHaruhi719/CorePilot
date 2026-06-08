@@ -1,6 +1,7 @@
 import { motion } from "motion/react";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import { useT } from "../../lib/i18n";
 
 interface TabHeaderProps {
   icon: LucideIcon;
@@ -10,6 +11,7 @@ interface TabHeaderProps {
 }
 
 export function TabHeader({ icon: Icon, title, subtitle, actions }: TabHeaderProps) {
+  const t = useT();
   return (
     <div className="flex items-start justify-between gap-4 px-6 pb-4 pt-5">
       <div className="flex items-center gap-3.5">
@@ -22,8 +24,8 @@ export function TabHeader({ icon: Icon, title, subtitle, actions }: TabHeaderPro
           <Icon size={21} strokeWidth={2.2} />
         </motion.div>
         <div>
-          <h1 className="display text-[17px] font-bold uppercase leading-tight tracking-[0.08em] text-ink">{title}</h1>
-          {subtitle && <p className="mt-0.5 text-[12.5px] text-muted">{subtitle}</p>}
+          <h1 className="display text-[17px] font-bold uppercase leading-tight tracking-[0.08em] text-ink">{t(title)}</h1>
+          {subtitle && <p className="mt-0.5 text-[12.5px] text-muted">{t(subtitle)}</p>}
         </div>
       </div>
       {actions && <div className="no-drag flex items-center gap-2">{actions}</div>}

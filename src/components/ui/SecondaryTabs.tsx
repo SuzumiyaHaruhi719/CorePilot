@@ -1,5 +1,6 @@
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
+import { useT } from "../../lib/i18n";
 
 interface SecondaryTab<T extends string> {
   id: T;
@@ -19,6 +20,7 @@ export function SecondaryTabs<T extends string>({
   onChange,
   layoutId = "secondary-tab",
 }: SecondaryTabsProps<T>) {
+  const t = useT();
   return (
     <div className="flex items-center gap-1 border-b border-line px-4">
       {tabs.map((tab) => {
@@ -30,7 +32,7 @@ export function SecondaryTabs<T extends string>({
             className="no-drag relative px-3 py-2.5 text-[12.5px] font-medium"
           >
             <span className={cn("relative z-10 transition-colors", isActive ? "text-ink" : "text-muted hover:text-ink")}>
-              {tab.label}
+              {t(tab.label)}
             </span>
             {isActive && (
               <motion.span

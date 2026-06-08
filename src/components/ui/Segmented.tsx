@@ -1,5 +1,6 @@
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
+import { useT } from "../../lib/i18n";
 
 interface Option<T extends string> {
   value: T;
@@ -14,6 +15,7 @@ interface SegmentedProps<T extends string> {
 }
 
 export function Segmented<T extends string>({ id, value, options, onChange }: SegmentedProps<T>) {
+  const t = useT();
   return (
     <div role="group" className="no-drag inline-flex rounded-lg border border-line bg-surface2 p-0.5">
       {options.map((option) => {
@@ -33,7 +35,7 @@ export function Segmented<T extends string>({ id, value, options, onChange }: Se
                 transition={{ type: "spring", stiffness: 420, damping: 30 }}
               />
             )}
-            <span className={cn("relative z-10", active ? "text-ink" : "text-muted")}>{option.label}</span>
+            <span className={cn("relative z-10", active ? "text-ink" : "text-muted")}>{t(option.label)}</span>
           </button>
         );
       })}
