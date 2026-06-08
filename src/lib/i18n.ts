@@ -610,28 +610,35 @@ function runNeuralSwitch(runWalk: () => void): () => void {
   // Cap the cascade so a dense graph still finishes inside the ~800–950ms budget.
   const MAX_HOLD = 600;
 
-  // IGNITE: synapses "draw" via dashoffset; nodes fade/scale in with a glow.
+  // IGNITE — neurons FLICKER on like synapses firing: rapid, erratic opacity
+  // blinks (STEPPED, not smooth, so they read as a flicker) that settle to fully
+  // lit, staggered for a propagating-firing feel. Opacity-only WAAPI — cheap.
+  const FLICKER: Keyframe[] = [
+    { opacity: 0 },
+    { opacity: 1, offset: 0.1 },
+    { opacity: 0.12, offset: 0.24 },
+    { opacity: 1, offset: 0.4 },
+    { opacity: 0.35, offset: 0.58 },
+    { opacity: 1, offset: 0.74 },
+    { opacity: 0.6, offset: 0.88 },
+    { opacity: 1 },
+  ];
   lineEls.forEach((line, i) => {
-    const len = line.getTotalLength();
-    line.style.strokeDasharray = String(len);
-    line.style.strokeDashoffset = String(len);
-    line.animate(
-      [
-        { strokeDashoffset: len, opacity: 0.2 },
-        { strokeDashoffset: 0, opacity: 1 },
-      ],
-      { duration: DRAW_MS, delay: i * STAGGER, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "both" },
-    );
+    line.animate(FLICKER, { duration: 400 + (i % 5) * 45, delay: i * STAGGER, easing: "steps(1, end)", fill: "both" });
   });
 
   nodeEls.forEach((c, i) => {
     c.animate(
       [
-        { opacity: 0, transform: "scale(0.2)" },
-        { opacity: 1, transform: "scale(1.25)", offset: 0.7 },
+        { opacity: 0, transform: "scale(0.5)" },
+        { opacity: 1, transform: "scale(1.3)", offset: 0.1 },
+        { opacity: 0.12, transform: "scale(0.9)", offset: 0.26 },
+        { opacity: 1, transform: "scale(1.2)", offset: 0.46 },
+        { opacity: 0.4, transform: "scale(1)", offset: 0.64 },
+        { opacity: 1, transform: "scale(1.12)", offset: 0.82 },
         { opacity: 1, transform: "scale(1)" },
       ],
-      { duration: 320, delay: i * STAGGER * 0.8, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "both" },
+      { duration: 440 + (i % 4) * 55, delay: i * STAGGER * 0.7, easing: "steps(1, end)", fill: "both" },
     );
   });
 
@@ -684,11 +691,11 @@ export function useGlobalI18n(): void {
   const langFirst = useRef(true);
   useEffect(() => {
     const en = lang === "en";
-    const reduceAttr = document.documentElement.dataset.reduceMotion === "true";
-    const reduceMq =
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const reduce = reduceAttr || reduceMq;
+    // Honour ONLY the in-app reduce-motion toggle. The rest of CorePilot ignores the
+    // OS prefers-reduced-motion flag on purpose (see index.css), so the language
+    // animation must too — otherwise it's the ONE thing that silently vanishes on a
+    // PC that has OS "reduced motion / show animations off" enabled.
+    const reduce = document.documentElement.dataset.reduceMotion === "true";
     const runWalk = () => walk(document.body, en);
 
     let disposeNeural: (() => void) | undefined;
@@ -714,11 +721,14 @@ export function useGlobalI18n(): void {
         m.addedNodes.forEach((n) => {
           if (n.nodeType === Node.ELEMENT_NODE || n.nodeType === Node.TEXT_NODE) pending.push(n);
         });
-        if (m.type === "characterData" && m.target) pending.push(m.target);
       }
       if (pending.length && !raf) raf = window.requestAnimationFrame(flush);
     });
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    // NB: characterData is intentionally NOT observed. Live telemetry numbers update
+    // their text nodes every poll tick; observing characterData fired this walker
+    // continuously on data that's never translatable — a real main-thread drain.
+    // New translatable nodes still arrive via childList when components mount.
+    observer.observe(document.body, { childList: true, subtree: true, characterData: false });
 
     return () => {
       if (raf) window.cancelAnimationFrame(raf);

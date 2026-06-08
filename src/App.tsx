@@ -168,8 +168,15 @@ function App() {
     };
     type VTDoc = Document & { startViewTransition?: (cb: () => void) => { ready: Promise<void> } };
     const startVT = (document as VTDoc).startViewTransition?.bind(document);
+    // The View Transition snapshots the WHOLE page. With acrylic backdrop-filter +
+    // the cyberpunk effect layers, rasterizing that snapshot is what FROZE the theme
+    // switch. Skip the VT for those heavy cases and let the cheap CSS cross-fade (the
+    // body background-color transition + the --color-accent / --color-accent-bright
+    // @property transitions on <html>) carry the recolor smoothly — the static UI is
+    // identical, only the switch animation is lighter (no full-page snapshot).
+    const heavyForViewTransition = useSettings.getState().acrylic || themeStyle === "cyberpunk";
     // Never animate the very first paint (no theme "change" to reveal).
-    if (themeFirstRun.current || !startVT || reduceMotion) {
+    if (themeFirstRun.current || !startVT || reduceMotion || heavyForViewTransition) {
       themeFirstRun.current = false;
       apply();
       return;

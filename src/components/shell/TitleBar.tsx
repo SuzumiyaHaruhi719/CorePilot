@@ -47,7 +47,7 @@ export function TitleBar({ cpuName }: TitleBarProps) {
         >
           <Cpu size={15} strokeWidth={2.4} />
         </motion.div>
-        <span className="display text-[14px] font-bold uppercase tracking-[0.18em] text-ink glow-text">
+        <span className="brand-text display text-[14px] font-bold uppercase tracking-[0.18em] text-ink glow-text">
           Core<span className="text-accent-bright">Pilot</span>
         </span>
         {cpuName && (

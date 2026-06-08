@@ -22,7 +22,11 @@ export const useUi = create<UiState>((set) => ({
   setTab: (tab) => set({ tab }),
   monitorSub: "live",
   setMonitorSub: (monitorSub) => set({ monitorSub }),
-  optimizationEnabled: true,
+  // Off by default: auto-pinning every matching process on launch can pile a whole
+  // CCD group onto ONE CCD (saturating it while the other idles). The user opts in
+  // via the toggle when they want affinity enforcement; until then both CCDs run
+  // everything (the normal Windows scheduler).
+  optimizationEnabled: false,
   toggleOptimization: () => set((s) => ({ optimizationEnabled: !s.optimizationEnabled })),
   setOptimization: (optimizationEnabled) => set({ optimizationEnabled }),
 }));
