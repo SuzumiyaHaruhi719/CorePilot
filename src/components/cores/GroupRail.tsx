@@ -100,6 +100,15 @@ export function GroupRail({
                   : "border-line bg-surface2 hover:border-line-strong hover:bg-surface3",
               )}
               style={
+                // ALWAYS emit boxShadow (the glow when selected, else "none"). With
+                // motion's `layout`, boxShadow is a layout-corrected / forced motion
+                // value, so returning `undefined` for the unselected branch does NOT
+                // clear a previously-applied glow — a card that was ever selected (the
+                // seeder selects each built-in group once as it creates them) keeps a
+                // STALE colored glow. That's the recurring "all groups glow at once"
+                // bug. Explicit "none" clears it. borderColor is a plain style (not
+                // motion-corrected), so leaving it off the unselected branch is fine
+                // and preserves the `hover:border-line-strong` className.
                 selected
                   ? {
                       borderColor: `color-mix(in oklch, ${color} 50%, transparent)`,
@@ -107,7 +116,7 @@ export function GroupRail({
                         ? `inset 2px 0 0 0 ${color}`
                         : `0 0 14px -3px color-mix(in oklch, ${color} 55%, transparent), inset 2px 0 0 0 ${color}`,
                     }
-                  : undefined
+                  : { boxShadow: "none" }
               }
             >
               <div className="flex items-center justify-between">
