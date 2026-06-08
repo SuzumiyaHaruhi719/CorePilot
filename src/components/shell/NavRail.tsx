@@ -42,7 +42,7 @@ export function NavRail() {
         // min-h-0 lets the flex column actually shrink; a slim, HUD-toned scrollbar
         // (scoped here so it stays narrow inside the 88px rail) appears only on overflow.
         "min-h-0 overflow-y-auto overflow-x-hidden",
-        "[scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border-0 [&::-webkit-scrollbar-thumb]:bg-white/10 hover:[&::-webkit-scrollbar-thumb]:bg-white/20",
+        "[scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border-0 [&::-webkit-scrollbar-thumb]:bg-ink/10 hover:[&::-webkit-scrollbar-thumb]:bg-ink/20",
       )}
     >
       {ITEMS.map((item) => {

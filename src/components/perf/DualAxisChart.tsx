@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
+import { hueColor, isLightTheme } from "../../lib/colors";
+import { useSettings } from "../../store/settings";
 
 /**
  * Dual-axis time-series chart for a finished perf session: two series sharing one
@@ -30,10 +32,15 @@ interface DualAxisChartProps {
   onHover: (idx: number | null) => void;
 }
 
-const AXIS_STROKE = "oklch(54% 0.018 265)";
-const GRID_STROKE = "oklch(100% 0 0 / 0.06)";
 const AXIS_FONT = '10px "Cascadia Mono", ui-monospace, monospace';
 const Y_AXIS_SIZE = 54;
+
+/** Canvas axis/grid colors, tuned per theme (canvas can't read CSS vars). */
+function chartChrome(): { axis: string; grid: string } {
+  return isLightTheme()
+    ? { axis: "oklch(42% 0.02 285)", grid: "oklch(20% 0.02 285 / 0.12)" }
+    : { axis: "oklch(54% 0.018 265)", grid: "oklch(100% 0 0 / 0.06)" };
+}
 
 /** Replace the alpha of an `oklch(L C H)` string. */
 function withAlpha(oklch: string, alpha: number): string {
@@ -52,6 +59,7 @@ export function DualAxisChart({
   syncKey,
   onHover,
 }: DualAxisChartProps) {
+  const theme = useSettings((s) => s.theme);
   const wrapRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const [width, setWidth] = useState(640);
@@ -75,8 +83,9 @@ export function DualAxisChart({
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const upColor = `oklch(74% 0.15 ${upHue})`;
-    const downColor = `oklch(74% 0.15 ${downHue})`;
+    const upColor = hueColor(upHue, 74, 0.15);
+    const downColor = hueColor(downHue, 74, 0.15);
+    const chrome = chartChrome();
 
     const data: uPlot.AlignedData = [
       Float64Array.from(timesSec),
@@ -109,7 +118,7 @@ export function DualAxisChart({
       },
       axes: [
         {
-          stroke: AXIS_STROKE,
+          stroke: chrome.axis,
           grid: { show: false },
           ticks: { show: false },
           font: AXIS_FONT,
@@ -123,7 +132,7 @@ export function DualAxisChart({
         {
           scale: "y",
           stroke: upColor,
-          grid: { stroke: GRID_STROKE, width: 1 },
+          grid: { stroke: chrome.grid, width: 1 },
           ticks: { show: false },
           font: AXIS_FONT,
           size: Y_AXIS_SIZE,
@@ -184,7 +193,7 @@ export function DualAxisChart({
       plotRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timesSec, up, down, upHue, downHue, syncKey, height]);
+  }, [timesSec, up, down, upHue, downHue, syncKey, height, theme]);
 
   useEffect(() => {
     if (plotRef.current) plotRef.current.setSize({ width, height });

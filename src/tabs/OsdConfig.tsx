@@ -470,7 +470,7 @@ export function OsdConfig() {
                   <span className="flex-1 truncate text-muted" title={g.path}>
                     {g.name}
                   </span>
-                  <span className="shrink-0 rounded bg-black/20 px-1.5 py-0.5 text-[10px] text-dim">
+                  <span className="shrink-0 rounded bg-surface3 px-1.5 py-0.5 text-[10px] text-dim">
                     {g.source}
                   </span>
                 </div>
@@ -834,7 +834,7 @@ function InjectionStatusLine({ enabled, status }: InjectionStatusLineProps) {
       )}
       <span className="flex-1">{status.reason}</span>
       {status.target.pid !== 0 && (
-        <span className="shrink-0 rounded bg-black/20 px-1.5 py-0.5 text-[10.5px] opacity-80">
+        <span className="shrink-0 rounded bg-surface3 px-1.5 py-0.5 text-[10.5px] text-muted opacity-80">
           PID {status.target.pid}
         </span>
       )}

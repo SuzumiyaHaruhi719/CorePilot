@@ -1,4 +1,5 @@
 import { useId } from "react";
+import { hueColor, isLightTheme } from "../../lib/colors";
 
 interface SparklineProps {
   data: number[];
@@ -12,7 +13,9 @@ interface SparklineProps {
 export function Sparkline({ data, max, hue, height = 96 }: SparklineProps) {
   const id = useId();
   const n = data.length;
-  const color = `oklch(72% 0.15 ${hue})`;
+  const color = hueColor(hue, 72, 0.15);
+  // The neon drop-shadow reads as a muddy smear on light surfaces — drop it there.
+  const glow = isLightTheme() ? "none" : `drop-shadow(0 0 4px ${color})`;
 
   const points = data.map((v, i) => {
     const x = n > 1 ? (i / (n - 1)) * 100 : 0;
@@ -45,7 +48,7 @@ export function Sparkline({ data, max, hue, height = 96 }: SparklineProps) {
         strokeWidth="1.6"
         strokeLinejoin="round"
         vectorEffect="non-scaling-stroke"
-        style={{ filter: `drop-shadow(0 0 4px ${color})` }}
+        style={{ filter: glow }}
       />
     </svg>
   );

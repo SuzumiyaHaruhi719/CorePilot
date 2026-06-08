@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
+import { hueColor, isLightTheme } from "../../lib/colors";
+import { useSettings } from "../../store/settings";
 
 /**
  * GamePP-style time-series chart for a finished perf session, rendered with
@@ -55,17 +57,19 @@ const PAD_RIGHT = 56;
 // uPlot paints axes/grid/points to <canvas>, which can't resolve CSS custom
 // properties (var(--…)) — these must be literal color/font strings. They mirror
 // the design tokens (--color-dim, --color-line, --font-mono) by hand.
-const AXIS_STROKE = "oklch(54% 0.018 265)";
-const GRID_STROKE = "oklch(100% 0 0 / 0.06)";
-const POINT_FILL = "oklch(15% 0.014 265)";
 const AXIS_FONT = '10px "Cascadia Mono", ui-monospace, monospace';
 
-/** Resolve an oklch line color and a low-alpha fill stop for the gradient. */
+/** Canvas axis/grid/point colors, tuned per theme (canvas can't read CSS vars). */
+function chartChrome(): { axis: string; grid: string; point: string } {
+  return isLightTheme()
+    ? { axis: "oklch(42% 0.02 285)", grid: "oklch(20% 0.02 285 / 0.12)", point: "oklch(98.5% 0.006 285)" }
+    : { axis: "oklch(54% 0.018 265)", grid: "oklch(100% 0 0 / 0.06)", point: "oklch(15% 0.014 265)" };
+}
+
+/** Resolve a theme-aware line color (and matching fill stop) for a hue. */
 function colors(hue: number): { line: string; fill: string } {
-  return {
-    line: `oklch(74% 0.15 ${hue})`,
-    fill: `oklch(74% 0.15 ${hue})`,
-  };
+  const c = hueColor(hue, 74, 0.15);
+  return { line: c, fill: c };
 }
 
 export function TimeSeriesChart({
@@ -79,6 +83,7 @@ export function TimeSeriesChart({
   syncKey,
   onHover,
 }: TimeSeriesChartProps) {
+  const theme = useSettings((s) => s.theme);
   const wrapRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const [width, setWidth] = useState(640);
@@ -108,6 +113,7 @@ export function TimeSeriesChart({
     const el = wrapRef.current;
     if (!el) return;
     const { line, fill } = colors(hue);
+    const chrome = chartChrome();
     const hasData = values.some(isNum);
 
     // Cache the latest cursor x-index in CSS px for the ref-line + tooltip hook.
@@ -128,7 +134,7 @@ export function TimeSeriesChart({
         // Vertical crosshair only; sync x across the whole report.
         x: true,
         y: false,
-        points: { show: true, size: 6, width: 2, stroke: line, fill: POINT_FILL },
+        points: { show: true, size: 6, width: 2, stroke: line, fill: chrome.point },
         sync: { key: syncKey, setSeries: false },
         // Bridge nulls when scanning for the closest hover index.
         hover: { skip: [undefined, NaN] },
@@ -148,7 +154,7 @@ export function TimeSeriesChart({
       },
       axes: [
         {
-          stroke: AXIS_STROKE,
+          stroke: chrome.axis,
           grid: { show: false },
           ticks: { show: false },
           font: AXIS_FONT,
@@ -161,9 +167,9 @@ export function TimeSeriesChart({
             }),
         },
         {
-          stroke: AXIS_STROKE,
+          stroke: chrome.axis,
           side: 1,
-          grid: { stroke: GRID_STROKE, width: 1 },
+          grid: { stroke: chrome.grid, width: 1 },
           ticks: { show: false },
           font: AXIS_FONT,
           size: PAD_RIGHT,
@@ -201,7 +207,11 @@ export function TimeSeriesChart({
             for (const r of refLines) {
               if (!isNum(r.value)) continue;
               const y = Math.round(u.valToPos(r.value, "y", true));
-              ctx.strokeStyle = r.muted ? "oklch(70% 0.02 265 / 0.5)" : withAlpha(line, 0.85);
+              ctx.strokeStyle = r.muted
+                ? isLightTheme()
+                  ? "oklch(45% 0.02 285 / 0.45)"
+                  : "oklch(70% 0.02 265 / 0.5)"
+                : withAlpha(line, 0.85);
               ctx.beginPath();
               ctx.moveTo(left, y);
               ctx.lineTo(left + w, y);
@@ -236,7 +246,7 @@ export function TimeSeriesChart({
     // Rebuild only when the underlying data identity changes (finished session).
     // width is applied via setSize below, not a rebuild.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timesSec, values, hue, zeroFloor, syncKey]);
+  }, [timesSec, values, hue, zeroFloor, syncKey, theme]);
 
   // Apply width changes without tearing down the plot.
   useEffect(() => {

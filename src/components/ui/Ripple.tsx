@@ -49,7 +49,9 @@ export function ClickRipple() {
               top: r.y,
               width: r.size,
               height: r.size,
-              background: "radial-gradient(circle, rgba(255,255,255,0.4), rgba(255,255,255,0) 70%)",
+              // Ink-based so the ripple is visible on both dark and light surfaces
+              // (pure white was invisible on the light theme).
+              background: "radial-gradient(circle, color-mix(in oklch, var(--color-ink) 28%, transparent), transparent 70%)",
             }}
             className="absolute rounded-full"
           />

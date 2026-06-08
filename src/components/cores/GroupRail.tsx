@@ -2,7 +2,7 @@ import { Download, ListTree, Plus, Power, Upload } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { CSSProperties } from "react";
 import { cn } from "../../lib/cn";
-import { groupColor } from "../../lib/colors";
+import { groupColor, isLightTheme } from "../../lib/colors";
 import { useTf } from "../../lib/i18n";
 import { maskToCpuList } from "../../lib/format";
 import { hoverPop } from "../../lib/motion";
@@ -103,7 +103,9 @@ export function GroupRail({
                 selected
                   ? {
                       borderColor: `color-mix(in oklch, ${color} 50%, transparent)`,
-                      boxShadow: `0 0 14px -3px color-mix(in oklch, ${color} 55%, transparent), inset 2px 0 0 0 ${color}`,
+                      boxShadow: isLightTheme()
+                        ? `inset 2px 0 0 0 ${color}`
+                        : `0 0 14px -3px color-mix(in oklch, ${color} 55%, transparent), inset 2px 0 0 0 ${color}`,
                     }
                   : undefined
               }

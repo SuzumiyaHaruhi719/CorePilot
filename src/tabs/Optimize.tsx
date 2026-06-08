@@ -8,6 +8,7 @@ import { TabHeader } from "../components/ui/TabHeader";
 import { hoverPop } from "../lib/motion";
 import { cn } from "../lib/cn";
 import { formatBytes } from "../lib/format";
+import { hueColor } from "../lib/colors";
 import { useTf } from "../lib/i18n";
 import { api, type MemDetail } from "../lib/ipc";
 import { Tuning } from "./Tuning";
@@ -45,7 +46,7 @@ function ActionCard({ icon: Icon, title, desc, hue, onRun }: ActionCardProps) {
     }
   }
 
-  const tint = `oklch(72% 0.16 ${hue})`;
+  const tint = hueColor(hue, 72, 0.16);
 
   return (
     <motion.button
@@ -262,7 +263,7 @@ export function Optimize() {
                 / {mem ? formatBytes(mem.total) : "—"}
               </span>
             </div>
-            <div className="nums text-[15px] font-semibold" style={{ color: `oklch(72% 0.16 ${loadPct > 80 ? 22 : 274})` }}>
+            <div className="nums text-[15px] font-semibold" style={{ color: hueColor(loadPct > 80 ? 22 : 274, 72, 0.16) }}>
               {loadPct}%
             </div>
           </div>
@@ -322,7 +323,7 @@ export function Optimize() {
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
-                  className={cn("mt-1 flex items-center gap-1.5 text-[12px] font-medium", heroResult.ok ? "text-white" : "text-danger")}
+                  className={cn("mt-1 flex items-center gap-1.5 text-[12px] font-medium", heroResult.ok ? "text-ok" : "text-danger")}
                 >
                   {heroResult.ok ? <Check size={14} /> : <AlertTriangle size={14} />} <span className="nums">{heroResult.text}</span>
                 </motion.div>

@@ -10,6 +10,7 @@ import { Slider } from "../components/ui/Slider";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
+import { hueColor, isLightTheme } from "../lib/colors";
 import { useT, useTf } from "../lib/i18n";
 import { hoverPop } from "../lib/motion";
 import { api, type FanCalibProgress, type FanCalibration, type FanChannel, type FanCurvePoint, type FanInfo, type FanMode, type FanTempSource } from "../lib/ipc";
@@ -158,7 +159,7 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
         <div className="flex items-stretch gap-2">
           <div className="rounded-lg border border-line bg-surface2/50 px-2.5 py-1 text-right">
             <div className="hud-label text-[8.5px] text-dim">转速</div>
-            <div className="nums text-[15px] font-semibold leading-tight text-cyan" style={{ textShadow: rpm != null ? "0 0 10px color-mix(in oklch, var(--color-cyan) 30%, transparent)" : undefined }}>
+            <div className="nums text-[15px] font-semibold leading-tight text-cyan" style={{ textShadow: rpm != null && !isLightTheme() ? "0 0 10px color-mix(in oklch, var(--color-cyan) 30%, transparent)" : undefined }}>
               {rpm ?? "—"}
               <span className="ml-0.5 text-[9.5px] font-normal text-dim">RPM</span>
             </div>
@@ -216,14 +217,14 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
                   <span
                     className="nums inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11.5px] font-medium"
                     style={{
-                      background: `oklch(70% 0.14 ${tempHue(liveTemp)} / 0.14)`,
-                      borderColor: `oklch(70% 0.14 ${tempHue(liveTemp)} / 0.35)`,
-                      color: `oklch(82% 0.13 ${tempHue(liveTemp)})`,
+                      background: `color-mix(in oklch, ${hueColor(tempHue(liveTemp), 82, 0.13)} 14%, transparent)`,
+                      borderColor: `color-mix(in oklch, ${hueColor(tempHue(liveTemp), 82, 0.13)} 35%, transparent)`,
+                      color: hueColor(tempHue(liveTemp), 82, 0.13),
                     }}
                   >
                     <span
                       className="h-1.5 w-1.5 animate-pulse rounded-full"
-                      style={{ background: `oklch(82% 0.13 ${tempHue(liveTemp)})` }}
+                      style={{ background: hueColor(tempHue(liveTemp), 82, 0.13) }}
                     />
                     {Math.round(liveTemp)}°C → {liveDuty != null ? Math.round(liveDuty) : "—"}%
                   </span>

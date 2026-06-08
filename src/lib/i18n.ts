@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useSettings } from "../store/settings";
 
 /**
@@ -70,6 +70,14 @@ export const EN: Record<string, string> = {
   "CORE MAP · 核心映射": "CORE MAP",
 
   // Settings rows
+  "主题": "Theme", "深色 HUD 或浅色界面": "Dark HUD or light interface", "深色": "Dark", "浅色": "Light",
+  "主题风格": "Theme style", "选择主题风格": "Choose a palette",
+  "石墨": "Graphite", "午夜": "Midnight", "终端": "Terminal", "瓷白": "Porcelain", "砂岩": "Sandstone",
+  "冷色深色调，适合长时间使用。": "Cool dark tone, easy on the eyes for long sessions.",
+  "更深更蓝的午夜界面，冷紫蓝强调色。": "Deeper, bluer midnight UI with a cool violet accent.",
+  "近黑遥测终端 + 磷光绿，极客风。": "Near-black telemetry terminal with phosphor green — geek mode.",
+  "高对比度浅色，简洁清爽。": "High-contrast light — clean and crisp.",
+  "暖色浅色调，明亮环境更舒适。": "Warm light tone — easier in bright rooms.",
   "强调色": "Accent color",
   "主题主色调，实时应用": "Theme primary color, applied live",
   "发光强度": "Glow intensity",
@@ -388,7 +396,7 @@ export const EN: Record<string, string> = {
   "点击重命名": "Rename", "删除配置": "Delete profile", "移除": "Remove", "未发现进程": "No processes found",
   "分组名称": "Group name", "停止服务": "Stop service", "重启服务": "Restart service",
   "刷新服务列表": "Refresh service list", "刷新启动项": "Refresh startup items",
-  "诊断 · DEBUG": "DIAGNOSTICS", "导出调试日志": "Export debug logs",
+  "诊断 · DEBUG": "DIAGNOSTICS", "导出调试日志": "Export debug logs", "调试日志": "Debug log",
   "将本次启动以来的完整日志保存到下载文件夹，便于反馈问题。":
     "Saves the complete log since this launch to your Downloads folder for bug reports.",
   "预览 · 默认": "Preview · default", "中文": "Chinese", "游戏": "Games",
@@ -490,16 +498,42 @@ function walk(root: Node, en: boolean) {
  */
 export function useGlobalI18n(): void {
   const lang = useSettings((s) => s.language);
+  const langFirst = useRef(true);
   useEffect(() => {
     const en = lang === "en";
-    const root = document.getElementById("root") ?? document.body;
+    const reduce = document.documentElement.dataset.reduceMotion === "true";
+    type VTDoc = Document & { startViewTransition?: (cb: () => void) => { ready: Promise<void> } };
+    const startVT = (document as VTDoc).startViewTransition?.bind(document);
+    const runWalk = () => walk(document.body, en);
 
-    root.style.transition = "opacity 160ms ease";
-    root.style.opacity = "0.5";
-    const apply = window.setTimeout(() => {
-      walk(document.body, en);
-      root.style.opacity = "1";
-    }, 150);
+    if (langFirst.current || reduce || !startVT) {
+      // First mount (no change to animate) or reduced motion → swap instantly.
+      langFirst.current = false;
+      runWalk();
+    } else {
+      // Premium "HUD shutter": the old text collapses to the centre line while the
+      // new translated DOM expands out from it (Web Animations on the VT snapshots).
+      const vt = startVT(runWalk);
+      vt.ready
+        .then(() => {
+          const timing: KeyframeAnimationOptions = { duration: 320, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "both" };
+          document.documentElement.animate(
+            [
+              { opacity: 1, transform: "scale(1)", clipPath: "inset(0% 0 0% 0)" },
+              { opacity: 0.18, transform: "scale(0.992)", clipPath: "inset(48% 0 48% 0)" },
+            ],
+            { ...timing, pseudoElement: "::view-transition-old(root)" },
+          );
+          document.documentElement.animate(
+            [
+              { opacity: 0.18, transform: "scale(1.006)", clipPath: "inset(50% 0 50% 0)" },
+              { opacity: 1, transform: "scale(1)", clipPath: "inset(0% 0 0% 0)" },
+            ],
+            { ...timing, pseudoElement: "::view-transition-new(root)" },
+          );
+        })
+        .catch(() => undefined);
+    }
 
     let raf = 0;
     const pending: Node[] = [];
@@ -520,7 +554,6 @@ export function useGlobalI18n(): void {
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
 
     return () => {
-      window.clearTimeout(apply);
       if (raf) window.cancelAnimationFrame(raf);
       observer.disconnect();
     };

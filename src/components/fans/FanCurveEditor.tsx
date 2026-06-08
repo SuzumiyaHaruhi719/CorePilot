@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { isLightTheme } from "../../lib/colors";
 import { useTf } from "../../lib/i18n";
 import type { FanCurvePoint } from "../../lib/ipc";
 
@@ -171,7 +172,7 @@ export function FanCurveEditor({ points, onChange, onCommit, live, minDuty = 0 }
           strokeWidth={2.5}
           strokeLinejoin="round"
           strokeLinecap="round"
-          style={{ filter: "drop-shadow(0 0 5px color-mix(in oklch, var(--color-accent) 50%, transparent))" }}
+          style={{ filter: isLightTheme() ? "none" : "drop-shadow(0 0 5px color-mix(in oklch, var(--color-accent) 50%, transparent))" }}
         />
 
         {/* live operating point */}
@@ -186,7 +187,7 @@ export function FanCurveEditor({ points, onChange, onCommit, live, minDuty = 0 }
               fill="currentColor"
               stroke="var(--color-base)"
               strokeWidth={1.5}
-              style={{ filter: "drop-shadow(0 0 6px color-mix(in oklch, var(--color-cyan) 70%, transparent))" }}
+              style={{ filter: isLightTheme() ? "none" : "drop-shadow(0 0 6px color-mix(in oklch, var(--color-cyan) 70%, transparent))" }}
             />
           </g>
         )}
@@ -207,7 +208,7 @@ export function FanCurveEditor({ points, onChange, onCommit, live, minDuty = 0 }
                 className={isActive ? "cursor-grabbing" : "cursor-grab"}
                 stroke="var(--color-base)"
                 strokeWidth={2}
-                style={{ filter: "drop-shadow(0 0 4px color-mix(in oklch, var(--color-accent-bright) 60%, transparent))", transition: "r 120ms ease-out" }}
+                style={{ filter: isLightTheme() ? "none" : "drop-shadow(0 0 4px color-mix(in oklch, var(--color-accent-bright) 60%, transparent))", transition: "r 120ms ease-out" }}
                 onPointerDown={(e) => {
                   e.currentTarget.setPointerCapture?.(e.pointerId);
                   setDragging(i);

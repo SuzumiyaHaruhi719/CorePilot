@@ -23,6 +23,7 @@ import { Slider } from "../components/ui/Slider";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
+import { hueColor, isLightTheme } from "../lib/colors";
 import { useT, useTf } from "../lib/i18n";
 import { formatBytes } from "../lib/format";
 import { hoverPop } from "../lib/motion";
@@ -60,7 +61,7 @@ interface TileProps {
 }
 
 function StatTile({ icon: Icon, label, value, sub, hue, live = true }: TileProps) {
-  const tint = `oklch(80% 0.14 ${hue})`;
+  const tint = hueColor(hue, 80, 0.14);
   const dim = value === "—";
   return (
     <motion.div
@@ -85,14 +86,14 @@ function StatTile({ icon: Icon, label, value, sub, hue, live = true }: TileProps
         {live && !dim && (
           <span
             className="ml-auto h-1.5 w-1.5 shrink-0 animate-pulse rounded-full"
-            style={{ background: tint, boxShadow: `0 0 6px ${tint}` }}
+            style={{ background: tint, boxShadow: isLightTheme() ? undefined : `0 0 6px ${tint}` }}
           />
         )}
       </div>
       <div className="nums flex items-baseline gap-1 truncate">
         <span
           className={cn("text-[22px] font-semibold leading-none", dim ? "text-dim" : "text-ink")}
-          style={dim ? undefined : ({ color: tint, textShadow: `0 0 12px color-mix(in oklch, ${tint} 36%, transparent)` } as CSSProperties)}
+          style={dim ? undefined : ({ color: tint, textShadow: isLightTheme() ? undefined : `0 0 12px color-mix(in oklch, ${tint} 36%, transparent)` } as CSSProperties)}
         >
           {value}
         </span>

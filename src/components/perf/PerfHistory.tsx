@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { Ban, CircleCheck, Gamepad2, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cn } from "../../lib/cn";
+import { hueColor } from "../../lib/colors";
 import { hoverPop } from "../../lib/motion";
 import { gameDisplayName, type PerfSession } from "../../lib/perf";
 import { usePerfHistory } from "../../store/perfHistory";
@@ -36,8 +37,8 @@ function Badge({ label, value, hue }: { label: string; value: string; hue: numbe
     <span
       className="nums inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] font-medium"
       style={{
-        background: `oklch(70% 0.13 ${hue} / 0.14)`,
-        color: `oklch(82% 0.13 ${hue})`,
+        background: `color-mix(in oklch, ${hueColor(hue, 82, 0.13)} 14%, transparent)`,
+        color: hueColor(hue, 82, 0.13),
       }}
     >
       <span className="text-dim">{label}</span>

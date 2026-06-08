@@ -195,8 +195,8 @@ export function ProcessTable({
                   <span
                     className="max-w-full justify-self-start truncate rounded-full px-2 py-0.5 text-[11px] font-medium"
                     style={{
-                      background: `oklch(74% 0.15 ${group.hue} / 0.16)`,
-                      color: `oklch(82% 0.13 ${group.hue})`,
+                      background: `color-mix(in oklch, ${groupColor(group.hue)} 16%, transparent)`,
+                      color: groupColor(group.hue),
                     }}
                     title={group.name}
                   >

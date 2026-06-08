@@ -1,5 +1,6 @@
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
+import { isLightTheme } from "../../lib/colors";
 import { useTf } from "../../lib/i18n";
 import { clusterName, clusterTag, clusterTone, maskFromIds, maskHas, toggleBit } from "../../lib/cpu";
 import type { CpuTopology } from "../../lib/ipc";
@@ -14,21 +15,26 @@ const presetClass =
   "no-drag cursor-pointer rounded-md border border-line bg-surface2 px-2.5 py-1 text-[11px] font-medium text-muted transition-[background-color,border-color,color] duration-150 hover:border-line-strong hover:bg-surface3 hover:text-ink active:scale-[0.97]";
 
 // Color classes per cluster tone (performance / secondary / neutral).
+// `glow` (the neon box-shadow) is split out so it can be dropped in light mode,
+// where a colored halo on a white grid reads as muddy.
 const TONE = {
   vcache: {
     text: "text-vcache",
     dot: "bg-vcache",
-    on: "border-vcache/55 bg-vcache/20 text-vcache shadow-[0_0_10px_-1px_color-mix(in_oklch,var(--color-vcache)_45%,transparent)]",
+    on: "border-vcache/55 bg-vcache/20 text-vcache",
+    glow: "shadow-[0_0_10px_-1px_color-mix(in_oklch,var(--color-vcache)_45%,transparent)]",
   },
   freq: {
     text: "text-freq",
     dot: "bg-freq",
-    on: "border-freq/55 bg-freq/20 text-freq shadow-[0_0_10px_-1px_color-mix(in_oklch,var(--color-freq)_45%,transparent)]",
+    on: "border-freq/55 bg-freq/20 text-freq",
+    glow: "shadow-[0_0_10px_-1px_color-mix(in_oklch,var(--color-freq)_45%,transparent)]",
   },
   neutral: {
     text: "text-accent",
     dot: "bg-accent",
-    on: "border-accent/55 bg-accent/20 text-accent shadow-[0_0_10px_-1px_color-mix(in_oklch,var(--color-accent)_45%,transparent)]",
+    on: "border-accent/55 bg-accent/20 text-accent",
+    glow: "shadow-[0_0_10px_-1px_color-mix(in_oklch,var(--color-accent)_45%,transparent)]",
   },
 } as const;
 
@@ -79,7 +85,7 @@ export function CoreGrid({ topo, mask, onChange }: CoreGridProps) {
                     className={cn(
                       "nums grid h-8 cursor-pointer place-items-center rounded-md border text-[11px] font-medium transition-[background-color,border-color,color,box-shadow] duration-150",
                       on
-                        ? tone.on
+                        ? cn(tone.on, !isLightTheme() && tone.glow)
                         : "border-line bg-surface2 text-dim hover:border-line-strong hover:bg-surface3 hover:text-muted",
                     )}
                   >

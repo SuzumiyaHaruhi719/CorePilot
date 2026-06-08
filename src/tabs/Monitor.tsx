@@ -20,6 +20,7 @@ import { TabHeader } from "../components/ui/TabHeader";
 import { useMetricsHistory } from "../hooks/useMetricsHistory";
 import { useSensors } from "../hooks/useSensors";
 import { formatBytes } from "../lib/format";
+import { hueColor } from "../lib/colors";
 import { useTf } from "../lib/i18n";
 import { easeOut } from "../lib/motion";
 import { useUi, type MonitorSub } from "../store/ui";
@@ -32,7 +33,9 @@ const SUB_TABS: { value: MonitorSub; label: string }[] = [
 const HISTORY_POINTS = 80;
 
 const fmtRate = (v: number | null | undefined) => (v == null ? "—" : `${formatBytes(v)}/s`);
-const oklch = (hue: number, l = 80, c = 0.13) => `oklch(${l}% ${c} ${hue})`;
+// Theme-aware telemetry color: bright neon on the dark HUD, deeper/saturated on
+// light so lines and values stay legible. `hueColor` reads `data-theme` live.
+const oklch = (hue: number, l = 80, c = 0.13) => hueColor(hue, l, c);
 
 // ── Small HUD readout: an aligned label/value pair under a gauge ──────────────
 

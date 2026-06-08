@@ -1,5 +1,5 @@
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import { NavRail } from "./components/shell/NavRail";
 import { StatusBar } from "./components/shell/StatusBar";
 import { TitleBar } from "./components/shell/TitleBar";
@@ -25,6 +25,20 @@ import { useGpuProfiles } from "./store/gpuProfiles";
 import { useFanProfiles } from "./store/fanProfiles";
 import { useOsd } from "./store/osd";
 
+/** Last pointer-down position, used as the origin for the theme-switch circular
+ *  reveal so the new theme appears to wipe out from where the user clicked. */
+const switchOrigin = { x: NaN, y: NaN };
+if (typeof window !== "undefined") {
+  window.addEventListener(
+    "pointerdown",
+    (e) => {
+      switchOrigin.x = e.clientX;
+      switchOrigin.y = e.clientY;
+    },
+    { capture: true, passive: true },
+  );
+}
+
 const TABS: Record<TabId, () => ReactElement> = {
   cores: CoreAssignment,
   taskmgr: TaskManager,
@@ -43,6 +57,8 @@ function App() {
   const acrylic = useSettings((s) => s.acrylic);
   const windowOpacity = useSettings((s) => s.windowOpacity);
   const glow = useSettings((s) => s.glow);
+  const theme = useSettings((s) => s.theme);
+  const themeStyle = useSettings((s) => s.themeStyle);
   const reduceMotion = useSettings((s) => s.reduceMotion);
   const closeToTray = useSettings((s) => s.closeToTray);
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -111,11 +127,26 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const hue = ACCENT_HUE[accent];
     const root = document.documentElement.style;
-    root.setProperty("--color-accent", `oklch(67% 0.185 ${hue})`);
-    root.setProperty("--color-accent-bright", `oklch(77% 0.16 ${hue})`);
-  }, [accent]);
+    // Only the neutral baselines (graphite/porcelain) follow the accent-hue
+    // picker. The designed styles (midnight/sandstone/terminal) ship their own
+    // signature accent from CSS, so clear the inline override to let it stand.
+    if (themeStyle !== "graphite" && themeStyle !== "porcelain") {
+      root.removeProperty("--color-accent");
+      root.removeProperty("--color-accent-bright");
+      return;
+    }
+    const hue = ACCENT_HUE[accent];
+    // Theme-aware lightness/chroma: the bright dark-mode accent is too light on a
+    // light background, so light mode uses a darker, more saturated accent.
+    if (theme === "light") {
+      root.setProperty("--color-accent", `oklch(45% 0.255 ${hue})`);
+      root.setProperty("--color-accent-bright", `oklch(51% 0.24 ${hue})`);
+    } else {
+      root.setProperty("--color-accent", `oklch(67% 0.185 ${hue})`);
+      root.setProperty("--color-accent-bright", `oklch(77% 0.16 ${hue})`);
+    }
+  }, [accent, theme, themeStyle]);
 
   useEffect(() => {
     document.documentElement.dataset.acrylic = String(acrylic);
@@ -132,6 +163,46 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.glow = glow;
   }, [glow]);
+
+  // Light / dark theme — drives the `html[data-theme="light"]` token overrides
+  // in index.css. A short color/background transition makes the switch smooth.
+  // Light / dark theme. Flipping `data-theme` recolors the whole token system at
+  // once; we wrap it in a View Transition and clip-reveal the NEW theme as a
+  // circle expanding from the toggle's click point (iOS-style). Falls back to an
+  // instant swap when View Transitions aren't available or motion is reduced.
+  const themeFirstRun = useRef(true);
+  useEffect(() => {
+    const root = document.documentElement;
+    const apply = () => {
+      root.dataset.theme = theme;
+      root.dataset.themeStyle = themeStyle;
+    };
+    type VTDoc = Document & { startViewTransition?: (cb: () => void) => { ready: Promise<void> } };
+    const startVT = (document as VTDoc).startViewTransition?.bind(document);
+    // Never animate the very first paint (no theme "change" to reveal).
+    if (themeFirstRun.current || !startVT || reduceMotion) {
+      themeFirstRun.current = false;
+      apply();
+      return;
+    }
+    const cx = Number.isFinite(switchOrigin.x) ? switchOrigin.x : window.innerWidth / 2;
+    const cy = Number.isFinite(switchOrigin.y) ? switchOrigin.y : window.innerHeight / 2;
+    const end = Math.hypot(Math.max(cx, window.innerWidth - cx), Math.max(cy, window.innerHeight - cy));
+    const vt = startVT(apply);
+    vt.ready
+      .then(() => {
+        root.animate(
+          { clipPath: [`circle(0px at ${cx}px ${cy}px)`, `circle(${end}px at ${cx}px ${cy}px)`] },
+          { duration: 480, easing: "cubic-bezier(0.16, 1, 0.3, 1)", pseudoElement: "::view-transition-new(root)" },
+        );
+        // Subtle dip on the outgoing theme so the reveal reads as a layered wipe.
+        root.animate(
+          { opacity: [1, 0.94, 1] },
+          { duration: 380, easing: "cubic-bezier(0.22, 1, 0.36, 1)", pseudoElement: "::view-transition-old(root)" },
+        );
+      })
+      .catch(() => undefined);
+  }, [theme, themeStyle, reduceMotion]);
 
   // Mirror reduce-motion to the DOM so CSS can kill continuous animations (HUD
   // grid, glow pulses, spinners) — the main idle-CPU cost on low-end machines.
@@ -160,8 +231,8 @@ function App() {
 
   return (
     <MotionConfig reducedMotion={reduceMotion ? "always" : "never"}>
-      <div className="relative flex h-screen w-screen flex-col overflow-hidden text-ink">
-        <div aria-hidden className="pointer-events-none absolute inset-0 -z-10 overflow-hidden">
+      <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-base text-ink">
+        <div aria-hidden className="app-backdrop pointer-events-none absolute inset-0 -z-10 overflow-hidden">
           <div className="hud-grid absolute inset-0 opacity-60" />
           <div className="absolute -left-40 -top-40 h-[480px] w-[480px] rounded-full bg-accent/20 blur-[120px]" />
           <div className="absolute -bottom-52 -right-32 h-[460px] w-[460px] rounded-full bg-rose/12 blur-[130px]" />

@@ -9,9 +9,28 @@
 export const GROUP_L = 74;
 export const GROUP_C = 0.15;
 
+/** True when the app is in light mode (drives theme-aware telemetry colors). */
+export function isLightTheme(): boolean {
+  return typeof document !== "undefined" && document.documentElement.dataset.theme === "light";
+}
+
+/**
+ * Telemetry/identity color for a hue, tuned per theme. The dark HUD uses bright
+ * (~80% L) neon hues; on a light background those wash out, so light mode drops
+ * lightness and adds chroma for vivid, AA-legible lines, dots and fills. Used by
+ * groups, charts, sparklines, gauges and report tiles so every hue recolors with
+ * the theme. Reads `data-theme` live, so re-render to pick up a toggle.
+ */
+export function hueColor(hue: number, darkL = 80, darkC = 0.14): string {
+  if (isLightTheme()) {
+    return `oklch(48% ${Math.min(darkC + 0.05, 0.25)} ${hue})`;
+  }
+  return `oklch(${darkL}% ${darkC} ${hue})`;
+}
+
 /** CSS color for a group hue (matches the dots rendered across the app). */
 export function groupColor(hue: number): string {
-  return `oklch(${GROUP_L}% ${GROUP_C} ${hue})`;
+  return isLightTheme() ? `oklch(46% 0.19 ${hue})` : `oklch(${GROUP_L}% ${GROUP_C} ${hue})`;
 }
 
 /** Curated, visually distinct hues spread around the wheel (quick-pick swatches). */

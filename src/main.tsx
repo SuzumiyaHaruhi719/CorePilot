@@ -24,7 +24,7 @@ function logFatal(label: string, detail: string) {
     const pre = document.createElement("pre");
     pre.setAttribute("data-fatal", "");
     pre.style.cssText =
-      "color:#fbb;background:#1a0f12;padding:16px;white-space:pre-wrap;font:12px ui-monospace,monospace;height:100%;overflow:auto;margin:0";
+      "color:var(--color-danger);background:var(--color-surface);padding:16px;white-space:pre-wrap;font:12px ui-monospace,monospace;height:100%;overflow:auto;margin:0";
     pre.textContent = `CorePilot — ${label}\n\n${detail}`;
     el.replaceChildren(pre);
   }

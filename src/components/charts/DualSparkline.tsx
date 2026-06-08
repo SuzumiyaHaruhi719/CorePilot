@@ -1,4 +1,5 @@
 import { useId } from "react";
+import { hueColor, isLightTheme } from "../../lib/colors";
 
 interface DualSparklineProps {
   /** Primary series, drawn against the LEFT axis (e.g. upload). */
@@ -29,8 +30,9 @@ export function DualSparkline({
 }: DualSparklineProps) {
   const upId = useId();
   const downId = useId();
-  const upColor = `oklch(72% 0.15 ${upHue})`;
-  const downColor = `oklch(72% 0.15 ${downHue})`;
+  const upColor = hueColor(upHue, 72, 0.15);
+  const downColor = hueColor(downHue, 72, 0.15);
+  const glow = (c: string) => (isLightTheme() ? "none" : `drop-shadow(0 0 3px ${c})`);
   const upMax = Math.max(...up, 1);
   const downMax = Math.max(...down, 1);
 
@@ -70,7 +72,7 @@ export function DualSparkline({
           strokeWidth="1.6"
           strokeLinejoin="round"
           vectorEffect="non-scaling-stroke"
-          style={{ filter: `drop-shadow(0 0 3px ${downColor})` }}
+          style={{ filter: glow(downColor) }}
         />
         <polyline
           points={upLine}
@@ -79,7 +81,7 @@ export function DualSparkline({
           strokeWidth="1.6"
           strokeLinejoin="round"
           vectorEffect="non-scaling-stroke"
-          style={{ filter: `drop-shadow(0 0 3px ${upColor})` }}
+          style={{ filter: glow(upColor) }}
         />
       </svg>
     </div>

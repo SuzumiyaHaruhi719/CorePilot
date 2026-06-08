@@ -2,6 +2,7 @@ import { motion } from "motion/react";
 import { Activity, ChevronDown, Cpu, Database, Gauge, Leaf, MonitorPlay, Timer, Zap } from "lucide-react";
 import { useCallback, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { formatBytes } from "../../lib/format";
+import { hueColor } from "../../lib/colors";
 import { useTf } from "../../lib/i18n";
 import {
   CO2_KG_PER_KWH,
@@ -108,7 +109,7 @@ function StatCell({ stat, value }: { stat: StatDef; value: number | null }) {
       <div className="nums mt-0.5 flex items-baseline gap-1">
         <span
           className="text-[20px] font-semibold leading-none"
-          style={{ color: empty ? "var(--color-dim)" : `oklch(82% 0.13 ${stat.hue})` }}
+          style={{ color: empty ? "var(--color-dim)" : hueColor(stat.hue, 82, 0.13) }}
         >
           {num(value, stat.digits)}
         </span>
@@ -152,7 +153,7 @@ function HeadlineCard({
     <div className="hud-frame glass hairline flex items-center gap-3 rounded-2xl px-4 py-3">
       <span
         className="grid h-10 w-10 shrink-0 place-items-center rounded-xl"
-        style={{ background: `oklch(70% 0.13 ${hue} / 0.16)`, color: `oklch(82% 0.13 ${hue})` }}
+        style={{ background: `color-mix(in oklch, ${hueColor(hue, 82, 0.13)} 16%, transparent)`, color: hueColor(hue, 82, 0.13) }}
       >
         {icon}
       </span>
@@ -161,7 +162,7 @@ function HeadlineCard({
         <div className="nums flex items-baseline gap-1">
           <span
             className="text-[22px] font-semibold leading-none"
-            style={{ color: empty ? "var(--color-dim)" : `oklch(84% 0.13 ${hue})` }}
+            style={{ color: empty ? "var(--color-dim)" : hueColor(hue, 84, 0.13) }}
           >
             {value}
           </span>
@@ -257,7 +258,7 @@ function ChartPanel({ def, timesSec, values, refLines, syncKey, onHover }: Chart
   return (
     <div className="rounded-2xl border border-line bg-surface2/40 p-4 transition-colors hover:border-line-strong">
       <div className="mb-2 flex items-center gap-2">
-        <span style={{ color: `oklch(80% 0.13 ${def.hue})` }}>{def.icon}</span>
+        <span style={{ color: hueColor(def.hue, 80, 0.13) }}>{def.icon}</span>
         <span className="hud-label text-[10px] text-muted">{def.title}</span>
       </div>
       <TimeSeriesChart
@@ -305,7 +306,7 @@ function FeaturedStat({ label, value, hue }: { label: string; value: string; hue
       <span className="hud-label text-[9px] text-dim">{label}</span>
       <span
         className="nums text-[15px] font-semibold leading-none"
-        style={{ color: empty ? "var(--color-dim)" : `oklch(82% 0.13 ${hue})` }}
+        style={{ color: empty ? "var(--color-dim)" : hueColor(hue, 82, 0.13) }}
       >
         {value}
       </span>
@@ -393,7 +394,7 @@ function FeaturedChart({ series, summary, timesSec, syncKey, onHover, hovered }:
           <span className="hud-label text-[9px] text-dim">{live ? "当前" : "平均"}</span>
           <span
             className="text-[26px] font-semibold leading-none"
-            style={{ color: `oklch(84% 0.13 ${def.hue})` }}
+            style={{ color: hueColor(def.hue, 84, 0.13) }}
           >
             {fmtOrDash(headlineVal)}
           </span>
@@ -635,12 +636,12 @@ export function PerfReport({ session }: { session: PerfSession }) {
         {hasNet && (
           <div className="rounded-2xl border border-line bg-surface2/40 p-4 lg:col-span-2">
             <div className="mb-2 flex items-center gap-2">
-              <Activity size={15} style={{ color: "oklch(80% 0.13 224)" }} />
+              <Activity size={15} style={{ color: hueColor(224, 80, 0.13) }} />
               <span className="hud-label text-[10px] text-muted">网络上传 / 下载</span>
               <span className="nums ml-1 text-[10.5px] font-normal">
-                <span style={{ color: "oklch(80% 0.13 75)" }}>↑ 上传</span>
+                <span style={{ color: hueColor(75, 80, 0.13) }}>↑ 上传</span>
                 <span className="text-dim"> · </span>
-                <span style={{ color: "oklch(80% 0.13 224)" }}>↓ 下载</span>
+                <span style={{ color: hueColor(224, 80, 0.13) }}>↓ 下载</span>
               </span>
             </div>
             <DualAxisChart
@@ -699,7 +700,7 @@ function HoverTooltip({
         {rows.map((r) => (
           <div key={r.label} className="flex items-baseline justify-between gap-1.5">
             <span className="truncate text-[10.5px] text-dim">{r.label}</span>
-            <span className="nums shrink-0 text-[11px] font-medium" style={{ color: `oklch(82% 0.13 ${r.hue})` }}>
+            <span className="nums shrink-0 text-[11px] font-medium" style={{ color: hueColor(r.hue, 82, 0.13) }}>
               {r.value}
             </span>
           </div>

@@ -14,11 +14,38 @@ export const ACCENT_HUE: Record<AccentName, number> = {
 };
 
 export type GlowLevel = "soft" | "medium" | "intense";
+export type Theme = "dark" | "light";
+/** Named palette presets, layered over the dark/light base via `data-theme-style`. */
+export type ThemeStyle = "graphite" | "midnight" | "terminal" | "porcelain" | "sandstone";
 export type Language = "zh" | "en";
+
+/** Theme-style metadata for the Settings picker. `mode` is the base (dark/light)
+ *  the style refines. Swatches are [page, surface, accent] for the card preview. */
+export interface ThemeStyleDef {
+  id: ThemeStyle;
+  name: string; // Chinese label (translated via i18n)
+  mode: Theme;
+  desc: string;
+  swatches: [string, string, string]; // [page bg, surface, accent] for the card preview
+}
+
+/** The selectable theme styles, shown as cards in Settings. Co-designed w/ Codex. */
+export const THEME_STYLES: ThemeStyleDef[] = [
+  { id: "graphite", name: "石墨", mode: "dark", desc: "冷色深色调，适合长时间使用。", swatches: ["oklch(13.5% 0.028 285)", "oklch(23% 0.042 288)", "oklch(62% 0.225 293)"] },
+  { id: "midnight", name: "午夜", mode: "dark", desc: "更深更蓝的午夜界面，冷紫蓝强调色。", swatches: ["oklch(10.5% 0.045 270)", "oklch(20.5% 0.075 270)", "oklch(68% 0.2 274)"] },
+  { id: "terminal", name: "终端", mode: "dark", desc: "近黑遥测终端 + 磷光绿，极客风。", swatches: ["oklch(9.8% 0.018 155)", "oklch(19% 0.034 158)", "oklch(76% 0.19 145)"] },
+  { id: "porcelain", name: "瓷白", mode: "light", desc: "高对比度浅色，简洁清爽。", swatches: ["oklch(98.6% 0.004 285)", "oklch(94% 0.01 287)", "oklch(45% 0.255 293)"] },
+  { id: "sandstone", name: "砂岩", mode: "light", desc: "暖色浅色调，明亮环境更舒适。", swatches: ["oklch(97.4% 0.023 83)", "oklch(94.8% 0.032 81)", "oklch(42% 0.155 48)"] },
+];
 export type PerfCard = "cpu" | "mem" | "gpu" | "disk" | "net" | "power";
 
 interface SettingsState {
   accent: AccentName;
+  /** UI theme. `dark` is the original Premium Gaming HUD; `light` is the full
+   *  light redraw (applied via `data-theme` on <html>). */
+  theme: Theme;
+  /** Named palette preset layered on top of the theme (via `data-theme-style`). */
+  themeStyle: ThemeStyle;
   glow: GlowLevel;
   acrylic: boolean;
   /** Whole-window opacity, 30–100 (%). Applied via the backend on change. */
@@ -49,6 +76,8 @@ export const useSettings = create<SettingsState>()(
   persist(
     (set) => ({
       accent: "violet",
+      theme: "dark",
+      themeStyle: "graphite",
       glow: "medium",
       acrylic: true,
       windowOpacity: 100,
