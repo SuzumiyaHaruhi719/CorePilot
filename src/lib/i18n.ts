@@ -384,6 +384,11 @@ export const EN: Record<string, string> = {
   "显存控制器占用": "VRAM controller usage", "磁盘读写": "Disk read/write",
   "↑ 上传": "↑ Upload", "↓ 下载": "↓ Download", "读取": "Read", "写入": "Write",
   "点击重命名": "Rename", "删除配置": "Delete profile", "移除": "Remove", "未发现进程": "No processes found",
+  "分组名称": "Group name", "停止服务": "Stop service", "重启服务": "Restart service",
+  "刷新服务列表": "Refresh service list", "刷新启动项": "Refresh startup items",
+  "诊断 · DEBUG": "DIAGNOSTICS", "导出调试日志": "Export debug logs",
+  "将本次启动以来的完整日志保存到下载文件夹，便于反馈问题。":
+    "Saves the complete log since this launch to your Downloads folder for bug reports.",
   "预览 · 默认": "Preview · default", "中文": "Chinese", "游戏": "Games",
   "将保存当前已开启的调优项，可随时一键应用。": "Saves the currently enabled tuning items so you can apply them any time.",
   "控制哪些程序会被记录性能报告（独立于 OSD 显示名单）：白名单 = 强制记录（即使未被识别为游戏），黑名单 = 从不记录（即使被识别为游戏）。":

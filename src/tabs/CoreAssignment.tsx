@@ -63,6 +63,7 @@ export function CoreAssignment() {
   const [coreModalOpen, setCoreModalOpen] = useState(false);
   const [editMask, setEditMask] = useState<bigint>(0n);
   const [pendingKill, setPendingKill] = useState<ProcInfo | null>(null);
+  const [pendingDelGroup, setPendingDelGroup] = useState<GroupRule | null>(null);
   const [status, setStatus] = useState("");
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [colorAnchor, setColorAnchor] = useState<ColorAnchor | null>(null);
@@ -223,8 +224,21 @@ export function CoreAssignment() {
           icon: Plus,
           onClick: () => {
             assignProcess(g.id, proc.name);
-            if (optimizationEnabled) void applyToProcess(g, proc).catch(() => undefined);
-            setStatus(tf(`已添加 ${proc.name} 到「${g.name}」`, `Added ${proc.name} to “${g.name}”`));
+            if (optimizationEnabled) {
+              void applyToProcess(g, proc)
+                .then((r) =>
+                  setStatus(
+                    r.priorityFailed
+                      ? tf(`已添加 ${proc.name} 到「${g.name}」（优先级未生效）`, `Added ${proc.name} to “${g.name}” (priority not changed)`)
+                      : tf(`已添加 ${proc.name} 到「${g.name}」并应用`, `Added ${proc.name} to “${g.name}” and applied`),
+                  ),
+                )
+                .catch((e: unknown) =>
+                  setStatus(tf(`已添加到「${g.name}」，但立即应用失败：${getErrorMessage(e)}`, `Added to “${g.name}”, but apply failed: ${getErrorMessage(e)}`)),
+                );
+            } else {
+              setStatus(tf(`已添加 ${proc.name} 到「${g.name}」`, `Added ${proc.name} to “${g.name}”`));
+            }
           },
         });
       }
@@ -235,7 +249,13 @@ export function CoreAssignment() {
         icon: Zap,
         onClick: () => {
           void applyToProcess(group, proc)
-            .then(() => setStatus(tf(`已对 ${proc.name} 应用「${group.name}」`, `Applied “${group.name}” to ${proc.name}`)))
+            .then((r) =>
+              setStatus(
+                r.priorityFailed
+                  ? tf(`已对 ${proc.name} 应用核心分配（优先级未生效）`, `Applied cores to ${proc.name} (priority not changed)`)
+                  : tf(`已对 ${proc.name} 应用「${group.name}」`, `Applied “${group.name}” to ${proc.name}`),
+              ),
+            )
             .catch((e: unknown) =>
               setStatus(tf(`应用失败：${getErrorMessage(e)}`, `Apply failed: ${getErrorMessage(e)}`)),
             );
@@ -246,8 +266,12 @@ export function CoreAssignment() {
         icon: CircleMinus,
         onClick: () => {
           removeProcess(proc.name);
-          void api.setAffinity(proc.pid, fullMask).catch(() => undefined);
-          setStatus(`已将 ${proc.name} 移出分组`);
+          void api
+            .setAffinity(proc.pid, fullMask)
+            .then(() => setStatus(tf(`已将 ${proc.name} 移出分组`, `Removed ${proc.name} from group`)))
+            .catch((e: unknown) =>
+              setStatus(tf(`已移出分组，但恢复全核失败：${getErrorMessage(e)}`, `Removed from group, but restoring all cores failed: ${getErrorMessage(e)}`)),
+            );
         },
       });
     }
@@ -276,16 +300,19 @@ export function CoreAssignment() {
     }
   }
 
-  async function applyToProcess(group: GroupRule, proc: ProcInfo) {
+  async function applyToProcess(group: GroupRule, proc: ProcInfo): Promise<{ priorityFailed: boolean }> {
     const mask = group.mask === 0n ? fullMask : group.mask;
     await api.setAffinity(proc.pid, mask);
     if (group.priority !== 0x20) {
       try {
         await api.setPriority(proc.pid, group.priority);
       } catch {
-        /* priority is best-effort */
+        // Affinity took but the priority change didn't — report it instead of
+        // claiming a full success.
+        return { priorityFailed: true };
       }
     }
+    return { priorityFailed: false };
   }
 
   /** Running processes that belong to a group (used for affinity/priority ops). */
@@ -340,11 +367,13 @@ export function CoreAssignment() {
     if (!target) return;
     const chosen = processes.filter((p) => selectedPids.has(p.pid));
     let failed = 0;
+    let prioFailed = 0;
     for (const proc of chosen) {
       assignProcess(target.id, proc.name);
       if (optimizationEnabled) {
         try {
-          await applyToProcess(target, proc);
+          const r = await applyToProcess(target, proc);
+          if (r.priorityFailed) prioFailed += 1;
         } catch {
           failed += 1;
         }
@@ -353,8 +382,12 @@ export function CoreAssignment() {
     setSelectedPids(new Set());
     setStatus(
       tf(
-        `已添加 ${chosen.length} 个进程到「${target.name}」` + (failed ? ` · ${failed} 个受保护进程应用失败` : ""),
-        `Added ${chosen.length} processes to “${target.name}”` + (failed ? ` · ${failed} protected processes failed` : ""),
+        `已添加 ${chosen.length} 个进程到「${target.name}」` +
+          (failed ? ` · ${failed} 个受保护进程应用失败` : "") +
+          (prioFailed ? ` · ${prioFailed} 个优先级未生效` : ""),
+        `Added ${chosen.length} processes to “${target.name}”` +
+          (failed ? ` · ${failed} protected processes failed` : "") +
+          (prioFailed ? ` · ${prioFailed} priority not changed` : ""),
       ),
     );
   }
@@ -370,7 +403,7 @@ export function CoreAssignment() {
       x: r ? Math.round(r.left) : 320,
       y: r ? Math.round(r.bottom + 6) : 120,
       items: groups.map((g) => ({
-        label: `添加到「${g.name}」`,
+        label: tf(`添加到「${g.name}」`, `Add to “${g.name}”`),
         icon: Plus,
         onClick: () => void assignSelectedTo(g.id),
       })),
@@ -381,6 +414,7 @@ export function CoreAssignment() {
   async function removeSelected() {
     if (!selectedGroup) return;
     const chosen = groupRows(selectedGroup).filter((p) => selectedPids.has(p.pid));
+    let failed = 0;
     for (const proc of chosen) {
       removeProcess(proc.name);
       // Offline members aren't running, so there's no affinity to restore.
@@ -388,11 +422,16 @@ export function CoreAssignment() {
       try {
         await api.setAffinity(proc.pid, fullMask);
       } catch {
-        /* protected */
+        failed += 1;
       }
     }
     setSelectedPids(new Set());
-    setStatus(tf(`已从「${selectedGroup.name}」移出 ${chosen.length} 个进程`, `Removed ${chosen.length} processes from “${selectedGroup.name}”`));
+    setStatus(
+      tf(
+        `已从「${selectedGroup.name}」移出 ${chosen.length} 个进程` + (failed ? ` · ${failed} 个恢复全核失败` : ""),
+        `Removed ${chosen.length} processes from “${selectedGroup.name}”` + (failed ? ` · ${failed} couldn't restore all cores` : ""),
+      ),
+    );
   }
 
   function openColorPicker() {
@@ -408,34 +447,53 @@ export function CoreAssignment() {
 
   async function saveCoreMask() {
     if (!selectedGroup) return;
-    updateGroup(selectedGroup.id, { mask: editMask });
+    const group = selectedGroup;
+    updateGroup(group.id, { mask: editMask });
     setCoreModalOpen(false);
+    let failed = 0;
     if (optimizationEnabled) {
-      for (const proc of membersOf(selectedGroup)) {
+      for (const proc of membersOf(group)) {
         try {
           await api.setAffinity(proc.pid, editMask === 0n ? fullMask : editMask);
         } catch {
-          /* protected */
+          failed += 1;
         }
       }
     }
-    setStatus(tf(`已更新「${selectedGroup.name}」的核心分配`, `Updated core assignment for “${selectedGroup.name}”`));
+    setStatus(
+      tf(
+        `已更新「${group.name}」的核心分配` + (failed ? ` · ${failed} 个进程应用失败` : ""),
+        `Updated core assignment for “${group.name}”` + (failed ? ` · ${failed} processes failed to apply` : ""),
+      ),
+    );
   }
 
   async function handleToggleOptimization() {
     const enabling = !optimizationEnabled;
     toggleOptimization();
+    let failed = 0;
+    let prioFailed = 0;
     for (const group of groups) {
       for (const proc of membersOf(group)) {
         try {
-          if (enabling) await applyToProcess(group, proc);
-          else await api.setAffinity(proc.pid, fullMask);
+          if (enabling) {
+            const r = await applyToProcess(group, proc);
+            if (r.priorityFailed) prioFailed += 1;
+          } else {
+            await api.setAffinity(proc.pid, fullMask);
+          }
         } catch {
-          /* protected */
+          failed += 1;
         }
       }
     }
-    setStatus(enabling ? "优化已启用 · 已重新应用所有分组规则" : "优化已停用 · 已恢复默认亲和性");
+    const base = enabling ? "优化已启用 · 已重新应用所有分组规则" : "优化已停用 · 已恢复默认亲和性";
+    const baseEn = enabling ? "Optimization on · all group rules re-applied" : "Optimization off · default affinity restored";
+    const note = tf(
+      (failed ? `（${failed} 个进程失败）` : "") + (prioFailed ? `（${prioFailed} 个优先级未生效）` : ""),
+      (failed ? ` (${failed} failed)` : "") + (prioFailed ? ` (${prioFailed} priority not changed)` : ""),
+    );
+    setStatus(failed || prioFailed ? `${tf(base, baseEn)}${note}` : base);
   }
 
   function exportGroups() {
@@ -507,6 +565,7 @@ export function CoreAssignment() {
                   ref={colorBtnRef}
                   onClick={openColorPicker}
                   title="自定义分组颜色"
+                  aria-label="自定义分组颜色"
                   className="no-drag grid h-[34px] w-[34px] shrink-0 cursor-pointer place-items-center rounded-lg border border-line bg-surface2 transition-colors hover:border-line-strong"
                 >
                   <span
@@ -517,6 +576,8 @@ export function CoreAssignment() {
                 <input
                   value={selectedGroup.name}
                   onChange={(e) => updateGroup(selectedGroup.id, { name: e.target.value })}
+                  aria-label="分组名称"
+                  title="分组名称"
                   className="no-drag w-40 rounded-lg border border-line bg-surface2 px-3 py-1.5 text-[13px] font-medium text-ink outline-none transition-colors focus:border-accent/50"
                 />
                 <Button onClick={openCoreModal}>
@@ -527,7 +588,7 @@ export function CoreAssignment() {
                 </span>
                 <span className="text-[11.5px] text-dim">· {visible.length} 个进程</span>
                 {!selectedGroup.builtin && (
-                  <Button variant="danger" onClick={() => removeGroup(selectedGroup.id)}>
+                  <Button variant="danger" onClick={() => setPendingDelGroup(selectedGroup)}>
                     删除分组
                   </Button>
                 )}
@@ -648,6 +709,32 @@ export function CoreAssignment() {
         <p className="text-[13px] leading-relaxed text-muted">
           {tf("确定要结束", "End")} <span className="font-semibold text-ink">{pendingKill?.name}</span>{" "}
           (PID {pendingKill?.pid}){tf("吗？未保存的数据将丢失。", "? Unsaved data will be lost.")}
+        </p>
+      </Modal>
+      <Modal
+        open={!!pendingDelGroup}
+        onClose={() => setPendingDelGroup(null)}
+        title="删除分组"
+        footer={
+          <>
+            <Button onClick={() => setPendingDelGroup(null)}>取消</Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                if (pendingDelGroup) removeGroup(pendingDelGroup.id);
+                setPendingDelGroup(null);
+              }}
+            >
+              删除分组
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] leading-relaxed text-muted">
+          {tf(
+            `确定删除分组「${pendingDelGroup?.name ?? ""}」（${pendingDelGroup?.patterns.length ?? 0} 个进程规则）吗？此操作不影响正在运行的进程，仅移除分组规则。`,
+            `Delete the group “${pendingDelGroup?.name ?? ""}” (${pendingDelGroup?.patterns.length ?? 0} process rules)? Running processes are unaffected — only the group rules are removed.`,
+          )}
         </p>
       </Modal>
       <ContextMenu state={menu} onClose={() => setMenu(null)} />

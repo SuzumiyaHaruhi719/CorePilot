@@ -165,7 +165,7 @@ export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
           {busy && <Loader2 size={14} className="animate-spin text-dim" />}
           <Toggle
             checked={on}
-            disabled={anyBusy && !busy}
+            disabled={anyBusy}
             label={meta.name}
             onChange={(v) => handleToggle(meta, zone, v)}
           />
@@ -187,10 +187,10 @@ export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
       <div className="min-h-0 flex-1 space-y-4 overflow-auto px-6 pb-6">
         {/* Action bar */}
         <div className="glass hairline flex flex-wrap items-center gap-2 rounded-2xl p-3.5">
-          <Button onClick={() => void makeRestorePoint()} disabled={busyId === "__rp__"}>
+          <Button onClick={() => void makeRestorePoint()} disabled={busyId !== null}>
             {busyId === "__rp__" ? <Loader2 size={14} className="animate-spin" /> : <ShieldPlus size={14} />} 创建系统还原点
           </Button>
-          <Button onClick={() => void revertAll()} disabled={busyId === "__all__"}>
+          <Button onClick={() => void revertAll()} disabled={busyId !== null}>
             {busyId === "__all__" ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />} 全部还原默认
           </Button>
           <AnimatePresence>

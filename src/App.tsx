@@ -61,10 +61,16 @@ function App() {
   // is async (tauri-plugin-store), so wait for hydration before reading state.
   useEffect(() => {
     const applyActive = () => {
-      const { applyOnStartup, activeId, profiles } = useGpuProfiles.getState();
+      const { applyOnStartup, activeId, profiles, setStartupError } = useGpuProfiles.getState();
       if (!applyOnStartup || !activeId) return;
       const active = profiles.find((p) => p.id === activeId);
-      if (active) api.gpuOcApply(active.settings).catch(() => undefined);
+      if (!active) return;
+      // Surface a startup-apply failure on the GPU page instead of silently
+      // leaving the user believing their overclock was applied at boot.
+      api.gpuOcApply(active.settings).catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : typeof e === "string" ? e : "unknown error";
+        setStartupError(`「${active.name}」: ${msg}`);
+      });
     };
     if (useGpuProfiles.persist.hasHydrated()) {
       applyActive();

@@ -62,11 +62,19 @@ export const FAN_PRESETS: FanPreset[] = [
   { id: "preset-fullblast", name: "Full Blast", mode: "manual", manualPct: 100 },
 ];
 
+/**
+ * Lowest duty any managed fan is ever driven to. A CPU cooler / AIO pump at 0%
+ * can stop cooling, so calibration, presets and the manual/curve sliders all
+ * clamp to this floor. Shared with the Fan UI so the data layer and the controls
+ * agree. (Auto mode hands the fan back to the BIOS and is exempt.)
+ */
+export const MIN_SAFE_DUTY = 20;
+
 /** Build a no-stall curve from a calibrated start duty: idle at the fan's
  *  quietest stable speed (30 °C), then ramp to full by 70 °C (the 9950X3D
- *  full-speed threshold), with all duties at or above the measured floor. */
+ *  full-speed threshold), with all duties at or above the safe floor. */
 function calibratedCurve(minStartDuty: number): FanCurvePoint[] {
-  const lo = Math.round(Math.max(0, Math.min(minStartDuty, 60)));
+  const lo = Math.round(Math.max(MIN_SAFE_DUTY, Math.min(minStartDuty, 60)));
   const span = 100 - lo;
   return [
     { tempC: 30, duty: lo },
@@ -247,7 +255,7 @@ export const useFanProfiles = create<FanProfileState>()(
         for (const cal of calibs) {
           if (cal.disconnected) continue; // no fan on this header — leave it alone
           const prev = cur[cal.controlId] ?? defaultConfig();
-          const lo = Math.round(Math.max(0, Math.min(cal.minStartDuty, 60)));
+          const lo = Math.round(Math.max(MIN_SAFE_DUTY, Math.min(cal.minStartDuty, 60)));
           configs[cal.controlId] = {
             ...prev,
             mode: "curve",

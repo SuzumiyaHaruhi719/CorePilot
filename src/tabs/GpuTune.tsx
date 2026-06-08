@@ -138,13 +138,17 @@ export function GpuTune() {
   const t = useT();
   const tf = useTf();
   const pollMs = useSettings((s) => s.pollMs);
-  const { profiles, activeId, applyOnStartup, addProfile, updateProfile, deleteProfile, setActive, setApplyOnStartup } =
+  const { profiles, activeId, applyOnStartup, startupError, addProfile, updateProfile, deleteProfile, setActive, setApplyOnStartup, setStartupError } =
     useGpuProfiles();
 
   const [info, setInfo] = useState<GpuOcInfo | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
+  const [infoLoaded, setInfoLoaded] = useState(false);
+  const [status, setStatus] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
+  const okStatus = (message: string) => setStatus({ kind: "ok", message });
+  const errStatus = (message: string) => setStatus({ kind: "error", message });
   const [applying, setApplying] = useState(false);
   const [showSave, setShowSave] = useState(false);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [newName, setNewName] = useState("");
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [delProfile, setDelProfile] = useState<GpuProfile | null>(null);
@@ -194,9 +198,14 @@ export function GpuTune() {
       api
         .gpuOcInfo()
         .then((i) => {
-          if (alive) setInfo(i);
+          if (alive) {
+            setInfo(i);
+            setInfoLoaded(true);
+          }
         })
-        .catch(() => undefined);
+        .catch(() => {
+          if (alive) setInfoLoaded(true);
+        });
     void tick();
     const id = setInterval(tick, Math.max(800, pollMs));
     return () => {
@@ -221,11 +230,11 @@ export function GpuTune() {
     setStatus(null);
     try {
       await api.gpuOcApply(s);
-      setStatus(label);
+      okStatus(label);
       const fresh = await api.gpuOcInfo();
       setInfo(fresh);
     } catch (e: unknown) {
-      setStatus(getErrorMessage(e));
+      errStatus(getErrorMessage(e));
     } finally {
       setApplying(false);
     }
@@ -248,9 +257,9 @@ export function GpuTune() {
       setFanAuto(true);
       setTempOn(false);
       if (fresh.tempLimitC > 0) setTempLimit(fresh.tempLimitC);
-      setStatus("已恢复出厂默认");
+      okStatus("已恢复出厂默认");
     } catch (e: unknown) {
-      setStatus(getErrorMessage(e));
+      errStatus(getErrorMessage(e));
     } finally {
       setApplying(false);
     }
@@ -261,7 +270,7 @@ export function GpuTune() {
     addProfile(name, draftToSettings());
     setNewName("");
     setShowSave(false);
-    setStatus(tf(`已保存配置「${name}」`, `Saved profile “${name}”`));
+    okStatus(tf(`已保存配置「${name}」`, `Saved profile “${name}”`));
   }
 
   // Save Current (保存当前): overwrite the active profile's settings in place.
@@ -269,7 +278,7 @@ export function GpuTune() {
     if (!activeId) return;
     updateProfile(activeId, { settings: draftToSettings() });
     const name = profiles.find((p) => p.id === activeId)?.name ?? "当前配置";
-    setStatus(tf(`已保存到「${name}」`, `Saved to “${name}”`));
+    okStatus(tf(`已保存到「${name}」`, `Saved to “${name}”`));
   }
 
   async function loadProfile(p: GpuProfile) {
@@ -281,18 +290,18 @@ export function GpuTune() {
     try {
       await api.gpuOcApply(p.settings);
       setActive(p.id);
-      setStatus(tf(`已应用配置「${p.name}」`, `Applied profile “${p.name}”`));
+      okStatus(tf(`已应用配置「${p.name}」`, `Applied profile “${p.name}”`));
       const fresh = await api.gpuOcInfo();
       setInfo(fresh);
     } catch (e: unknown) {
-      setStatus(getErrorMessage(e));
+      errStatus(getErrorMessage(e));
     } finally {
       setApplying(false);
       setPendingId(null);
     }
   }
 
-  const isErrorStatus = status != null && !status.startsWith("已");
+  const isErrorStatus = status?.kind === "error";
 
   return (
     <>
@@ -302,7 +311,13 @@ export function GpuTune() {
         subtitle="NVIDIA 实时调优 — 功率 / 频率偏移(NVAPI) / 温度 / 风扇，配置可保存自动应用"
       />
 
-      {info && !info.available ? (
+      {!infoLoaded && !info ? (
+        <div className="grid flex-1 place-items-center px-6 pb-8">
+          <div className="flex items-center gap-2 text-[13px] text-dim">
+            <Loader2 size={16} className="animate-spin" /> {tf("正在检测 GPU…", "Detecting GPU…")}
+          </div>
+        </div>
+      ) : !info?.available ? (
         <div className="grid flex-1 place-items-center px-6 pb-8">
           <div className="glass hairline flex max-w-md flex-col items-center gap-3 rounded-2xl p-8 text-center">
             <span className="grid h-12 w-12 place-items-center rounded-xl bg-warn/15 text-warn">
@@ -316,6 +331,21 @@ export function GpuTune() {
         </div>
       ) : (
         <div className="min-h-0 flex-1 space-y-4 overflow-auto px-6 pb-6">
+          {startupError && (
+            <div className="flex items-start gap-2 rounded-xl border border-danger/40 bg-danger/10 px-3 py-2.5 text-[12px] text-danger">
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+              <span className="min-w-0 flex-1">
+                {tf(`启动时自动应用超频失败 — ${startupError}`, `Auto-apply on startup failed — ${startupError}`)}
+              </span>
+              <button
+                onClick={() => setStartupError(null)}
+                className="no-drag shrink-0 cursor-pointer rounded px-1 text-danger/80 hover:text-danger"
+                aria-label={tf("关闭", "Dismiss")}
+              >
+                ✕
+              </button>
+            </div>
+          )}
           {/* Live readout — instrument cluster */}
           <div>
             <div className="mb-2.5 flex items-center gap-2">
@@ -494,13 +524,13 @@ export function GpuTune() {
               <Button variant="subtle" onClick={() => setShowSave(true)} disabled={applying} title="保存为新的配置">
                 <Save size={14} /> 另存为
               </Button>
-              <Button variant="subtle" onClick={() => void reset()} disabled={applying} title="清零所有偏移并恢复固件默认">
+              <Button variant="subtle" onClick={() => setShowResetConfirm(true)} disabled={applying} title="清零所有偏移并恢复固件默认">
                 <RotateCcw size={14} /> 恢复默认
               </Button>
               <AnimatePresence mode="wait">
                 {status && (
                   <motion.span
-                    key={status}
+                    key={status.message}
                     initial={{ opacity: 0, x: -6 }}
                     animate={{ opacity: 1, x: 0 }}
                     exit={{ opacity: 0 }}
@@ -510,7 +540,7 @@ export function GpuTune() {
                       isErrorStatus ? "text-danger" : "text-ok glow-text",
                     )}
                   >
-                    {isErrorStatus ? <AlertTriangle size={13} /> : <Check size={13} />} {status}
+                    {isErrorStatus ? <AlertTriangle size={13} /> : <Check size={13} />} {status.message}
                   </motion.span>
                 )}
               </AnimatePresence>
@@ -583,12 +613,19 @@ export function GpuTune() {
                         </div>
                         <span
                           role="button"
-                          tabIndex={-1}
+                          tabIndex={0}
                           onClick={(e) => {
                             e.stopPropagation();
                             setDelProfile(p);
                           }}
-                          className="no-drag ml-1 grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition-colors duration-150 hover:bg-danger hover:text-white group-focus-within:opacity-100 group-hover:opacity-100"
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setDelProfile(p);
+                            }
+                          }}
+                          className="no-drag ml-1 grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition-colors duration-150 hover:bg-danger hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 group-focus-within:opacity-100 group-hover:opacity-100"
                           aria-label={tf(`删除配置 ${p.name}`, `Delete profile ${p.name}`)}
                           title="删除配置"
                         >
@@ -662,6 +699,33 @@ export function GpuTune() {
       >
         <p className="text-[13px] leading-relaxed text-muted">
           确定删除超频配置 <span className="font-semibold text-ink">{delProfile?.name}</span> 吗？此操作不可撤销（当前 GPU 设置不受影响）。
+        </p>
+      </Modal>
+
+      <Modal
+        open={showResetConfirm}
+        onClose={() => setShowResetConfirm(false)}
+        title="恢复默认"
+        footer={
+          <>
+            <Button onClick={() => setShowResetConfirm(false)}>取消</Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                setShowResetConfirm(false);
+                void reset();
+              }}
+            >
+              恢复默认
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] leading-relaxed text-muted">
+          {tf(
+            "确定将所有功率 / 频率偏移 / 温度 / 风扇设置清零并恢复固件默认吗？当前正在运行的超频将立即失效。",
+            "Reset all power / clock-offset / temp / fan settings to firmware defaults? Your current live overclock will be cleared immediately.",
+          )}
         </p>
       </Modal>
     </>

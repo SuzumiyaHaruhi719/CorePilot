@@ -1,4 +1,4 @@
-import { ChevronsUp, Copy, FolderOpen, MonitorPlay, Search, X } from "lucide-react";
+import { ChevronsUp, Copy, FolderOpen, Loader2, MonitorPlay, Search, X } from "lucide-react";
 import { useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useProcesses } from "../../hooks/useProcesses";
 import { useTf } from "../../lib/i18n";
@@ -22,6 +22,7 @@ export function ProcessView({ detailed }: ProcessViewProps) {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [search, setSearch] = useState("");
   const [pendingKill, setPendingKill] = useState<ProcInfo | null>(null);
+  const [killing, setKilling] = useState(false);
   const [status, setStatus] = useState("");
   const [menu, setMenu] = useState<MenuState | null>(null);
   const addOsdTarget = useOsdTargets((s) => s.addTarget);
@@ -80,15 +81,23 @@ export function ProcessView({ detailed }: ProcessViewProps) {
             void api
               .setPriority(proc.pid, PRIORITY.high)
               .then(() => setStatus(tf(`已将 ${proc.name} 设为高优先级`, `Set ${proc.name} to high priority`)))
-              .catch(() => setStatus("设置优先级失败（受保护进程）")),
+              .catch(() => setStatus(tf("设置优先级失败（受保护进程）", "Failed to set priority (protected process)"))),
         },
         {
           label: "设为正常优先级",
-          onClick: () => void api.setPriority(proc.pid, PRIORITY.normal).catch(() => undefined),
+          onClick: () =>
+            void api
+              .setPriority(proc.pid, PRIORITY.normal)
+              .then(() => setStatus(tf(`已将 ${proc.name} 设为正常优先级`, `Set ${proc.name} to normal priority`)))
+              .catch(() => setStatus(tf("设置优先级失败（受保护进程）", "Failed to set priority (protected process)"))),
         },
         {
           label: "设为低优先级",
-          onClick: () => void api.setPriority(proc.pid, PRIORITY.belowNormal).catch(() => undefined),
+          onClick: () =>
+            void api
+              .setPriority(proc.pid, PRIORITY.belowNormal)
+              .then(() => setStatus(tf(`已将 ${proc.name} 设为低优先级`, `Set ${proc.name} to low priority`)))
+              .catch(() => setStatus(tf("设置优先级失败（受保护进程）", "Failed to set priority (protected process)"))),
         },
         {
           label: "添加游戏内覆盖",
@@ -115,10 +124,11 @@ export function ProcessView({ detailed }: ProcessViewProps) {
           icon: Copy,
           disabled: !proc.exePath,
           onClick: () => {
-            if (proc.exePath) {
-              void navigator.clipboard.writeText(proc.exePath);
-              setStatus(tf(`已复制路径：${proc.exePath}`, `Copied path: ${proc.exePath}`));
-            }
+            if (!proc.exePath) return;
+            void navigator.clipboard
+              .writeText(proc.exePath)
+              .then(() => setStatus(tf(`已复制路径：${proc.exePath}`, `Copied path: ${proc.exePath}`)))
+              .catch(() => setStatus(tf("复制失败", "Copy failed")));
           },
         },
         { label: "复制名称", icon: Copy, onClick: () => void navigator.clipboard.writeText(proc.name) },
@@ -128,14 +138,18 @@ export function ProcessView({ detailed }: ProcessViewProps) {
   }
 
   async function confirmKill() {
-    if (!pendingKill) return;
+    if (!pendingKill || killing) return;
     const target = pendingKill;
-    setPendingKill(null);
+    setKilling(true);
     try {
       await api.endTask(target.pid);
       setStatus(tf(`已结束 ${target.name}`, `Ended ${target.name}`));
+      setPendingKill(null);
     } catch {
       setStatus(tf(`无法结束 ${target.name}（可能是受保护的系统进程）`, `Couldn't end ${target.name} (possibly a protected system process)`));
+      setPendingKill(null);
+    } finally {
+      setKilling(false);
     }
   }
 
@@ -186,13 +200,13 @@ export function ProcessView({ detailed }: ProcessViewProps) {
 
       <Modal
         open={!!pendingKill}
-        onClose={() => setPendingKill(null)}
+        onClose={() => !killing && setPendingKill(null)}
         title="结束任务"
         footer={
           <>
-            <Button onClick={() => setPendingKill(null)}>取消</Button>
-            <Button variant="danger" onClick={confirmKill}>
-              结束任务
+            <Button onClick={() => setPendingKill(null)} disabled={killing}>取消</Button>
+            <Button variant="danger" onClick={confirmKill} disabled={killing}>
+              {killing ? <Loader2 size={13} className="animate-spin" /> : null} 结束任务
             </Button>
           </>
         }

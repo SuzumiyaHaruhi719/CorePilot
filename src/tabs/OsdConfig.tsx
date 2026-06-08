@@ -1,7 +1,9 @@
 import {
+  AlertTriangle,
   FolderOpen,
   Gamepad2,
   ListPlus,
+  Loader2,
   MonitorPlay,
   Palette,
   Plus,
@@ -72,6 +74,7 @@ export function OsdConfig() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [procs, setProcs] = useState<ProcInfo[]>([]);
   const [procLoading, setProcLoading] = useState(false);
+  const [procErr, setProcErr] = useState(false);
   const [procQuery, setProcQuery] = useState("");
   // Transient free-placement position held only while dragging the plate, so the
   // preview follows the pointer smoothly without writing the persisted store on
@@ -139,10 +142,17 @@ export function OsdConfig() {
     [],
   );
 
+  const [overlayErr, setOverlayErr] = useState<string | null>(null);
   function setEnabled(enabled: boolean) {
     osd.setEnabled(enabled);
-    // Keep the overlay window up if desktop mode still wants it.
-    api.osdSetVisible(enabled || osd.desktopMode).catch(() => undefined);
+    setOverlayErr(null);
+    // Keep the overlay window up if desktop mode still wants it. If the native
+    // window fails to open, roll the toggle back so the UI doesn't claim the
+    // overlay is on when it isn't.
+    api.osdSetVisible(enabled || osd.desktopMode).catch(() => {
+      osd.setEnabled(!enabled);
+      setOverlayErr(tf("叠加层窗口打开失败", "Failed to open the overlay window"));
+    });
   }
 
   // Appearance/metric editors operate on either the global default or the
@@ -175,8 +185,15 @@ export function OsdConfig() {
   // Auto-discovered installed-game library (Steam/Epic/GOG) — read-only; the
   // backend matches foreground EXEs against these install roots to detect games.
   const [gameLibrary, setGameLibrary] = useState<GameEntry[]>([]);
+  const [libState, setLibState] = useState<"loading" | "ok" | "error">("loading");
   useEffect(() => {
-    api.gameLibraryList().then(setGameLibrary).catch(() => undefined);
+    api
+      .gameLibraryList()
+      .then((g) => {
+        setGameLibrary(g);
+        setLibState("ok");
+      })
+      .catch(() => setLibState("error"));
   }, []);
 
   const previewScale = Math.min(0.85, Math.max(0.5, boxW > 0 ? boxW / (window.screen?.width || 1920) : 0.5));
@@ -244,11 +261,13 @@ export function OsdConfig() {
     setProcQuery("");
     setPickerOpen(true);
     setProcLoading(true);
+    setProcErr(false);
     try {
       const list = await api.listProcesses();
       setProcs(list);
     } catch {
       setProcs([]);
+      setProcErr(true);
     } finally {
       setProcLoading(false);
     }
@@ -310,6 +329,11 @@ export function OsdConfig() {
             </div>
             <Toggle checked={osd.enabled} onChange={setEnabled} />
           </div>
+          {overlayErr && (
+            <div className="mb-3 flex items-center gap-1.5 text-[11.5px] text-danger">
+              <AlertTriangle size={12} /> {overlayErr}
+            </div>
+          )}
 
           <div className="mb-3 flex items-center justify-between border-t border-line/60 pt-3">
             <div>
@@ -322,9 +346,14 @@ export function OsdConfig() {
               checked={osd.desktopMode}
               onChange={(v) => {
                 osd.update({ desktopMode: v });
+                setOverlayErr(null);
                 // Desktop mode needs the overlay window too — show it now (or
-                // hide if both this and the in-game master are off).
-                api.osdSetVisible(v || osd.enabled).catch(() => undefined);
+                // hide if both this and the in-game master are off). Roll back +
+                // surface the error if the native window fails to open.
+                api.osdSetVisible(v || osd.enabled).catch(() => {
+                  osd.update({ desktopMode: !v });
+                  setOverlayErr(tf("叠加层窗口打开失败", "Failed to open the overlay window"));
+                });
               }}
             />
           </div>
@@ -418,7 +447,15 @@ export function OsdConfig() {
           <div className="mb-3 text-[11.5px] leading-relaxed text-dim">
             自动扫描各启动器安装目录;运行其中任意一款都会被判定为游戏(无需手动加白名单)。
           </div>
-          {gameLibrary.length === 0 ? (
+          {libState === "loading" ? (
+            <div className="flex items-center justify-center gap-2 rounded-lg border border-dashed border-line/70 px-3 py-3 text-[12px] text-dim">
+              <Loader2 size={13} className="animate-spin" /> {tf("正在扫描已安装游戏…", "Scanning installed games…")}
+            </div>
+          ) : libState === "error" ? (
+            <div className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-danger/40 px-3 py-3 text-[12px] text-danger">
+              <AlertTriangle size={13} /> {tf("扫描游戏库失败", "Couldn't scan the game library")}
+            </div>
+          ) : gameLibrary.length === 0 ? (
             <div className="rounded-lg border border-dashed border-line/70 px-3 py-3 text-center text-[12px] text-dim">
               未扫描到已安装游戏（未安装 Steam/Epic/GOG，或装在非默认位置）。
             </div>
@@ -535,6 +572,7 @@ export function OsdConfig() {
                       }}
                       className="grid h-7 w-7 shrink-0 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-danger/15 hover:text-danger"
                       title="移除"
+                      aria-label={tf(`移除 ${t.name}`, `Remove ${t.name}`)}
                     >
                       <Trash2 size={13} />
                     </button>
@@ -666,6 +704,10 @@ export function OsdConfig() {
         <div className="hairline max-h-[320px] overflow-auto rounded-xl border border-line bg-surface2/40">
           {procLoading ? (
             <div className="px-3 py-6 text-center text-[12px] text-dim">正在读取进程…</div>
+          ) : procErr ? (
+            <div className="flex items-center justify-center gap-1.5 px-3 py-6 text-center text-[12px] text-danger">
+              <AlertTriangle size={13} /> {tf("无法读取进程列表", "Couldn't read the process list")}
+            </div>
           ) : pickerProcs.length === 0 ? (
             <div className="px-3 py-6 text-center text-[12px] text-dim">
               {procQuery.trim() ? "没有匹配的进程" : "未发现进程"}

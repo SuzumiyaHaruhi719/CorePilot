@@ -343,6 +343,8 @@ export const api = {
   getSensors: () => invoke<Sensors>("get_sensors"),
   /** Reveal a file in Windows Explorer (open its folder + select it). */
   revealInExplorer: (path: string) => invoke<void>("reveal_in_explorer", { path }),
+  /** Dump the full session log to Downloads/<folderName>/; returns the folder path. */
+  exportDebugLogs: (folderName: string) => invoke<string>("export_debug_logs", { folderName }),
   getPowerPlan: () => invoke<string>("get_power_plan"),
   setPowerPlan: (plan: string) => invoke<void>("set_power_plan", { plan }),
   listServices: () => invoke<ServiceItem[]>("list_services"),

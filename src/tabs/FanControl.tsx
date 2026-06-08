@@ -14,7 +14,7 @@ import { useT, useTf } from "../lib/i18n";
 import { hoverPop } from "../lib/motion";
 import { api, type FanCalibProgress, type FanCalibration, type FanChannel, type FanCurvePoint, type FanInfo, type FanMode, type FanTempSource } from "../lib/ipc";
 import { useSettings } from "../store/settings";
-import { defaultConfig, FAN_PRESETS, useFanProfiles, type FanConfig } from "../store/fanProfiles";
+import { defaultConfig, FAN_PRESETS, MIN_SAFE_DUTY, useFanProfiles, type FanConfig } from "../store/fanProfiles";
 
 const MODE_OPTIONS: { value: FanMode; label: string }[] = [
   { value: "auto", label: "自动" },
@@ -186,7 +186,7 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
               <Slider
                 label="手动转速"
                 value={config.manualPct}
-                min={0}
+                min={MIN_SAFE_DUTY}
                 max={100}
                 unit="%"
                 onChange={(v) => onChange({ manualPct: v })}
@@ -244,7 +244,7 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
               <Slider
                 label="最低转速下限（风扇不会低于此值）"
                 value={config.minDuty}
-                min={0}
+                min={MIN_SAFE_DUTY}
                 max={100}
                 unit="%"
                 onChange={(v) => onChange({ minDuty: v })}
@@ -278,6 +278,7 @@ export function FanControl() {
   const [calibResults, setCalibResults] = useState<FanCalibration[] | null>(null);
   const [calibError, setCalibError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshErr, setRefreshErr] = useState(false);
 
   // Apply saved fan configs when the page opens (hydration-aware).
   useEffect(() => {
@@ -344,17 +345,18 @@ export function FanControl() {
     setCalibError(null);
     setCalibProgress(null);
     setCalibrating(true);
-    const unlisten = await listen<FanCalibProgress>("fan-calib-progress", (e) =>
-      setCalibProgress(e.payload),
-    );
+    // Subscribe inside try so a listener-setup failure can't leave the UI stuck
+    // in the "calibrating" state; the finally always resets it.
+    let unlisten: (() => void) | undefined;
     try {
+      unlisten = await listen<FanCalibProgress>("fan-calib-progress", (e) => setCalibProgress(e.payload));
       const results = await api.fanCalibrate(controllableIds);
       applyCalibration(results, presetTempSourceId);
       setCalibResults(results);
     } catch (e) {
       setCalibError(typeof e === "string" ? e : e instanceof Error ? e.message : "校准失败");
     } finally {
-      unlisten();
+      unlisten?.();
       setCalibrating(false);
       setCalibProgress(null);
     }
@@ -364,10 +366,11 @@ export function FanControl() {
   // spun up will appear without waiting for the next poll tick).
   async function refreshFans() {
     setRefreshing(true);
+    setRefreshErr(false);
     try {
       setInfo(await api.fanInfo());
     } catch {
-      /* sidecar not ready — keep last */
+      setRefreshErr(true);
     } finally {
       setTimeout(() => setRefreshing(false), 400);
     }
@@ -461,7 +464,9 @@ export function FanControl() {
                   const Icon = PRESET_ICON[preset.id as keyof typeof PRESET_ICON] ?? Layers;
                   const pending = preset.id === pendingProfileId;
                   const active = preset.id === activeProfileId && !pending;
-                  const disabled = controllableIds.length === 0;
+                  // Block overlapping fan writes: disable every preset (including
+                  // the pending one — it shows a spinner) while any apply is pending.
+                  const disabled = controllableIds.length === 0 || pendingProfileId !== null;
                   return (
                     <motion.button
                       key={preset.id}
@@ -498,6 +503,9 @@ export function FanControl() {
                   {profiles.map((p) => {
                     const pending = p.id === pendingProfileId;
                     const active = p.id === activeProfileId && !pending;
+                    // Disable all profiles (including the pending one, which shows
+                    // its spinner) while an apply is in flight — no overlapping writes.
+                    const blocked = pendingProfileId !== null;
                     return (
                       <motion.button
                         key={p.id}
@@ -505,14 +513,16 @@ export function FanControl() {
                         initial={{ opacity: 0, scale: 0.9 }}
                         animate={{ opacity: 1, scale: 1 }}
                         exit={{ opacity: 0, scale: 0.85 }}
-                        whileHover={{ scale: 1.03, y: -2 }}
-                        whileTap={{ scale: 0.97 }}
+                        whileHover={blocked ? undefined : { scale: 1.03, y: -2 }}
+                        whileTap={blocked ? undefined : { scale: 0.97 }}
                         transition={hoverPop}
+                        disabled={blocked}
                         onClick={() => applyProfile(p.id)}
                         aria-pressed={active}
                         className={cn(
                           "no-drag group relative flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
                           active ? "border-accent/50 bg-accent/10 glow-sm" : "border-line bg-surface2/50 hover:bg-surface3",
+                          blocked && "cursor-not-allowed opacity-50",
                         )}
                       >
                         {pending ? (
@@ -524,10 +534,17 @@ export function FanControl() {
                         {active && <Check size={12} className="text-accent-bright" />}
                         <span
                           role="button"
-                          tabIndex={-1}
+                          tabIndex={0}
                           aria-label={tf(`删除配置 ${p.name}`, `Delete profile ${p.name}`)}
                           onClick={(e) => { e.stopPropagation(); setDelProfile({ id: p.id, name: p.name }); }}
-                          className="ml-0.5 grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white group-focus-within:opacity-100 group-hover:opacity-100"
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setDelProfile({ id: p.id, name: p.name });
+                            }
+                          }}
+                          className="ml-0.5 grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 group-focus-within:opacity-100 group-hover:opacity-100"
                         >
                           <Trash2 size={11} />
                         </span>
@@ -570,10 +587,16 @@ export function FanControl() {
                 type="button"
                 onClick={() => void refreshFans()}
                 title="刷新风扇接口"
+                aria-label="刷新风扇接口"
                 className="no-drag flex cursor-pointer items-center gap-1.5 text-[11px] text-dim transition-colors hover:text-muted"
               >
                 <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} /> 刷新
               </button>
+              {refreshErr && (
+                <span className="flex items-center gap-1 text-[10.5px] text-danger">
+                  <AlertTriangle size={11} /> {tf("刷新失败 · 传感器服务未就绪", "Refresh failed · sensor service not ready")}
+                </span>
+              )}
               {channels.length > 0 && (
                 <button
                   type="button"

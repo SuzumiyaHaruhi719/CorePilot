@@ -1,5 +1,6 @@
 pub mod affinity;
 pub mod commands;
+pub mod debug_log;
 pub mod error;
 pub mod fan;
 pub mod fps;
@@ -45,9 +46,28 @@ pub const WEBVIEW_ARGS: &str = "--disable-background-timer-throttling \
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Full-granularity logging captured since launch. The TeeWriter mirrors every
+    // formatted line to stderr AND an in-memory buffer, so the Settings → Debug
+    // button can dump the complete session log to the Downloads folder. Our own
+    // crates log at TRACE (finest), everything else at INFO (still captures every
+    // warning/error). `RUST_LOG` overrides this if set.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,corepilot=trace,corepilot_lib=trace"));
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_writer(|| debug_log::TeeWriter)
         .try_init();
+
+    // Record panics into the same log stream (so a crash is captured in the debug
+    // export) while preserving the default panic output.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("PANIC: {info}");
+        default_hook(info);
+    }));
+
+    tracing::info!("CorePilot {} starting", env!("CARGO_PKG_VERSION"));
 
     // Enable SeDebugPrivilege once at startup. Even when CorePilot runs elevated,
     // OpenProcess(PROCESS_SET_INFORMATION) can fail on some processes (services,
@@ -126,6 +146,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            debug_log::export_debug_logs,
             commands::get_topology,
             commands::get_overview,
             commands::list_processes,

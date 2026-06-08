@@ -1,8 +1,10 @@
-import { ArrowDown, ArrowUp, Play, RotateCw, Search, Square } from "lucide-react";
+import { ArrowDown, ArrowUp, Loader2, Play, RotateCw, Search, Square } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { cn } from "../../lib/cn";
 import { useTf } from "../../lib/i18n";
 import { api, type ServiceItem } from "../../lib/ipc";
+import { Button } from "../ui/Button";
+import { Modal } from "../ui/Modal";
 
 const COLS = "grid-cols-[minmax(110px,0.9fr)_52px_minmax(0,1.5fr)_70px_minmax(0,0.7fr)_108px]";
 
@@ -61,14 +63,22 @@ export function ServicesView() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadErr, setLoadErr] = useState(false);
+  const [confirm, setConfirm] = useState<{ svc: ServiceItem; action: "stop" | "restart" } | null>(null);
   const [sortKey, setSortKey] = useState<SKey>("display");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   async function load() {
+    setLoading(true);
+    setLoadErr(false);
     try {
       setServices(await api.listServices());
     } catch {
       setStatus("无法读取服务列表");
+      setLoadErr(true);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -125,10 +135,12 @@ export function ServicesView() {
         <span className="nums text-[11.5px] text-dim">{tf(`${visible.length} 项服务`, `${visible.length} services`)}</span>
         <button
           onClick={() => void load()}
+          disabled={loading}
           title="刷新"
-          className="no-drag grid h-7 w-7 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-surface3 hover:text-ink"
+          aria-label="刷新服务列表"
+          className="no-drag grid h-7 w-7 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-surface3 hover:text-ink disabled:opacity-50"
         >
-          <RotateCw size={13} />
+          <RotateCw size={13} className={loading ? "animate-spin" : ""} />
         </button>
         {status && <span className="ml-auto text-[11.5px] text-accent">{status}</span>}
       </div>
@@ -169,17 +181,19 @@ export function ServicesView() {
                 {svc.status === "running" ? (
                   <>
                     <button
-                      disabled={busy === svc.name}
-                      onClick={() => control(svc, "stop")}
+                      disabled={busy !== null}
+                      onClick={() => setConfirm({ svc, action: "stop" })}
                       title="停止"
+                      aria-label={tf(`停止 ${svc.display || svc.name}`, `Stop ${svc.display || svc.name}`)}
                       className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim transition hover:bg-danger hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
                     >
-                      <Square size={12} />
+                      {busy === svc.name ? <Loader2 size={12} className="animate-spin" /> : <Square size={12} />}
                     </button>
                     <button
-                      disabled={busy === svc.name}
-                      onClick={() => control(svc, "restart")}
+                      disabled={busy !== null}
+                      onClick={() => setConfirm({ svc, action: "restart" })}
                       title="重启"
+                      aria-label={tf(`重启 ${svc.display || svc.name}`, `Restart ${svc.display || svc.name}`)}
                       className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim transition hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       <RotateCw size={12} />
@@ -187,12 +201,13 @@ export function ServicesView() {
                   </>
                 ) : (
                   <button
-                    disabled={busy === svc.name}
-                    onClick={() => control(svc, "start")}
+                    disabled={busy !== null}
+                    onClick={() => void control(svc, "start")}
                     title="启动"
+                    aria-label={tf(`启动 ${svc.display || svc.name}`, `Start ${svc.display || svc.name}`)}
                     className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim transition hover:bg-ok hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
                   >
-                    <Play size={12} />
+                    {busy === svc.name ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
                   </button>
                 )}
               </div>
@@ -200,13 +215,53 @@ export function ServicesView() {
           ))}
           {visible.length === 0 && (
             <div className="flex flex-col items-center gap-1.5 py-12 text-center">
-              <span className="hud-label text-[10px] text-dim">NO SERVICES</span>
-              <span className="text-[12.5px] text-dim">没有匹配的服务</span>
+              {loading ? (
+                <span className="flex items-center gap-2 text-[12.5px] text-dim">
+                  <Loader2 size={13} className="animate-spin" /> {tf("正在读取服务…", "Reading services…")}
+                </span>
+              ) : loadErr ? (
+                <>
+                  <span className="hud-label text-[10px] text-danger">ERROR</span>
+                  <span className="text-[12.5px] text-danger">{tf("无法读取服务列表", "Couldn't read the service list")}</span>
+                </>
+              ) : (
+                <>
+                  <span className="hud-label text-[10px] text-dim">NO SERVICES</span>
+                  <span className="text-[12.5px] text-dim">没有匹配的服务</span>
+                </>
+              )}
             </div>
           )}
         </div>
         </div>
       </div>
+
+      <Modal
+        open={confirm !== null}
+        onClose={() => setConfirm(null)}
+        title={confirm?.action === "restart" ? "重启服务" : "停止服务"}
+        footer={
+          <>
+            <Button onClick={() => setConfirm(null)} disabled={busy !== null}>取消</Button>
+            <Button
+              variant="danger"
+              disabled={busy !== null}
+              onClick={() => {
+                if (confirm) void control(confirm.svc, confirm.action);
+                setConfirm(null);
+              }}
+            >
+              {confirm?.action === "restart" ? tf("重启", "Restart") : tf("停止", "Stop")}
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] leading-relaxed text-muted">
+          {confirm?.action === "restart"
+            ? tf(`确定重启服务「${confirm?.svc.display || confirm?.svc.name}」吗？依赖它的功能会短暂中断。`, `Restart the service “${confirm?.svc.display || confirm?.svc.name}”? Features depending on it will briefly stop.`)
+            : tf(`确定停止服务「${confirm?.svc.display || confirm?.svc.name}」吗？依赖它的功能将不可用，直到重新启动。`, `Stop the service “${confirm?.svc.display || confirm?.svc.name}”? Features depending on it will be unavailable until it's started again.`)}
+        </p>
+      </Modal>
     </div>
   );
 }

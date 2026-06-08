@@ -1,5 +1,7 @@
 import {
   Activity,
+  AlertTriangle,
+  Bug,
   Check,
   CheckCircle2,
   ChevronRight,
@@ -345,12 +347,14 @@ function NetworkCard() {
  * "从文件选择" native picker.
  */
 function PerfRecordTargetsCard() {
+  const tf = useTf();
   const { targets, addTarget, removeTarget, setTargetList } = useRecordTargets();
   const [addName, setAddName] = useState("");
   // "Pick from running processes" picker state.
   const [pickerOpen, setPickerOpen] = useState(false);
   const [procs, setProcs] = useState<ProcInfo[]>([]);
   const [procLoading, setProcLoading] = useState(false);
+  const [procErr, setProcErr] = useState(false);
   const [procQuery, setProcQuery] = useState("");
   const [collapsed, setCollapsed] = useState(true);
 
@@ -366,10 +370,12 @@ function PerfRecordTargetsCard() {
     setProcQuery("");
     setPickerOpen(true);
     setProcLoading(true);
+    setProcErr(false);
     try {
       setProcs(await api.listProcesses());
     } catch {
       setProcs([]);
+      setProcErr(true);
     } finally {
       setProcLoading(false);
     }
@@ -485,6 +491,7 @@ function PerfRecordTargetsCard() {
                 onClick={() => removeTarget(t.name)}
                 className="grid h-7 w-7 shrink-0 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-danger/15 hover:text-danger"
                 title="移除"
+                aria-label={tf(`移除 ${t.name}`, `Remove ${t.name}`)}
               >
                 <Trash2 size={13} />
               </button>
@@ -513,6 +520,10 @@ function PerfRecordTargetsCard() {
         <div className="hairline max-h-[320px] overflow-auto rounded-xl border border-line bg-surface2/40">
           {procLoading ? (
             <div className="px-3 py-6 text-center text-[12px] text-dim">正在读取进程…</div>
+          ) : procErr ? (
+            <div className="flex items-center justify-center gap-1.5 px-3 py-6 text-center text-[12px] text-danger">
+              <AlertTriangle size={13} /> {tf("无法读取进程列表", "Couldn't read the process list")}
+            </div>
           ) : pickerProcs.length === 0 ? (
             <div className="px-3 py-6 text-center text-[12px] text-dim">
               {procQuery.trim() ? "没有匹配的进程" : "未发现进程"}
@@ -550,6 +561,7 @@ function PerfRecordTargetsCard() {
 
 export function Settings() {
   const settings = useSettings();
+  const tf = useTf();
 
   return (
     <>
@@ -570,6 +582,8 @@ export function Settings() {
                   <motion.button
                     key={accent}
                     title={accent}
+                    aria-label={`${tf("强调色", "Accent color")}: ${accent}`}
+                    aria-pressed={active}
                     whileHover={{ scale: 1.15 }}
                     whileTap={{ scale: 0.9 }}
                     onClick={() => settings.update({ accent })}
@@ -613,6 +627,7 @@ export function Settings() {
                   step={1}
                   value={settings.windowOpacity}
                   onChange={(e) => settings.update({ windowOpacity: Number(e.target.value) })}
+                  aria-label={tf("窗口不透明度", "Window opacity")}
                   className="cp-slider"
                   style={{ "--pct": `${((settings.windowOpacity - 30) / 70) * 100}%` } as CSSProperties}
                 />
@@ -707,7 +722,78 @@ export function Settings() {
         </motion.div>
 
         <NetworkCard />
+        <DebugCard />
       </div>
     </>
+  );
+}
+
+/**
+ * One-click debug export. Dumps the complete in-memory session log (every
+ * CorePilot event since launch + warnings/errors/panics) into a fresh
+ * `Downloads/CorePilot_Debug_<timestamp>/` folder and opens it in Explorer.
+ */
+function DebugCard() {
+  const t = useT();
+  const tf = useTf();
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  function timestampName(): string {
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `CorePilot_Debug_${d.getFullYear()}_${p(d.getMonth() + 1)}_${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  }
+
+  async function run() {
+    if (busy) return;
+    setBusy(true);
+    setResult(null);
+    try {
+      const dir = await api.exportDebugLogs(timestampName());
+      setResult({ ok: true, text: dir });
+      // Open the folder so the user can grab it immediately.
+      await api.revealInExplorer(`${dir}\\corepilot.log`).catch(() => undefined);
+    } catch (e: unknown) {
+      const msg = typeof e === "string" ? e : e instanceof Error ? e.message : "导出失败";
+      setResult({ ok: false, text: msg });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+      className="glass hairline mx-auto max-w-2xl rounded-2xl px-5 py-4"
+    >
+      <SectionHeader icon={Bug} label="诊断 · DEBUG" />
+      <div className="flex flex-wrap items-center justify-between gap-3 py-1">
+        <div className="min-w-0">
+          <div className="text-[13px] font-medium text-ink">{t("导出调试日志")}</div>
+          <div className="mt-0.5 text-[11.5px] leading-relaxed text-dim">
+            {t("将本次启动以来的完整日志保存到下载文件夹，便于反馈问题。")}
+          </div>
+        </div>
+        <Button variant="primary" onClick={() => void run()} disabled={busy}>
+          {busy ? <Loader2 size={14} className="animate-spin" /> : <Bug size={14} />} {t("导出调试日志")}
+        </Button>
+      </div>
+      {result && (
+        <div
+          className={cn(
+            "mt-2 flex items-start gap-1.5 break-all rounded-lg border px-3 py-2 text-[11.5px]",
+            result.ok ? "border-ok/40 bg-ok/10 text-ok" : "border-danger/40 bg-danger/10 text-danger",
+          )}
+        >
+          {result.ok ? <CheckCircle2 size={13} className="mt-0.5 shrink-0" /> : <AlertTriangle size={13} className="mt-0.5 shrink-0" />}
+          <span className="min-w-0">
+            {result.ok ? tf(`已保存到 ${result.text}`, `Saved to ${result.text}`) : tf(`导出失败：${result.text}`, `Export failed: ${result.text}`)}
+          </span>
+        </div>
+      )}
+    </motion.div>
   );
 }

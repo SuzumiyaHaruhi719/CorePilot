@@ -95,7 +95,10 @@ export function useOverlayInjection(): void {
           if (alive) setStatus(st);
         }
       } catch {
-        if (alive) setStatus(null);
+        // A transient backend read failure must NOT reset the panel to its
+        // null "detecting foreground game…" state — that misrepresents a glitch
+        // as "no game yet" and can stick there. Keep the last known status; the
+        // next successful tick refreshes it.
       }
     };
     void tick();

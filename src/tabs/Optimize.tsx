@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { Check, Globe, Loader2, MemoryStick, Power, RefreshCw, Trash2, Wand2, Zap } from "lucide-react";
+import { AlertTriangle, Check, Globe, Loader2, MemoryStick, Power, RefreshCw, Trash2, Wand2, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useState, type CSSProperties } from "react";
 import { ClickRipple } from "../components/ui/Ripple";
@@ -30,16 +30,16 @@ interface ActionCardProps {
 
 function ActionCard({ icon: Icon, title, desc, hue, onRun }: ActionCardProps) {
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<string | null>(null);
+  const [result, setResult] = useState<{ text: string; ok: boolean } | null>(null);
 
   async function run() {
     if (busy) return;
     setBusy(true);
     setResult(null);
     try {
-      setResult(await onRun());
+      setResult({ text: await onRun(), ok: true });
     } catch (error: unknown) {
-      setResult(getErrorMessage(error));
+      setResult({ text: getErrorMessage(error), ok: false });
     } finally {
       setBusy(false);
     }
@@ -78,9 +78,9 @@ function ActionCard({ icon: Icon, title, desc, hue, onRun }: ActionCardProps) {
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
-            className="flex items-center gap-1.5 text-[11.5px] font-medium text-ok glow-text"
+            className={cn("flex items-center gap-1.5 text-[11.5px] font-medium", result.ok ? "text-ok glow-text" : "text-danger")}
           >
-            <Check size={13} /> <span className="nums">{result}</span>
+            {result.ok ? <Check size={13} /> : <AlertTriangle size={13} />} <span className="nums">{result.text}</span>
           </motion.div>
         ) : (
           <motion.div
@@ -102,7 +102,7 @@ export function Optimize() {
   const [view, setView] = useState<"quick" | "deep">("quick");
   const [mem, setMem] = useState<MemDetail | null>(null);
   const [heroBusy, setHeroBusy] = useState(false);
-  const [heroResult, setHeroResult] = useState<string | null>(null);
+  const [heroResult, setHeroResult] = useState<{ text: string; ok: boolean } | null>(null);
   const [powerPlan, setPlan] = useState("");
 
   async function refresh() {
@@ -114,11 +114,13 @@ export function Optimize() {
   }
 
   async function changePlan(plan: string) {
+    const prev = powerPlan;
     setPlan(plan);
     try {
       await api.setPowerPlan(plan);
     } catch {
-      /* ignore */
+      // Apply failed — re-sync the toggle to the real plan so the UI doesn't lie.
+      api.getPowerPlan().then(setPlan).catch(() => setPlan(prev));
     }
   }
 
@@ -162,32 +164,48 @@ export function Optimize() {
     setHeroResult(null);
     try {
       const before = await api.getMemoryDetail();
-      await api.freeWorkingSets();
-      await api.purgeStandby();
+      const failedSteps: string[] = [];
+      try {
+        await api.freeWorkingSets();
+      } catch {
+        failedSteps.push(tf("释放内存", "free memory"));
+      }
+      try {
+        await api.purgeStandby();
+      } catch {
+        failedSteps.push(tf("清理缓存", "clear cache"));
+      }
       let files = 0;
       try {
         files = (await api.cleanTemp()).files;
       } catch {
-        /* ignore */
+        failedSteps.push(tf("清理临时文件", "temp clean"));
       }
       try {
         await api.flushDns();
       } catch {
-        /* ignore */
+        failedSteps.push(tf("刷新 DNS", "DNS flush"));
       }
       try {
         await api.setPowerPlan("high");
         setPlan("high");
       } catch {
-        /* ignore */
+        failedSteps.push(tf("电源计划", "power plan"));
       }
       await wait(500);
       const after = await api.getMemoryDetail();
       setMem(after);
       const freed = Math.max(0, after.avail - before.avail);
-      setHeroResult(tf(`释放 ${formatBytes(freed)} 内存 · 清理 ${files} 个临时文件`, `Freed ${formatBytes(freed)} memory · cleaned ${files} temp files`));
+      const note =
+        failedSteps.length > 0
+          ? tf(`（${failedSteps.join("、")}失败）`, ` (failed: ${failedSteps.join(", ")})`)
+          : "";
+      setHeroResult({
+        text: tf(`释放 ${formatBytes(freed)} 内存 · 清理 ${files} 个临时文件`, `Freed ${formatBytes(freed)} memory · cleaned ${files} temp files`) + note,
+        ok: failedSteps.length === 0,
+      });
     } catch (error: unknown) {
-      setHeroResult(getErrorMessage(error));
+      setHeroResult({ text: getErrorMessage(error), ok: false });
     } finally {
       setHeroBusy(false);
     }
@@ -304,9 +322,9 @@ export function Optimize() {
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
-                  className="mt-1 flex items-center gap-1.5 text-[12px] font-medium text-white"
+                  className={cn("mt-1 flex items-center gap-1.5 text-[12px] font-medium", heroResult.ok ? "text-white" : "text-danger")}
                 >
-                  <Check size={14} /> <span className="nums">{heroResult}</span>
+                  {heroResult.ok ? <Check size={14} /> : <AlertTriangle size={14} />} <span className="nums">{heroResult.text}</span>
                 </motion.div>
               )}
             </AnimatePresence>

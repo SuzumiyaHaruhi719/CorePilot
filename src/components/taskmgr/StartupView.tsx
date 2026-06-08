@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, RotateCw } from "lucide-react";
+import { ArrowDown, ArrowUp, Loader2, RotateCw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { cn } from "../../lib/cn";
 import { useTf } from "../../lib/i18n";
@@ -51,14 +51,22 @@ export function StartupView() {
   const tf = useTf();
   const [items, setItems] = useState<StartupItem[]>([]);
   const [status, setStatus] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [loadErr, setLoadErr] = useState(false);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SKey>("enabled");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
   async function load() {
+    setLoading(true);
+    setLoadErr(false);
     try {
       setItems(await api.listStartup());
     } catch {
       setStatus("无法读取启动项");
+      setLoadErr(true);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -67,12 +75,17 @@ export function StartupView() {
   }, []);
 
   async function toggle(item: StartupItem) {
+    const key = `${item.location}:${item.name}`;
+    if (busyKey) return;
+    setBusyKey(key);
     try {
       await api.setStartupEnabled(item.name, item.location, !item.enabled);
       setStatus(tf(`${item.name} — ${!item.enabled ? "已启用" : "已禁用"}`, `${item.name} — ${!item.enabled ? "enabled" : "disabled"}`));
       await load();
     } catch {
       setStatus(tf(`${item.name} — 修改失败（可能需要管理员权限）`, `${item.name} — change failed (admin rights may be required)`));
+    } finally {
+      setBusyKey(null);
     }
   }
 
@@ -101,10 +114,12 @@ export function StartupView() {
         <span className="nums text-[11.5px] text-dim">{tf(`${items.length} 个启动项`, `${items.length} startup items`)}</span>
         <button
           onClick={() => void load()}
+          disabled={loading}
           title="刷新"
-          className="no-drag grid h-7 w-7 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-surface3 hover:text-ink"
+          aria-label="刷新启动项"
+          className="no-drag grid h-7 w-7 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-surface3 hover:text-ink disabled:opacity-50"
         >
-          <RotateCw size={13} />
+          <RotateCw size={13} className={loading ? "animate-spin" : ""} />
         </button>
         {status && <span className="ml-auto text-[11.5px] text-accent">{status}</span>}
       </div>
@@ -139,14 +154,32 @@ export function StartupView() {
               </span>
               <span className="text-[11px] text-muted">{LOC_LABEL[item.location] ?? item.location}</span>
               <div className="flex justify-end">
-                <Toggle checked={item.enabled} onChange={() => toggle(item)} />
+                <Toggle
+                  checked={item.enabled}
+                  disabled={busyKey !== null}
+                  label={tf(`${item.name} 开机启动`, `${item.name} startup`)}
+                  onChange={() => toggle(item)}
+                />
               </div>
             </div>
           ))}
           {visible.length === 0 && (
             <div className="flex flex-col items-center gap-1.5 py-12 text-center">
-              <span className="hud-label text-[10px] text-dim">NO STARTUP ITEMS</span>
-              <span className="text-[12.5px] text-dim">没有启动项</span>
+              {loading ? (
+                <span className="flex items-center gap-2 text-[12.5px] text-dim">
+                  <Loader2 size={13} className="animate-spin" /> {tf("正在读取启动项…", "Reading startup items…")}
+                </span>
+              ) : loadErr ? (
+                <>
+                  <span className="hud-label text-[10px] text-danger">ERROR</span>
+                  <span className="text-[12.5px] text-danger">{tf("无法读取启动项", "Couldn't read startup items")}</span>
+                </>
+              ) : (
+                <>
+                  <span className="hud-label text-[10px] text-dim">NO STARTUP ITEMS</span>
+                  <span className="text-[12.5px] text-dim">没有启动项</span>
+                </>
+              )}
             </div>
           )}
         </div>
