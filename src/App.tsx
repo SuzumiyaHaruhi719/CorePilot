@@ -123,6 +123,12 @@ function App() {
     document.documentElement.dataset.glow = glow;
   }, [glow]);
 
+  // Mirror reduce-motion to the DOM so CSS can kill continuous animations (HUD
+  // grid, glow pulses, spinners) — the main idle-CPU cost on low-end machines.
+  useEffect(() => {
+    document.documentElement.dataset.reduceMotion = String(reduceMotion);
+  }, [reduceMotion]);
+
   // Mirror the "close to tray" preference to the backend window-close handler.
   useEffect(() => {
     api.setCloseToTray(closeToTray).catch(() => undefined);

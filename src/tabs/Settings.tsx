@@ -601,7 +601,7 @@ export function Settings() {
             </div>
           </SettingRow>
 
-          <SettingRow title="减弱动画" desc="降低动效以提升无障碍体验">
+          <SettingRow title="关闭动画（省电）" desc="关闭持续动效（HUD 背景 / 光晕 / 旋转图标等），明显降低空闲 CPU 占用，适合低端设备">
             <Toggle
               checked={settings.reduceMotion}
               onChange={(value) => settings.update({ reduceMotion: value })}

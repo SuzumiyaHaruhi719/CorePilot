@@ -149,6 +149,7 @@ export function GroupRail({
           whileTap={{ scale: 0.97 }}
           transition={hoverPop}
           onClick={onToggleOptimization}
+          style={optimizationEnabled ? ({ "--glow": "var(--color-ok)" } as CSSProperties) : undefined}
           className={cn(
             "flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl py-2.5 text-[12.5px] font-semibold transition-[background-color,border-color,color] duration-150",
             optimizationEnabled

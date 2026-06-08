@@ -181,6 +181,23 @@
     -webkit-backdrop-filter: blur(18px) saturate(155%);
   }
 
+  /* "关闭动画 / 省电" — when reduce-motion is on, neuter continuous CSS
+     animations (HUD grid drift, glow pulses, spinners) and make transitions
+     instant. This is the big idle-CPU win on low-end CPUs; framer-motion is
+     separately reduced via the MotionConfig in App.tsx. */
+  html[data-reduce-motion="true"] *,
+  html[data-reduce-motion="true"] *::before,
+  html[data-reduce-motion="true"] *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  /* Drop the animated HUD backdrop entirely (a full-screen continuous repaint). */
+  html[data-reduce-motion="true"] .hud-grid {
+    display: none;
+  }
+
   /* Soft glow — defaults to the live accent so it recolors with the theme. */
   .glow {
     --glow: var(--color-accent);
