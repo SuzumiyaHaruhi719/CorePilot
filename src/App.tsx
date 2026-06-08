@@ -10,6 +10,7 @@ import { useOsdHotkey } from "./hooks/useOsdHotkey";
 import { usePerfRecorder } from "./hooks/usePerfRecorder";
 import { useOverlayInjection } from "./hooks/useOverlayInjection";
 import { useLiveHistoryRecorder } from "./hooks/useSharedTelemetry";
+import { useGlobalI18n } from "./lib/i18n";
 import { useUi, type TabId } from "./store/ui";
 import { CoreAssignment } from "./tabs/CoreAssignment";
 import { FanControl } from "./tabs/FanControl";
@@ -50,6 +51,7 @@ function App() {
   usePerfRecorder();
   useOverlayInjection();
   useLiveHistoryRecorder();
+  useGlobalI18n();
 
   useEffect(() => {
     api.getOverview().then(setOverview).catch(() => undefined);
