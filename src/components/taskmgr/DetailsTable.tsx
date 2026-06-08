@@ -2,6 +2,7 @@ import { ArrowDown, ArrowUp, X } from "lucide-react";
 import type { MouseEvent } from "react";
 import { cn } from "../../lib/cn";
 import { formatBytes, formatDuration } from "../../lib/format";
+import { useTf } from "../../lib/i18n";
 import type { ProcInfo } from "../../lib/ipc";
 import type { SortKey } from "../cores/ProcessTable";
 import { TableBodyState } from "./TmProcessTable";
@@ -68,6 +69,7 @@ export function DetailsTable({
   loading,
   error,
 }: DetailsTableProps) {
+  const tf = useTf();
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/50">
       {/* Horizontal scroll: when the window is narrower than the table's fixed
@@ -112,7 +114,7 @@ export function DetailsTable({
             <button
               onClick={() => onEndTask(p)}
               title="结束任务"
-              aria-label={`结束任务 ${p.name}`}
+              aria-label={tf(`结束任务 ${p.name}`, `End task ${p.name}`)}
               className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
             >
               <X size={13} />

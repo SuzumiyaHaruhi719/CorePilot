@@ -11,6 +11,7 @@ import { Modal } from "../components/ui/Modal";
 import { TabHeader } from "../components/ui/TabHeader";
 import { useProcesses } from "../hooks/useProcesses";
 import { groupColor } from "../lib/colors";
+import { useTf } from "../lib/i18n";
 import { maskFromIds, popcount } from "../lib/cpu";
 import { maskToCpuList } from "../lib/format";
 import { api, type CpuTopology, type ProcInfo } from "../lib/ipc";
@@ -30,7 +31,14 @@ function offlinePid(name: string): number {
   return -(Math.abs(h) + 1);
 }
 
+function getErrorMessage(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
 export function CoreAssignment() {
+  const tf = useTf();
   const [topo, setTopo] = useState<CpuTopology | null>(null);
   const { processes, loading, error } = useProcesses();
 
@@ -197,7 +205,7 @@ export function CoreAssignment() {
             icon: CircleMinus,
             onClick: () => {
               removeProcess(proc.name);
-              setStatus(`已将 ${proc.name} 移出分组`);
+              setStatus(tf(`已将 ${proc.name} 移出分组`, `Removed ${proc.name} from group`));
             },
           },
           { label: "复制名称", icon: Copy, onClick: () => void navigator.clipboard.writeText(proc.name) },
@@ -211,12 +219,12 @@ export function CoreAssignment() {
       // 全部进程: explicit per-group add choices (no silent default group).
       for (const g of groups) {
         items.push({
-          label: `添加到「${g.name}」`,
+          label: tf(`添加到「${g.name}」`, `Add to “${g.name}”`),
           icon: Plus,
           onClick: () => {
             assignProcess(g.id, proc.name);
             if (optimizationEnabled) void applyToProcess(g, proc).catch(() => undefined);
-            setStatus(`已添加 ${proc.name} 到「${g.name}」`);
+            setStatus(tf(`已添加 ${proc.name} 到「${g.name}」`, `Added ${proc.name} to “${g.name}”`));
           },
         });
       }
@@ -226,8 +234,11 @@ export function CoreAssignment() {
         label: "立即应用核心分配",
         icon: Zap,
         onClick: () => {
-          void applyToProcess(group, proc).catch(() => undefined);
-          setStatus(`已对 ${proc.name} 应用「${group.name}」`);
+          void applyToProcess(group, proc)
+            .then(() => setStatus(tf(`已对 ${proc.name} 应用「${group.name}」`, `Applied “${group.name}” to ${proc.name}`)))
+            .catch((e: unknown) =>
+              setStatus(tf(`应用失败：${getErrorMessage(e)}`, `Apply failed: ${getErrorMessage(e)}`)),
+            );
         },
       });
       items.push({
@@ -259,9 +270,9 @@ export function CoreAssignment() {
     setPendingKill(null);
     try {
       await api.endTask(target.pid);
-      setStatus(`已结束 ${target.name}`);
+      setStatus(tf(`已结束 ${target.name}`, `Ended ${target.name}`));
     } catch {
-      setStatus(`无法结束 ${target.name}（受保护）`);
+      setStatus(tf(`无法结束 ${target.name}（受保护）`, `Couldn't end ${target.name} (protected)`));
     }
   }
 
@@ -341,8 +352,10 @@ export function CoreAssignment() {
     }
     setSelectedPids(new Set());
     setStatus(
-      `已添加 ${chosen.length} 个进程到「${target.name}」` +
-        (failed ? ` · ${failed} 个受保护进程应用失败` : ""),
+      tf(
+        `已添加 ${chosen.length} 个进程到「${target.name}」` + (failed ? ` · ${failed} 个受保护进程应用失败` : ""),
+        `Added ${chosen.length} processes to “${target.name}”` + (failed ? ` · ${failed} protected processes failed` : ""),
+      ),
     );
   }
 
@@ -379,7 +392,7 @@ export function CoreAssignment() {
       }
     }
     setSelectedPids(new Set());
-    setStatus(`已从「${selectedGroup.name}」移出 ${chosen.length} 个进程`);
+    setStatus(tf(`已从「${selectedGroup.name}」移出 ${chosen.length} 个进程`, `Removed ${chosen.length} processes from “${selectedGroup.name}”`));
   }
 
   function openColorPicker() {
@@ -406,7 +419,7 @@ export function CoreAssignment() {
         }
       }
     }
-    setStatus(`已更新「${selectedGroup.name}」的核心分配`);
+    setStatus(tf(`已更新「${selectedGroup.name}」的核心分配`, `Updated core assignment for “${selectedGroup.name}”`));
   }
 
   async function handleToggleOptimization() {
@@ -538,7 +551,7 @@ export function CoreAssignment() {
               </div>
               {selectedGroup ? (
                 <Button variant="danger" onClick={removeSelected} disabled={selectedPids.size === 0}>
-                  <CircleMinus size={14} /> 移出分组{selectedPids.size > 0 ? ` (${selectedPids.size})` : ""}
+                  <CircleMinus size={14} /> {tf("移出分组", "Remove from group")}{selectedPids.size > 0 ? ` (${selectedPids.size})` : ""}
                 </Button>
               ) : (
                 <div ref={addBtnRef}>
@@ -547,7 +560,7 @@ export function CoreAssignment() {
                     onClick={openAddMenu}
                     disabled={selectedPids.size === 0 || groups.length === 0}
                   >
-                    <Plus size={14} /> 添加到分组{selectedPids.size > 0 ? ` (${selectedPids.size})` : ""} ▾
+                    <Plus size={14} /> {tf("添加到分组", "Add to group")}{selectedPids.size > 0 ? ` (${selectedPids.size})` : ""} ▾
                   </Button>
                 </div>
               )}
@@ -606,7 +619,7 @@ export function CoreAssignment() {
         <Modal
           open={coreModalOpen}
           onClose={() => setCoreModalOpen(false)}
-          title={`选择核心 — ${selectedGroup?.name ?? ""}`}
+          title={tf(`选择核心 — ${selectedGroup?.name ?? ""}`, `Select cores — ${selectedGroup?.name ?? ""}`)}
           footer={
             <>
               <Button onClick={() => setCoreModalOpen(false)}>取消</Button>
@@ -633,8 +646,8 @@ export function CoreAssignment() {
         }
       >
         <p className="text-[13px] leading-relaxed text-muted">
-          确定要结束 <span className="font-semibold text-ink">{pendingKill?.name}</span>{" "}
-          (PID {pendingKill?.pid}) 吗？未保存的数据将丢失。
+          {tf("确定要结束", "End")} <span className="font-semibold text-ink">{pendingKill?.name}</span>{" "}
+          (PID {pendingKill?.pid}){tf("吗？未保存的数据将丢失。", "? Unsaved data will be lost.")}
         </p>
       </Modal>
       <ContextMenu state={menu} onClose={() => setMenu(null)} />

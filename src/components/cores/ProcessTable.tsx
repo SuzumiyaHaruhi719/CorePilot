@@ -3,6 +3,7 @@ import type { MouseEvent } from "react";
 import { cn } from "../../lib/cn";
 import { groupColor } from "../../lib/colors";
 import { classifyCcd } from "../../lib/cpu";
+import { translate, useTf } from "../../lib/i18n";
 import { formatBytes } from "../../lib/format";
 import type { CpuTopology, ProcInfo } from "../../lib/ipc";
 import { groupForProcess, useGroups } from "../../store/groups";
@@ -35,6 +36,7 @@ const COLS_NO_GROUP = "grid-cols-[28px_minmax(0,1fr)_76px_88px_50px_92px_56px]";
 
 /** Hardware threads + cluster a process spans (from its affinity mask). */
 function HwThreads({ mask, topo }: { mask: bigint; topo: CpuTopology | null }) {
+  const tf = useTf();
   const c = classifyCcd(mask, topo);
   if (c.count === 0) return <span className="nums text-right text-dim">—</span>;
   const dot =
@@ -60,7 +62,7 @@ function HwThreads({ mask, topo }: { mask: bigint; topo: CpuTopology | null }) {
                 ? "跨 CCD"
                 : "全部核心";
   return (
-    <span className="flex items-center justify-end gap-1.5" title={`${c.count} 硬件线程 · ${label}`}>
+    <span className="flex items-center justify-end gap-1.5" title={tf(`${c.count} 硬件线程 · ${label}`, `${c.count} hardware threads · ${translate(label, "en")}`)}>
       <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dot)} />
       <span className="nums text-muted">{c.count}</span>
     </span>

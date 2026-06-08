@@ -1,6 +1,7 @@
 import { ArrowDown, ArrowUp, RotateCw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { cn } from "../../lib/cn";
+import { useTf } from "../../lib/i18n";
 import { api, type StartupItem } from "../../lib/ipc";
 import { Toggle } from "../ui/Toggle";
 
@@ -47,6 +48,7 @@ function SortHead({
 }
 
 export function StartupView() {
+  const tf = useTf();
   const [items, setItems] = useState<StartupItem[]>([]);
   const [status, setStatus] = useState("");
   const [sortKey, setSortKey] = useState<SKey>("enabled");
@@ -67,10 +69,10 @@ export function StartupView() {
   async function toggle(item: StartupItem) {
     try {
       await api.setStartupEnabled(item.name, item.location, !item.enabled);
-      setStatus(`${item.name} — ${!item.enabled ? "已启用" : "已禁用"}`);
+      setStatus(tf(`${item.name} — ${!item.enabled ? "已启用" : "已禁用"}`, `${item.name} — ${!item.enabled ? "enabled" : "disabled"}`));
       await load();
     } catch {
-      setStatus(`${item.name} — 修改失败（可能需要管理员权限）`);
+      setStatus(tf(`${item.name} — 修改失败（可能需要管理员权限）`, `${item.name} — change failed (admin rights may be required)`));
     }
   }
 
@@ -96,7 +98,7 @@ export function StartupView() {
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
       <div className="flex items-center gap-3">
-        <span className="nums text-[11.5px] text-dim">{items.length} 个启动项</span>
+        <span className="nums text-[11.5px] text-dim">{tf(`${items.length} 个启动项`, `${items.length} startup items`)}</span>
         <button
           onClick={() => void load()}
           title="刷新"

@@ -41,7 +41,7 @@ pub struct CleanResult {
     pub files: u32,
 }
 
-fn enable_privilege(name: &str) -> CoreResult<()> {
+pub fn enable_privilege(name: &str) -> CoreResult<()> {
     unsafe {
         let mut token = HANDLE::default();
         OpenProcessToken(

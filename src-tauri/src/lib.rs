@@ -49,6 +49,16 @@ pub fn run() {
         .with_max_level(tracing::Level::INFO)
         .try_init();
 
+    // Enable SeDebugPrivilege once at startup. Even when CorePilot runs elevated,
+    // OpenProcess(PROCESS_SET_INFORMATION) can fail on some processes (services,
+    // other-context, or elevated peers like our own sensord sidecar) without this
+    // privilege — which is exactly the gate affinity/priority control uses. With
+    // it, the settable-probe and set_affinity succeed on the broadest set of
+    // processes. Best-effort: log and continue if it can't be enabled.
+    if let Err(e) = optimize::enable_privilege("SeDebugPrivilege") {
+        tracing::warn!("failed to enable SeDebugPrivilege: {e}");
+    }
+
     // WebView2 / Chromium aggressively throttle (or pause) JS timers in
     // background / occluded windows. But the in-game OSD overlay and the perf
     // recorder both poll on a setInterval and MUST keep running while a *game*

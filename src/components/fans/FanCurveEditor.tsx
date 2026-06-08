@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useTf } from "../../lib/i18n";
 import type { FanCurvePoint } from "../../lib/ipc";
 
 interface FanCurveEditorProps {
@@ -23,6 +24,7 @@ const MAX_POINTS = 24;
 /** A draggable temperature→duty fan-curve editor (FanXpert-style). X axis is
  *  temperature (0–100 °C), Y axis is duty (0–100%). Drag points to reshape. */
 export function FanCurveEditor({ points, onChange, onCommit, live, minDuty = 0 }: FanCurveEditorProps) {
+  const tf = useTf();
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(420);
   const [dragging, setDragging] = useState<number | null>(null);
@@ -215,7 +217,7 @@ export function FanCurveEditor({ points, onChange, onCommit, live, minDuty = 0 }
                   removePoint(i);
                 }}
               >
-                <title>{`${p.tempC}° → ${p.duty}% · 拖动调整，双击删除`}</title>
+                <title>{tf(`${p.tempC}° → ${p.duty}% · 拖动调整，双击删除`, `${p.tempC}° → ${p.duty}% · drag to adjust, double-click to remove`)}</title>
               </circle>
             </g>
           );

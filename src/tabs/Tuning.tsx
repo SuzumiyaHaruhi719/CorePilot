@@ -15,6 +15,7 @@ import { Modal } from "../components/ui/Modal";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
+import { translate, useTf } from "../lib/i18n";
 import { api } from "../lib/ipc";
 import { useTweaks } from "../store/tweaks";
 
@@ -55,6 +56,7 @@ function getErrorMessage(e: unknown): string {
 }
 
 export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
+  const tf = useTf();
   const { applied, snapshots, setApplied, setSnapshot } = useTweaks();
   const [busyId, setBusyId] = useState<string | null>(null);
   // Optimistic per-row state so a toggle flips (and its spring plays) the instant
@@ -79,7 +81,10 @@ export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
       }
       setApplied(meta.id, next);
       setStatus({
-        msg: `${next ? "已应用" : "已还原"}「${meta.name}」${meta.reboot && next ? " · 重启后生效" : ""}`,
+        msg: tf(
+          `${next ? "已应用" : "已还原"}「${meta.name}」${meta.reboot && next ? " · 重启后生效" : ""}`,
+          `${next ? "Applied" : "Reverted"} “${translate(meta.name, "en")}”${meta.reboot && next ? " · takes effect after reboot" : ""}`,
+        ),
         ok: true,
       });
     } catch (e: unknown) {
@@ -118,7 +123,7 @@ export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
       }
     }
     setBusyId(null);
-    setStatus({ msg: failed ? `还原完成,${failed} 项失败` : "已全部还原为默认", ok: failed === 0 });
+    setStatus({ msg: failed ? tf(`还原完成,${failed} 项失败`, `Revert complete, ${failed} failed`) : "已全部还原为默认", ok: failed === 0 });
   }
 
   async function makeRestorePoint() {
@@ -128,7 +133,7 @@ export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
       await api.createRestorePoint();
       setStatus({ msg: "已创建系统还原点", ok: true });
     } catch (e: unknown) {
-      setStatus({ msg: `还原点创建失败(系统默认 24h 限一次):${getErrorMessage(e)}`, ok: false });
+      setStatus({ msg: tf(`还原点创建失败(系统默认 24h 限一次):${getErrorMessage(e)}`, `Restore point failed (Windows allows one per 24h): ${getErrorMessage(e)}`), ok: false });
     } finally {
       setBusyId(null);
     }
@@ -238,7 +243,10 @@ export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
         <div className="flex items-start gap-2 text-[11px] leading-relaxed text-dim">
           <AlertTriangle size={13} className="mt-0.5 shrink-0 text-warn/70" />
           <p>
-            所有优化均为<strong className="text-muted">可逆</strong>操作:还原会写回 Windows 文档化的默认值。部分项(内存完整性等)<strong className="text-muted">需重启</strong>才完全生效。CorePilot 不做删除系统组件等破坏性操作。
+            {tf(
+              "所有优化均为可逆操作:还原会写回 Windows 文档化的默认值。部分项(内存完整性等)需重启才完全生效。CorePilot 不做删除系统组件等破坏性操作。",
+              "Every optimization is reversible: reverting writes back Windows' documented defaults. Some items (Memory Integrity, etc.) need a reboot to take full effect. CorePilot never does destructive things like deleting system components.",
+            )}
           </p>
         </div>
       </div>

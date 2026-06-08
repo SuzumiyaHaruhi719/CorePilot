@@ -1,6 +1,7 @@
 import { ArrowDown, ArrowUp, Play, RotateCw, Search, Square } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { cn } from "../../lib/cn";
+import { useTf } from "../../lib/i18n";
 import { api, type ServiceItem } from "../../lib/ipc";
 
 const COLS = "grid-cols-[minmax(110px,0.9fr)_52px_minmax(0,1.5fr)_70px_minmax(0,0.7fr)_108px]";
@@ -55,6 +56,7 @@ function SortHead({
 }
 
 export function ServicesView() {
+  const tf = useTf();
   const [services, setServices] = useState<ServiceItem[]>([]);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
@@ -98,11 +100,11 @@ export function ServicesView() {
     setBusy(svc.name);
     try {
       await api.controlService(svc.name, action);
-      setStatus(`${svc.display} — 操作成功`);
+      setStatus(tf(`${svc.display} — 操作成功`, `${svc.display} — operation succeeded`));
       await new Promise((r) => setTimeout(r, 700));
       await load();
     } catch {
-      setStatus(`${svc.display} — 操作失败（服务可能受保护）`);
+      setStatus(tf(`${svc.display} — 操作失败（服务可能受保护）`, `${svc.display} — operation failed (service may be protected)`));
     } finally {
       setBusy(null);
     }
@@ -120,7 +122,7 @@ export function ServicesView() {
             className="w-56 rounded-lg border border-line bg-surface2 py-1.5 pl-8 pr-3 text-[12.5px] text-ink outline-none transition-colors focus:border-accent/50"
           />
         </div>
-        <span className="nums text-[11.5px] text-dim">{visible.length} 项服务</span>
+        <span className="nums text-[11.5px] text-dim">{tf(`${visible.length} 项服务`, `${visible.length} services`)}</span>
         <button
           onClick={() => void load()}
           title="刷新"

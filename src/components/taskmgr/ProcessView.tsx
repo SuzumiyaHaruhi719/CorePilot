@@ -1,6 +1,7 @@
 import { ChevronsUp, Copy, FolderOpen, MonitorPlay, Search, X } from "lucide-react";
 import { useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useProcesses } from "../../hooks/useProcesses";
+import { useTf } from "../../lib/i18n";
 import { PRIORITY, api, type ProcInfo } from "../../lib/ipc";
 import { useOsdTargets } from "../../store/osd";
 import { Button } from "../ui/Button";
@@ -15,6 +16,7 @@ interface ProcessViewProps {
 }
 
 export function ProcessView({ detailed }: ProcessViewProps) {
+  const tf = useTf();
   const { processes, loading, error } = useProcesses();
   const [sortKey, setSortKey] = useState<SortKey>("cpu");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -77,7 +79,7 @@ export function ProcessView({ detailed }: ProcessViewProps) {
           onClick: () =>
             void api
               .setPriority(proc.pid, PRIORITY.high)
-              .then(() => setStatus(`已将 ${proc.name} 设为高优先级`))
+              .then(() => setStatus(tf(`已将 ${proc.name} 设为高优先级`, `Set ${proc.name} to high priority`)))
               .catch(() => setStatus("设置优先级失败（受保护进程）")),
         },
         {
@@ -93,7 +95,7 @@ export function ProcessView({ detailed }: ProcessViewProps) {
           icon: MonitorPlay,
           onClick: () => {
             addOsdTarget(proc.name);
-            setStatus(`已将 ${proc.name} 加入游戏内覆盖名单`);
+            setStatus(tf(`已将 ${proc.name} 加入游戏内覆盖名单`, `Added ${proc.name} to the in-game overlay list`));
           },
         },
         {
@@ -104,7 +106,7 @@ export function ProcessView({ detailed }: ProcessViewProps) {
             if (!proc.exePath) return;
             void api
               .revealInExplorer(proc.exePath)
-              .then(() => setStatus(`已在资源管理器中定位 ${proc.name}`))
+              .then(() => setStatus(tf(`已在资源管理器中定位 ${proc.name}`, `Located ${proc.name} in File Explorer`)))
               .catch((e: unknown) => setStatus(typeof e === "string" ? e : "打开文件位置失败"));
           },
         },
@@ -115,7 +117,7 @@ export function ProcessView({ detailed }: ProcessViewProps) {
           onClick: () => {
             if (proc.exePath) {
               void navigator.clipboard.writeText(proc.exePath);
-              setStatus(`已复制路径：${proc.exePath}`);
+              setStatus(tf(`已复制路径：${proc.exePath}`, `Copied path: ${proc.exePath}`));
             }
           },
         },
@@ -131,9 +133,9 @@ export function ProcessView({ detailed }: ProcessViewProps) {
     setPendingKill(null);
     try {
       await api.endTask(target.pid);
-      setStatus(`已结束 ${target.name}`);
+      setStatus(tf(`已结束 ${target.name}`, `Ended ${target.name}`));
     } catch {
-      setStatus(`无法结束 ${target.name}（可能是受保护的系统进程）`);
+      setStatus(tf(`无法结束 ${target.name}（可能是受保护的系统进程）`, `Couldn't end ${target.name} (possibly a protected system process)`));
     }
   }
 
@@ -196,8 +198,8 @@ export function ProcessView({ detailed }: ProcessViewProps) {
         }
       >
         <p className="text-[13px] leading-relaxed text-muted">
-          确定要结束 <span className="font-semibold text-ink">{pendingKill?.name}</span>{" "}
-          (PID {pendingKill?.pid}) 吗？未保存的数据将丢失。
+          {tf("确定要结束", "End")} <span className="font-semibold text-ink">{pendingKill?.name}</span>{" "}
+          (PID {pendingKill?.pid}){tf("吗？未保存的数据将丢失。", "? Unsaved data will be lost.")}
         </p>
       </Modal>
       <ContextMenu state={menu} onClose={() => setMenu(null)} />

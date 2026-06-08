@@ -20,6 +20,7 @@ import { TabHeader } from "../components/ui/TabHeader";
 import { useMetricsHistory } from "../hooks/useMetricsHistory";
 import { useSensors } from "../hooks/useSensors";
 import { formatBytes } from "../lib/format";
+import { useTf } from "../lib/i18n";
 import { easeOut } from "../lib/motion";
 import { useUi, type MonitorSub } from "../store/ui";
 
@@ -187,6 +188,7 @@ function FlowReadout({
 }
 
 function LiveDashboard() {
+  const tf = useTf();
   const reduce = useReducedMotion() ?? false;
   const { cpu, memPct, latest } = useMetricsHistory(HISTORY_POINTS);
   const { latest: sensors, gpuHist, powerHist } = useSensors(HISTORY_POINTS);
@@ -225,7 +227,7 @@ function LiveDashboard() {
           value={cpuNow}
           hue={280}
           hist={cpu}
-          caption={coreCount != null ? `${coreCount} 线程 · 占用率` : "占用率"}
+          caption={coreCount != null ? tf(`${coreCount} 线程 · 占用率`, `${coreCount} threads · usage`) : "占用率"}
           readouts={[
             { label: "TEMP", value: fmtNum(cpuTemp, "°C") },
             { label: "POWER", value: fmtNum(cpuPower, "W") },

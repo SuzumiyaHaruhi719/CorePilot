@@ -141,6 +141,7 @@ export const EN: Record<string, string> = {
   "平均 GPU 占用": "Avg GPU usage", "平均 GPU 温度": "Avg GPU temp", "平均 GPU 功耗": "Avg GPU power",
   "平均 GPU 频率": "Avg GPU clock", "平均内存占用": "Avg memory", "平均显存占用": "Avg VRAM",
   "平均帧时间": "Avg frame time", "最高 CPU 温度": "Max CPU temp", "最高 GPU 温度": "Max GPU temp",
+  "核心": "Core", "显存": "VRAM",
   "最低": "Min", "最高": "Max", "平均": "Avg", "功耗": "Power", "温度": "Temp", "频率": "Clock",
   "转速": "RPM", "风扇转速": "Fan RPM", "核心频率": "Core clock", "显存频率偏移": "VRAM clock offset",
   "核心频率偏移": "Core clock offset", "频率偏移": "Clock offset", "逻辑处理器利用率": "Logical CPU usage",
@@ -220,7 +221,9 @@ export const EN: Record<string, string> = {
     "GPU overclocking uses NVIDIA NVML and supports NVIDIA discrete GPUs only. Install the GPU driver and run as admin.",
   "还没有保存的配置。调好参数后点「保存为配置」，即可一键随时切换；开启「启动时自动应用」后，CorePilot 启动会自动套用所选配置。":
     "No saved profiles yet. Tune the settings, then “Save as profile” to switch any time in one click; enable “Apply on startup” to auto-apply the chosen profile when CorePilot launches.",
-  "已应用调优设置": "Tuning applied", "已恢复出厂默认": "Restored factory default",
+  "已应用调优设置": "Tuning applied", "已恢复出厂默认": "Restored factory default", "已应用": "Applied",
+  "功率上限 / 温度目标 / 风扇通过 NVIDIA NVML（钳制在固件安全范围，不会超压损坏）；核心 / 显存频率偏移通过 NVAPI 实现，即 MSI Afterburner 式 +/- MHz 真实超频，会提升 Boost 上限。":
+    "Power limit / temp target / fan use NVIDIA NVML (clamped to firmware-safe limits — no over-volting damage); core / VRAM clock offsets use NVAPI — MSI Afterburner-style +/- MHz real overclocking that raises the Boost ceiling.",
 
   // Optimize page
   "释放内存": "Free memory", "清理缓存": "Clear cache", "清理临时文件": "Clean temp files", "刷新 DNS": "Flush DNS",
@@ -354,7 +357,7 @@ export const EN: Record<string, string> = {
   "无法读取进程列表": "Couldn't read the process list", "无法读取服务列表": "Couldn't read the service list",
   "无法读取启动项": "Couldn't read startup items", "没有匹配的进程": "No matching processes",
   "没有匹配的服务": "No matching services", "没有启动项": "No startup items",
-  "正在读取进程…": "Reading processes…", "正在读取…": "Reading…",
+  "正在读取进程…": "Reading processes…", "正在读取…": "Reading…", "个进程": "processes",
   "运行中": "Running", "已停止": "Stopped", "已暂停": "Paused", "已禁用": "Disabled", "已启用": "Enabled",
   "高": "High", "高于正常": "Above normal", "正常": "Normal", "低于正常": "Below normal", "低": "Low",
   "设置优先级失败（受保护进程）": "Failed to set priority (protected process)",
@@ -375,6 +378,17 @@ export const EN: Record<string, string> = {
   "功耗 / 温度需要传感器组件；若显示 “—”，请确认 sensord 已随程序部署。":
     "Power / temp need the sensor component; if you see “—”, make sure sensord ships with the app.",
 
+  // Static labels / titles / tooltips found in the i18n audit (whole-node matches)
+  "创建分组": "Create group", "已停用 · 点击启用": "Off · click to enable", "进程名": "Process name",
+  "总功耗 (CPU+GPU)": "Total power (CPU+GPU)", "GPU 核心频率": "GPU core clock",
+  "显存控制器占用": "VRAM controller usage", "磁盘读写": "Disk read/write",
+  "↑ 上传": "↑ Upload", "↓ 下载": "↓ Download", "读取": "Read", "写入": "Write",
+  "点击重命名": "Rename", "删除配置": "Delete profile", "移除": "Remove", "未发现进程": "No processes found",
+  "预览 · 默认": "Preview · default", "中文": "Chinese", "游戏": "Games",
+  "将保存当前已开启的调优项，可随时一键应用。": "Saves the currently enabled tuning items so you can apply them any time.",
+  "控制哪些程序会被记录性能报告（独立于 OSD 显示名单）：白名单 = 强制记录（即使未被识别为游戏），黑名单 = 从不记录（即使被识别为游戏）。":
+    "Controls which apps get a performance report recorded (independent of the OSD list): whitelist = force record (even if not detected as a game), blacklist = never record (even if detected as a game).",
+
   // Misc states / units / labels
   "可用": "Available", "不支持": "Unsupported", "通过": "OK", "内置": "Built-in",
   "已用": "Used", "全部": "All", "当前": "Current", "默认": "Default", "停止": "Stop",
@@ -392,6 +406,21 @@ export function translate(zh: string, lang: "zh" | "en"): string {
 export function useT(): (zh: string) => string {
   const lang = useSettings((s) => s.language);
   return (zh: string) => translate(zh, lang);
+}
+
+/**
+ * Bilingual formatter for INTERPOLATED / fragmented strings the DOM walker can't
+ * match (e.g. `已选 ${n}`). `tf(zh, en)` returns the right language; build each
+ * side with its own interpolation so dynamic values slot in naturally.
+ */
+export function useTf(): (zh: string, en: string) => string {
+  const lang = useSettings((s) => s.language);
+  return (zh: string, en: string) => (lang === "en" ? en : zh);
+}
+
+/** Non-reactive bilingual formatter (for use outside React, e.g. in hooks/effects). */
+export function tf(zh: string, en: string): string {
+  return useSettings.getState().language === "en" ? en : zh;
 }
 
 // ── Global runtime translator ──────────────────────────────────────────────

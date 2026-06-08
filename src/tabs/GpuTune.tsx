@@ -23,6 +23,7 @@ import { Slider } from "../components/ui/Slider";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
+import { useT, useTf } from "../lib/i18n";
 import { formatBytes } from "../lib/format";
 import { hoverPop } from "../lib/motion";
 import { api, type GpuOcInfo, type GpuOcSettings } from "../lib/ipc";
@@ -134,6 +135,8 @@ function ControlCard({ icon: Icon, iconClass, title, supported, right, children 
 }
 
 export function GpuTune() {
+  const t = useT();
+  const tf = useTf();
   const pollMs = useSettings((s) => s.pollMs);
   const { profiles, activeId, applyOnStartup, addProfile, updateProfile, deleteProfile, setActive, setApplyOnStartup } =
     useGpuProfiles();
@@ -258,7 +261,7 @@ export function GpuTune() {
     addProfile(name, draftToSettings());
     setNewName("");
     setShowSave(false);
-    setStatus(`已保存配置「${name}」`);
+    setStatus(tf(`已保存配置「${name}」`, `Saved profile “${name}”`));
   }
 
   // Save Current (保存当前): overwrite the active profile's settings in place.
@@ -266,7 +269,7 @@ export function GpuTune() {
     if (!activeId) return;
     updateProfile(activeId, { settings: draftToSettings() });
     const name = profiles.find((p) => p.id === activeId)?.name ?? "当前配置";
-    setStatus(`已保存到「${name}」`);
+    setStatus(tf(`已保存到「${name}」`, `Saved to “${name}”`));
   }
 
   async function loadProfile(p: GpuProfile) {
@@ -278,7 +281,7 @@ export function GpuTune() {
     try {
       await api.gpuOcApply(p.settings);
       setActive(p.id);
-      setStatus(`已应用配置「${p.name}」`);
+      setStatus(tf(`已应用配置「${p.name}」`, `Applied profile “${p.name}”`));
       const fresh = await api.gpuOcInfo();
       setInfo(fresh);
     } catch (e: unknown) {
@@ -561,21 +564,21 @@ export function GpuTune() {
                         <div>
                           <div className="flex items-center gap-1.5">
                             <span className="text-[12.5px] font-medium text-ink">{p.name}</span>
-                            {pending && <span className="hud-label text-[8px] text-dim">应用中…</span>}
-                            {active && <span className="hud-label text-[8px] text-accent-bright glow-text">已应用</span>}
+                            {pending && <span className="hud-label text-[8px] text-dim">{t("应用中…")}</span>}
+                            {active && <span className="hud-label text-[8px] text-accent-bright glow-text">{t("已应用")}</span>}
                           </div>
                           <div className="nums text-[10px] text-dim">
                             {[
                               p.settings.powerLimitW != null && `${Math.round(p.settings.powerLimitW)}W`,
                               p.settings.coreOffsetMhz != null &&
-                                `核心${(p.settings.coreOffsetMhz ?? 0) >= 0 ? "+" : ""}${p.settings.coreOffsetMhz}MHz`,
+                                `${t("核心")}${(p.settings.coreOffsetMhz ?? 0) >= 0 ? "+" : ""}${p.settings.coreOffsetMhz}MHz`,
                               p.settings.memOffsetMhz != null &&
-                                `显存${(p.settings.memOffsetMhz ?? 0) >= 0 ? "+" : ""}${p.settings.memOffsetMhz}MHz`,
-                              p.settings.fanSpeedPct != null && `风扇${p.settings.fanSpeedPct}%`,
+                                `${t("显存")}${(p.settings.memOffsetMhz ?? 0) >= 0 ? "+" : ""}${p.settings.memOffsetMhz}MHz`,
+                              p.settings.fanSpeedPct != null && `${t("风扇")}${p.settings.fanSpeedPct}%`,
                               p.settings.tempLimitC != null && `${p.settings.tempLimitC}°C`,
                             ]
                               .filter(Boolean)
-                              .join(" · ") || "默认"}
+                              .join(" · ") || t("默认")}
                           </div>
                         </div>
                         <span
@@ -586,7 +589,7 @@ export function GpuTune() {
                             setDelProfile(p);
                           }}
                           className="no-drag ml-1 grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition-colors duration-150 hover:bg-danger hover:text-white group-focus-within:opacity-100 group-hover:opacity-100"
-                          aria-label={`删除配置 ${p.name}`}
+                          aria-label={tf(`删除配置 ${p.name}`, `Delete profile ${p.name}`)}
                           title="删除配置"
                         >
                           <Trash2 size={12} />
@@ -603,7 +606,12 @@ export function GpuTune() {
           <div className="flex items-start gap-2 text-[11px] leading-relaxed text-dim">
             <AlertTriangle size={13} className="mt-0.5 shrink-0 text-warn/70" />
             <p>
-              功率上限 / 温度目标 / 风扇通过 NVIDIA <span className="text-muted">NVML</span>（钳制在固件安全范围，不会超压损坏）；核心 / 显存<span className="text-muted">频率偏移</span>通过 <span className="text-muted">NVAPI</span> 实现，即 MSI Afterburner 式 +/- MHz 真实超频，会提升 Boost 上限。<span className="text-warn/90">偏移过高可能花屏或崩溃 —— 请小幅递增测试稳定性，随时「恢复默认」清零。</span>
+              {t(
+                "功率上限 / 温度目标 / 风扇通过 NVIDIA NVML（钳制在固件安全范围，不会超压损坏）；核心 / 显存频率偏移通过 NVAPI 实现，即 MSI Afterburner 式 +/- MHz 真实超频，会提升 Boost 上限。",
+              )}{" "}
+              <span className="text-warn/90">
+                {t("偏移过高可能花屏或崩溃 —— 请小幅递增测试稳定性，随时「恢复默认」清零。")}
+              </span>
             </p>
           </div>
         </div>

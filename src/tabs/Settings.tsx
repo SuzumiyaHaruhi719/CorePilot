@@ -26,7 +26,7 @@ import { Segmented } from "../components/ui/Segmented";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
-import { useT } from "../lib/i18n";
+import { useT, useTf } from "../lib/i18n";
 import { api, type NetCheck, type ProcInfo } from "../lib/ipc";
 import {
   ACCENT_HUE,
@@ -114,6 +114,7 @@ function CheckRow({ check }: { check: NetCheck }) {
 }
 
 function NetworkCard() {
+  const tf = useTf();
   const [diagnosing, setDiagnosing] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [checks, setChecks] = useState<NetCheck[] | null>(null);
@@ -257,7 +258,7 @@ function NetworkCard() {
 
           <div className="mt-3 flex items-center justify-between gap-3">
             <span className="text-[11px] text-dim">
-              已选 {selected.size} 项{selectedNeedsReboot && " · 含需重启的修复"}
+              {tf(`已选 ${selected.size} 项`, `${selected.size} selected`)}{selectedNeedsReboot && " · 含需重启的修复"}
             </span>
             <Button
               variant="primary"
@@ -312,7 +313,7 @@ function NetworkCard() {
         }
       >
         <p className="text-[13px] leading-relaxed text-ink">
-          即将执行以下 {selected.size} 项网络修复：
+          {tf(`即将执行以下 ${selected.size} 项网络修复：`, `About to run these ${selected.size} network fixes:`)}
         </p>
         <ul className="mt-2 space-y-1">
           {REPAIR_OPTIONS.filter((o) => selected.has(o.id)).map((o) => (

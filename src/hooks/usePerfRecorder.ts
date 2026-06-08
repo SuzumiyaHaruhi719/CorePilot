@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { tf } from "../lib/i18n";
 import { api, type PerfSessionEvent } from "../lib/ipc";
 import {
   downsample,
@@ -125,7 +126,7 @@ export function usePerfRecorder(): void {
         samples: downsample(payload.samples),
       };
       usePerfHistory.getState().addSession(session);
-      void notify(`${session.name} 性能报告已生成`);
+      void notify(tf(`${session.name} 性能报告已生成`, `${session.name} performance report generated`));
       if (useSettings.getState().autoShowReport) void surfaceReport(session.id);
     };
 

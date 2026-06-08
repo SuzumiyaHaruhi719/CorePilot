@@ -2,6 +2,7 @@ import { motion } from "motion/react";
 import { Activity, ChevronDown, Cpu, Database, Gauge, Leaf, MonitorPlay, Timer, Zap } from "lucide-react";
 import { useCallback, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { formatBytes } from "../../lib/format";
+import { useTf } from "../../lib/i18n";
 import {
   CO2_KG_PER_KWH,
   gameDisplayName,
@@ -477,6 +478,7 @@ function fmtElapsed(ms: number): string {
 }
 
 export function PerfReport({ session }: { session: PerfSession }) {
+  const tf = useTf();
   const { summary, samples } = session;
   const syncKey = useId();
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -582,7 +584,7 @@ export function PerfReport({ session }: { session: PerfSession }) {
           value={co2.value}
           unit={co2.unit}
           hue={158}
-          sub={`估算值 · ${CO2_KG_PER_KWH} kg CO₂/kWh`}
+          sub={tf(`估算值 · ${CO2_KG_PER_KWH} kg CO₂/kWh`, `Estimate · ${CO2_KG_PER_KWH} kg CO₂/kWh`)}
         />
       </div>
 

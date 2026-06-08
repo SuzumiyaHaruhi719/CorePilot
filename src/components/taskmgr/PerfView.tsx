@@ -5,6 +5,7 @@ import { useMetricsHistory } from "../../hooks/useMetricsHistory";
 import { useSensors } from "../../hooks/useSensors";
 import { cn } from "../../lib/cn";
 import { formatBytes } from "../../lib/format";
+import { useTf } from "../../lib/i18n";
 import { api, type CpuTopology, type GpuOcInfo, type Overview } from "../../lib/ipc";
 import { useSettings, type PerfCard } from "../../store/settings";
 import { CoreGraphs } from "../charts/CoreGraphs";
@@ -68,6 +69,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 export function PerfView() {
+  const tf = useTf();
   const { cpu, memPct, latest } = useMetricsHistory(60);
   const { latest: sensors, gpuHist, diskHist, netUpHist, netDownHist, powerHist } = useSensors(60);
   const [topo, setTopo] = useState<CpuTopology | null>(null);
@@ -321,7 +323,7 @@ export function PerfView() {
           <div className="mb-3 flex items-center gap-2 text-[12.5px] font-semibold text-muted">
             <Cpu size={15} className="text-accent" /> 逻辑处理器利用率
             <span className="nums text-[11px] font-normal text-dim">
-              ({overview ? `${overview.logicalCpus} 线程` : "—"})
+              ({overview ? tf(`${overview.logicalCpus} 线程`, `${overview.logicalCpus} threads`) : "—"})
             </span>
           </div>
           <CoreGraphs perCore={latest?.perCore ?? []} topo={topo} />

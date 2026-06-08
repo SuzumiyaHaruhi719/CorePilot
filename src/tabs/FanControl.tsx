@@ -10,6 +10,7 @@ import { Slider } from "../components/ui/Slider";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
+import { useT, useTf } from "../lib/i18n";
 import { hoverPop } from "../lib/motion";
 import { api, type FanCalibProgress, type FanCalibration, type FanChannel, type FanCurvePoint, type FanInfo, type FanMode, type FanTempSource } from "../lib/ipc";
 import { useSettings } from "../store/settings";
@@ -257,6 +258,8 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
 }
 
 export function FanControl() {
+  const t = useT();
+  const tf = useTf();
   const pollMs = useSettings((s) => s.pollMs);
   const { configs, labels, applyOnStartup, setConfig, setApplyOnStartup, setLabel, profiles, activeProfileId, pendingProfileId, saveProfile, updateActiveProfile, applyProfile, applyPreset, applyCalibration, deleteProfile, lastError, clearError } =
     useFanProfiles();
@@ -522,7 +525,7 @@ export function FanControl() {
                         <span
                           role="button"
                           tabIndex={-1}
-                          aria-label={`删除配置 ${p.name}`}
+                          aria-label={tf(`删除配置 ${p.name}`, `Delete profile ${p.name}`)}
                           onClick={(e) => { e.stopPropagation(); setDelProfile({ id: p.id, name: p.name }); }}
                           className="ml-0.5 grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white group-focus-within:opacity-100 group-hover:opacity-100"
                         >
@@ -550,7 +553,7 @@ export function FanControl() {
                 className="no-drag flex w-full items-start gap-2 overflow-hidden rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-left text-[11.5px] text-danger transition-colors hover:bg-danger/15"
               >
                 <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-                <span className="min-w-0">应用风扇配置失败:{lastError}</span>
+                <span className="min-w-0">{tf(`应用风扇配置失败:${lastError}`, `Failed to apply fan profile: ${lastError}`)}</span>
               </motion.button>
             )}
           </AnimatePresence>
@@ -578,7 +581,7 @@ export function FanControl() {
                   className="no-drag flex cursor-pointer items-center gap-1.5 text-[11px] text-dim transition-colors hover:text-muted"
                 >
                   {showAll ? <EyeOff size={12} /> : <Eye size={12} />}
-                  {showAll ? "仅显示活动" : hiddenCount > 0 ? `显示全部 (+${hiddenCount})` : "显示全部"}
+                  {showAll ? "仅显示活动" : hiddenCount > 0 ? tf(`显示全部 (+${hiddenCount})`, `Show all (+${hiddenCount})`) : "显示全部"}
                 </button>
               )}
               <label className="flex shrink-0 cursor-pointer items-center gap-2 text-[11.5px] text-muted">
@@ -695,8 +698,10 @@ export function FanControl() {
         }
       >
         <p className="text-[13px] leading-relaxed text-muted">
-          将依次把每个可调风扇从 0 拉到 100% 扫描转速（约 {controllableIds.length} 个风扇 × 30 秒），测出每个风扇的
-          <span className="text-ink">起转转速与最高转速</span>，并生成专属曲线（怠速取最低稳定转速、70°C 全速）。
+          {tf(
+            `将依次把每个可调风扇从 0 拉到 100% 扫描转速（约 ${controllableIds.length} 个风扇 × 30 秒），测出每个风扇的起转转速与最高转速，并生成专属曲线（怠速取最低稳定转速、70°C 全速）。`,
+            `Each adjustable fan is swept 0 → 100% to measure RPM (about ${controllableIds.length} fans × 30 s), finding each fan's start and max RPM, then building a tailored curve (idle at the lowest stable speed, full speed at 70°C).`,
+          )}
         </p>
         <p className="mt-2 text-[11.5px] text-dim">
           期间风扇会明显变速、可能有噪音，属正常现象；校准时建议不要运行重负载。完成后自动应用。
@@ -731,7 +736,7 @@ export function FanControl() {
                     <span className="text-dim">未检测到风扇</span>
                   ) : (
                     <span className="nums text-muted">
-                      起转 <span className="text-ink">{Math.round(c.minStartDuty)}%</span> · 最高{" "}
+                      {t("起转")} <span className="text-ink">{Math.round(c.minStartDuty)}%</span> · {t("最高")}{" "}
                       <span className="text-ink">{Math.round(c.maxRpm)}</span> RPM
                     </span>
                   )}

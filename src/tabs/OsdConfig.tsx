@@ -20,6 +20,7 @@ import { Slider } from "../components/ui/Slider";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
+import { useTf } from "../lib/i18n";
 import { api, type GameEntry, type OverlayStatus, type ProcInfo } from "../lib/ipc";
 import {
   OSD_CATEGORIES,
@@ -60,6 +61,7 @@ function cfgOf(s: OsdCfg): OsdCfg {
 }
 
 export function OsdConfig() {
+  const tf = useTf();
   const osd = useOsd();
   const { targets, addTarget, removeTarget, setTargetList, updateTargetConfig } = useOsdTargets();
   const [cat, setCat] = useState<OsdCategory>("cpu");
@@ -393,7 +395,7 @@ export function OsdConfig() {
               )}
             </div>
             <span className="pointer-events-none absolute right-2 top-2 rounded bg-black/40 px-1.5 py-0.5 text-[10px] text-white/60">
-              {editingOverride ? `预览 · ${selectedTarget?.name}` : "预览 · 默认"}
+              {editingOverride ? tf(`预览 · ${selectedTarget?.name}`, `Preview · ${selectedTarget?.name}`) : "预览 · 默认"}
             </span>
             {previewCfg.position === "free" && (
               <span className="pointer-events-none absolute left-2 top-2 rounded bg-accent/25 px-1.5 py-0.5 text-[10px] text-white/85">
@@ -411,7 +413,7 @@ export function OsdConfig() {
           <div className="mb-2 flex items-center gap-2">
             <Gamepad2 size={15} className="text-accent-bright" />
             <span className="text-[13.5px] font-semibold text-ink">已识别的游戏库</span>
-            <span className="text-[11px] text-dim">Steam · Epic · GOG · 共 {gameLibrary.length} 款</span>
+            <span className="text-[11px] text-dim">{tf(`Steam · Epic · GOG · 共 ${gameLibrary.length} 款`, `Steam · Epic · GOG · ${gameLibrary.length} games`)}</span>
           </div>
           <div className="mb-3 text-[11.5px] leading-relaxed text-dim">
             自动扫描各启动器安装目录;运行其中任意一款都会被判定为游戏(无需手动加白名单)。
@@ -547,7 +549,7 @@ export function OsdConfig() {
             <div className="mt-3 rounded-xl border border-accent/30 bg-accent/5 p-3">
               <div className="mb-2 flex items-center justify-between gap-3">
                 <span className="text-[12.5px] font-semibold text-ink">
-                  “{selectedTarget.name}” 的叠加设置
+                  {tf(`“${selectedTarget.name}” 的叠加设置`, `Overlay settings for “${selectedTarget.name}”`)}
                 </span>
                 <button
                   onClick={() => updateTargetConfig(selectedTarget.name, undefined)}
@@ -575,10 +577,10 @@ export function OsdConfig() {
             <div className="flex min-w-0 items-center gap-2">
               <MonitorPlay size={14} className="shrink-0 text-accent-bright" />
               <span className="hud-label truncate text-[10.5px] text-dim">
-                监控内容 · CONTENT{editingOverride ? ` · ${selectedTarget?.name}` : ""}
+                {tf("监控内容 · CONTENT", "CONTENT")}{editingOverride ? ` · ${selectedTarget?.name}` : ""}
               </span>
               <span className="rounded bg-surface2 px-1.5 py-0.5 text-[10px] text-dim">
-                已选 <span className="nums text-muted">{previewCfg.metrics.length}</span>
+                {tf("已选", "Selected")} <span className="nums text-muted">{previewCfg.metrics.length}</span>
               </span>
             </div>
             <button

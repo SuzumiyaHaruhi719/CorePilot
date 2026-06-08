@@ -91,6 +91,10 @@ const hist = {
   cpu: ring(), memPct: ring(), gpu: ring(), disk: ring(),
   net: ring(), netUp: ring(), netDown: ring(), power: ring(),
 };
+// Per-core (logical CPU) history is a 2D ring [coreCount][HISTORY_N], lazily
+// sized to the first reading's core count so the Monitor / Task Manager per-core
+// graphs also open already-full when background recording is on.
+let perCoreHist: number[][] = [];
 let recording = false;
 const pushRing = (arr: number[], v: number) => {
   arr.shift();
@@ -112,7 +116,12 @@ export const historySnapshot = {
   netUp: () => hist.netUp.slice(),
   netDown: () => hist.netDown.slice(),
   power: () => hist.power.slice(),
+  /** Deep copy of the per-core rings ([coreCount][HISTORY_N]); empty until first sample. */
+  perCore: () => perCoreHist.map((a) => a.slice()),
 };
+
+/** Background-recorded history length (per-core rings + scalar rings share it). */
+export const HISTORY_LEN = HISTORY_N;
 
 /**
  * App-level recorder. While `settings.bgRecord` is on, subscribe to the shared
@@ -132,6 +141,13 @@ export function useLiveHistoryRecorder(): void {
       if (!m) return;
       pushRing(hist.cpu, m.cpuOverall);
       pushRing(hist.memPct, m.memTotal ? (m.memUsed / m.memTotal) * 100 : 0);
+      const pc = m.perCore ?? [];
+      if (pc.length > 0) {
+        if (perCoreHist.length !== pc.length) {
+          perCoreHist = Array.from({ length: pc.length }, () => new Array(HISTORY_N).fill(0));
+        }
+        for (let i = 0; i < pc.length; i += 1) pushRing(perCoreHist[i], pc[i]);
+      }
     };
     const onS = () => {
       const s = sensorsPoller.getSnapshot();

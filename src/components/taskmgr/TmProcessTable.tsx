@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { useMemo, useState, type MouseEvent } from "react";
 import { cn } from "../../lib/cn";
 import { formatBytes } from "../../lib/format";
+import { useTf } from "../../lib/i18n";
 import type { ProcInfo } from "../../lib/ipc";
 import { easeOut } from "../../lib/motion";
 import type { SortKey } from "../cores/ProcessTable";
@@ -292,6 +293,7 @@ function ChildRow({ p, cols, detailed, onEndTask, onRowContextMenu }: RowProps &
 }
 
 function EndTaskButton({ onClick, name }: { onClick: () => void; name: string }) {
+  const tf = useTf();
   return (
     <button
       onClick={(e) => {
@@ -299,7 +301,7 @@ function EndTaskButton({ onClick, name }: { onClick: () => void; name: string })
         onClick();
       }}
       title="结束任务"
-      aria-label={`结束任务 ${name}`}
+      aria-label={tf(`结束任务 ${name}`, `End task ${name}`)}
       className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
     >
       <X size={13} />

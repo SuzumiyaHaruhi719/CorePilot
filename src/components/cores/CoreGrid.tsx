@@ -1,5 +1,6 @@
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
+import { useTf } from "../../lib/i18n";
 import { clusterName, clusterTag, clusterTone, maskFromIds, maskHas, toggleBit } from "../../lib/cpu";
 import type { CpuTopology } from "../../lib/ipc";
 
@@ -32,6 +33,7 @@ const TONE = {
 } as const;
 
 export function CoreGrid({ topo, mask, onChange }: CoreGridProps) {
+  const tf = useTf();
   const allMask = maskFromIds(topo.logical.map((l) => l.id));
   const vcache = topo.ccds.find((c) => c.isVcache);
   const multiCluster = topo.ccds.length > 1;
@@ -42,7 +44,7 @@ export function CoreGrid({ topo, mask, onChange }: CoreGridProps) {
       <div className="flex items-center justify-between">
         <span className="hud-label text-[10px] text-dim">CORE MAP · 核心映射</span>
         <span className="nums text-[11px] text-muted">
-          <span className="text-accent">{selectedCount}</span> / {topo.logical.length} 已选
+          <span className="text-accent">{selectedCount}</span> / {topo.logical.length} {tf("已选", "selected")}
         </span>
       </div>
       {topo.ccds.map((ccd) => {

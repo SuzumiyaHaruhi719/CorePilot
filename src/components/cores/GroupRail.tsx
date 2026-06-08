@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "motion/react";
 import type { CSSProperties } from "react";
 import { cn } from "../../lib/cn";
 import { groupColor } from "../../lib/colors";
+import { useTf } from "../../lib/i18n";
 import { maskToCpuList } from "../../lib/format";
 import { hoverPop } from "../../lib/motion";
 import type { ProcInfo } from "../../lib/ipc";
@@ -36,6 +37,7 @@ export function GroupRail({
   onExport,
   onImport,
 }: GroupRailProps) {
+  const tf = useTf();
   const groups = useGroups((s) => s.groups);
   const selectedId = useGroups((s) => s.selectedId);
   const select = useGroups((s) => s.select);
@@ -121,7 +123,7 @@ export function GroupRail({
                 </div>
                 <span
                   className="nums shrink-0 text-[11px] text-muted"
-                  title={`${active} / ${group.patterns.length} 个规则有进程正在运行`}
+                  title={tf(`${active} / ${group.patterns.length} 个规则有进程正在运行`, `${active} / ${group.patterns.length} rules have running processes`)}
                 >
                   <span className={active > 0 ? "text-ink" : ""}>{active}</span> / {group.patterns.length}
                 </span>
@@ -138,7 +140,7 @@ export function GroupRail({
           <div className="mx-1 mt-2 rounded-xl border border-dashed border-line px-3 py-8 text-center text-[12px] leading-relaxed text-dim">
             还没有分组
             <br />
-            点击右上角 <Plus size={11} className="inline -translate-y-px" /> 创建
+            {tf("点击右上角", "Click the")} <Plus size={11} className="inline -translate-y-px" /> {tf("创建", "to create")}
           </div>
         )}
       </div>

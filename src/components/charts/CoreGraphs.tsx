@@ -2,9 +2,22 @@ import { useEffect, useState } from "react";
 import { cn } from "../../lib/cn";
 import { clusterName, clusterTag } from "../../lib/cpu";
 import type { CpuTopology } from "../../lib/ipc";
+import { historySnapshot, isRecording } from "../../hooks/useSharedTelemetry";
 import { Sparkline } from "./Sparkline";
 
 const POINTS = 40;
+
+/** Seed the per-core buffers from background-recorded history (last POINTS of
+ *  each core's ring) when background recording is on, so graphs open full. */
+function seedPerCore(): number[][] {
+  if (!isRecording()) return [];
+  const snap = historySnapshot.perCore();
+  if (snap.length === 0) return [];
+  return snap.map((buf) => {
+    const tail = buf.slice(-POINTS);
+    return tail.length < POINTS ? [...new Array(POINTS - tail.length).fill(0), ...tail] : tail;
+  });
+}
 
 interface CoreGraphsProps {
   perCore: number[];
@@ -27,7 +40,7 @@ function MiniGraph({ id, value, hist, vcache }: { id: number; value: number; his
 
 export function CoreGraphs({ perCore, topo }: CoreGraphsProps) {
   const n = perCore.length || topo?.logicalCount || 0;
-  const [hist, setHist] = useState<number[][]>([]);
+  const [hist, setHist] = useState<number[][]>(seedPerCore);
 
   useEffect(() => {
     if (n === 0) return;

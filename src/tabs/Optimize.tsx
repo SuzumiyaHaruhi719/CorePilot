@@ -8,6 +8,7 @@ import { TabHeader } from "../components/ui/TabHeader";
 import { hoverPop } from "../lib/motion";
 import { cn } from "../lib/cn";
 import { formatBytes } from "../lib/format";
+import { useTf } from "../lib/i18n";
 import { api, type MemDetail } from "../lib/ipc";
 import { Tuning } from "./Tuning";
 
@@ -97,6 +98,7 @@ function ActionCard({ icon: Icon, title, desc, hue, onRun }: ActionCardProps) {
 }
 
 export function Optimize() {
+  const tf = useTf();
   const [view, setView] = useState<"quick" | "deep">("quick");
   const [mem, setMem] = useState<MemDetail | null>(null);
   const [heroBusy, setHeroBusy] = useState(false);
@@ -132,7 +134,7 @@ export function Optimize() {
     const after = await api.getMemoryDetail();
     setMem(after);
     const freed = after.avail - before.avail;
-    return freed > 0 ? `释放了 ${formatBytes(freed)}` : "已释放工作集";
+    return freed > 0 ? tf(`释放了 ${formatBytes(freed)}`, `Freed ${formatBytes(freed)}`) : "已释放工作集";
   }
 
   async function runPurge(): Promise<string> {
@@ -142,12 +144,12 @@ export function Optimize() {
     const after = await api.getMemoryDetail();
     setMem(after);
     const freed = after.avail - before.avail;
-    return freed > 0 ? `释放了 ${formatBytes(freed)} 缓存` : "已清理 standby 缓存";
+    return freed > 0 ? tf(`释放了 ${formatBytes(freed)} 缓存`, `Freed ${formatBytes(freed)} cache`) : "已清理 standby 缓存";
   }
 
   async function runClean(): Promise<string> {
     const result = await api.cleanTemp();
-    return `清理 ${result.files} 个文件 · ${formatBytes(result.bytes)}`;
+    return tf(`清理 ${result.files} 个文件 · ${formatBytes(result.bytes)}`, `Cleaned ${result.files} files · ${formatBytes(result.bytes)}`);
   }
 
   async function runDns(): Promise<string> {
@@ -183,7 +185,7 @@ export function Optimize() {
       const after = await api.getMemoryDetail();
       setMem(after);
       const freed = Math.max(0, after.avail - before.avail);
-      setHeroResult(`释放 ${formatBytes(freed)} 内存 · 清理 ${files} 个临时文件`);
+      setHeroResult(tf(`释放 ${formatBytes(freed)} 内存 · 清理 ${files} 个临时文件`, `Freed ${formatBytes(freed)} memory · cleaned ${files} temp files`));
     } catch (error: unknown) {
       setHeroResult(getErrorMessage(error));
     } finally {
