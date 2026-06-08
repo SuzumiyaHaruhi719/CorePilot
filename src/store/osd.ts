@@ -29,6 +29,10 @@ export interface OsdConfig {
   /** In-game (injection) overlay master switch. Persisted so it survives tab
    *  switches; the attach/detach loop runs from the OSD config panel. */
   inject: boolean;
+  /** AUTO inject mode: backend keeps the overlay DLL resident in the foreground
+   *  game and shows the OSD only while that game is the active window (hidden on
+   *  alt-tab, ejected on exit). Mutually exclusive with `inject` — auto wins. */
+  autoInject: boolean;
   /** Enabled metric keys (see OSD_METRICS), in display order. */
   metrics: string[];
 }
@@ -79,6 +83,7 @@ export const useOsd = create<OsdStore>()(
       oledShift: false,
       desktopMode: false,
       inject: false,
+      autoInject: false,
       metrics: DEFAULT_METRICS,
       setEnabled: (enabled) => set({ enabled }),
       update: (patch) => set(patch),

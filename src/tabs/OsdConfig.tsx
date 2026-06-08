@@ -54,6 +54,7 @@ function cfgOf(s: OsdCfg): OsdCfg {
     oledShift: s.oledShift,
     desktopMode: s.desktopMode,
     inject: s.inject,
+    autoInject: s.autoInject,
     metrics: s.metrics,
   };
 }
@@ -301,12 +302,9 @@ export function OsdConfig() {
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
               <div className="flex items-center gap-2">
-                <div className="text-[14px] font-semibold text-ink">启用游戏内叠加</div>
-                <span className="hidden items-center gap-1 rounded border border-line bg-surface2 px-1.5 py-0.5 text-[10px] text-dim sm:inline-flex">
-                  <span className="hud-label">总开关</span>
-                </span>
+                <div className="text-[14px] font-semibold text-ink">窗口式叠加（桌面检测）</div>
               </div>
-              <div className="text-[12px] text-dim">关闭后所有游戏均不显示叠加层</div>
+              <div className="text-[12px] text-dim">检测到游戏自动在前台显示叠加，切到后台自动隐藏；无边框 / 窗口化适用，不注入、最安全</div>
             </div>
             <Toggle checked={osd.enabled} onChange={setEnabled} />
           </div>

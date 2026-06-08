@@ -9,6 +9,7 @@ import { useAffinityEnforcer } from "./hooks/useAffinityEnforcer";
 import { useOsdHotkey } from "./hooks/useOsdHotkey";
 import { usePerfRecorder } from "./hooks/usePerfRecorder";
 import { useOverlayInjection } from "./hooks/useOverlayInjection";
+import { useLiveHistoryRecorder } from "./hooks/useSharedTelemetry";
 import { useUi, type TabId } from "./store/ui";
 import { CoreAssignment } from "./tabs/CoreAssignment";
 import { FanControl } from "./tabs/FanControl";
@@ -48,6 +49,7 @@ function App() {
   useOsdHotkey();
   usePerfRecorder();
   useOverlayInjection();
+  useLiveHistoryRecorder();
 
   useEffect(() => {
     api.getOverview().then(setOverview).catch(() => undefined);

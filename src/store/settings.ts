@@ -31,6 +31,9 @@ interface SettingsState {
   closeToTray: boolean;
   /** Auto-record a performance session per detected game (Monitor → 历史). */
   perfRecording: boolean;
+  /** Keep CPU/GPU/mem/disk/net charts recording in the BACKGROUND (even when Task
+   *  Manager is closed) so they open already full instead of flat. */
+  bgRecord: boolean;
   /** When a game exits, bring CorePilot to the front and open its report. */
   autoShowReport: boolean;
   /** Send a Windows notification when a game is detected / its report is saved. */
@@ -55,6 +58,7 @@ export const useSettings = create<SettingsState>()(
       perfCards: { cpu: true, mem: true, gpu: true, disk: true, net: true, power: true },
       closeToTray: true,
       perfRecording: true,
+      bgRecord: false,
       autoShowReport: true,
       gameNotify: true,
       update: (patch) => set(patch),

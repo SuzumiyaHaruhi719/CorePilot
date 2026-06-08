@@ -54,7 +54,7 @@ function getErrorMessage(e: unknown): string {
   return "操作失败";
 }
 
-export function Tuning() {
+export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
   const { applied, snapshots, setApplied, setSnapshot } = useTweaks();
   const [busyId, setBusyId] = useState<string | null>(null);
   // Optimistic per-row state so a toggle flips (and its spring plays) the instant
@@ -171,11 +171,13 @@ export function Tuning() {
 
   return (
     <>
-      <TabHeader
-        icon={Wrench}
-        title="深度优化"
-        subtitle="可逆的系统性能优化 —— 安全区随便开,危险区谨慎用。每项都可一键还原为系统默认。"
-      />
+      {!embedded && (
+        <TabHeader
+          icon={Wrench}
+          title="深度优化"
+          subtitle="可逆的系统性能优化 —— 安全区随便开,危险区谨慎用。每项都可一键还原为系统默认。"
+        />
+      )}
 
       <div className="min-h-0 flex-1 space-y-4 overflow-auto px-6 pb-6">
         {/* Action bar */}

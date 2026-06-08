@@ -78,3 +78,77 @@ export function useSharedMetrics(): Metrics | null {
   useEffect(() => metricsPoller.setInterval(pollMs), [pollMs]);
   return useSyncExternalStore(metricsPoller.subscribe, metricsPoller.getSnapshot);
 }
+
+// --- background-recorded rolling history -----------------------------------------
+// When `settings.bgRecord` is on, an app-level recorder keeps these module-level
+// rings filling continuously — even while Task Manager / Monitor are closed — so
+// their charts open already full instead of flat-then-filling.
+
+/** History length (matches the charts' point count, default 60). */
+const HISTORY_N = 60;
+const ring = () => new Array<number>(HISTORY_N).fill(0);
+const hist = {
+  cpu: ring(), memPct: ring(), gpu: ring(), disk: ring(),
+  net: ring(), netUp: ring(), netDown: ring(), power: ring(),
+};
+let recording = false;
+const pushRing = (arr: number[], v: number) => {
+  arr.shift();
+  arr.push(Number.isFinite(v) ? v : 0);
+};
+
+/** True while background recording is active (charts seed from history on mount). */
+export function isRecording(): boolean {
+  return recording;
+}
+
+/** Copies of the current history rings, for seeding a chart's buffer on mount. */
+export const historySnapshot = {
+  cpu: () => hist.cpu.slice(),
+  memPct: () => hist.memPct.slice(),
+  gpu: () => hist.gpu.slice(),
+  disk: () => hist.disk.slice(),
+  net: () => hist.net.slice(),
+  netUp: () => hist.netUp.slice(),
+  netDown: () => hist.netDown.slice(),
+  power: () => hist.power.slice(),
+};
+
+/**
+ * App-level recorder. While `settings.bgRecord` is on, subscribe to the shared
+ * metrics + sensors pollers (which also keeps them running) and append every
+ * reading to the module-level rings. Mount once in <App>.
+ */
+export function useLiveHistoryRecorder(): void {
+  const bgRecord = useSettings((s) => s.bgRecord);
+  useEffect(() => {
+    if (!bgRecord) {
+      recording = false;
+      return;
+    }
+    recording = true;
+    const onM = () => {
+      const m = metricsPoller.getSnapshot();
+      if (!m) return;
+      pushRing(hist.cpu, m.cpuOverall);
+      pushRing(hist.memPct, m.memTotal ? (m.memUsed / m.memTotal) * 100 : 0);
+    };
+    const onS = () => {
+      const s = sensorsPoller.getSnapshot();
+      if (!s) return;
+      pushRing(hist.gpu, s.gpuPct ?? 0);
+      pushRing(hist.disk, (s.diskRead ?? 0) + (s.diskWrite ?? 0));
+      pushRing(hist.net, (s.netUp ?? 0) + (s.netDown ?? 0));
+      pushRing(hist.netUp, s.netUp ?? 0);
+      pushRing(hist.netDown, s.netDown ?? 0);
+      pushRing(hist.power, (s.cpuPower ?? 0) + (s.gpuPower ?? 0));
+    };
+    const unM = metricsPoller.subscribe(onM);
+    const unS = sensorsPoller.subscribe(onS);
+    return () => {
+      unM();
+      unS();
+      recording = false;
+    };
+  }, [bgRecord]);
+}

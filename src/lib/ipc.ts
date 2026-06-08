@@ -398,6 +398,10 @@ export const api = {
   overlayDetach: (pid: number) => invoke<void>("overlay_detach", { pid }),
   /** Overlay status for `pid`, or the foreground game when omitted. */
   overlayStatus: (pid?: number) => invoke<OverlayStatus>("overlay_status", { pid: pid ?? null }),
+  /** AUTO mode: backend auto-injects the foreground game (resident) and shows the
+   *  OSD only while it's the active window (hidden on alt-tab, ejected on exit). */
+  overlaySetAuto: (enable: boolean, layoutFlags?: number) =>
+    invoke<void>("overlay_set_auto", { enable, layoutFlags }),
   /**
    * Push perf-recorder config to the backend recorder thread (which does the
    * actual sampling). Called on mount and whenever the relevant stores change.

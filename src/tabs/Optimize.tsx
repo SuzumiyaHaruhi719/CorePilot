@@ -9,6 +9,7 @@ import { hoverPop } from "../lib/motion";
 import { cn } from "../lib/cn";
 import { formatBytes } from "../lib/format";
 import { api, type MemDetail } from "../lib/ipc";
+import { Tuning } from "./Tuning";
 
 function getErrorMessage(error: unknown): string {
   if (typeof error === "string") return error;
@@ -96,6 +97,7 @@ function ActionCard({ icon: Icon, title, desc, hue, onRun }: ActionCardProps) {
 }
 
 export function Optimize() {
+  const [view, setView] = useState<"quick" | "deep">("quick");
   const [mem, setMem] = useState<MemDetail | null>(null);
   const [heroBusy, setHeroBusy] = useState(false);
   const [heroResult, setHeroResult] = useState<string | null>(null);
@@ -193,8 +195,31 @@ export function Optimize() {
 
   return (
     <>
-      <TabHeader icon={Zap} title="优化" subtitle="释放内存、清理缓存 — 一键提升游戏性能" />
-      <div className="min-h-0 flex-1 space-y-5 overflow-auto px-6 pb-6">
+      <TabHeader icon={Zap} title="优化" subtitle="释放内存、清理缓存、深度调优 — 一键提升游戏性能" />
+      <div className="px-6 pb-3 pt-1">
+        <Segmented
+          id="opt-view"
+          value={view}
+          onChange={(v) => setView(v as "quick" | "deep")}
+          options={[
+            { value: "quick", label: "快速优化" },
+            { value: "deep", label: "深度优化" },
+          ]}
+        />
+      </div>
+      <AnimatePresence mode="wait" initial={false}>
+        <motion.div
+          key={view}
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -4 }}
+          transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+          className="flex min-h-0 flex-1 flex-col"
+        >
+          {view === "deep" ? (
+            <Tuning embedded />
+          ) : (
+            <div className="min-h-0 flex-1 space-y-5 overflow-auto px-6 pb-6">
         {/* Memory panel */}
         <div className="hud-frame glass hairline rounded-2xl p-4">
           <div className="mb-3 flex items-center justify-between">
@@ -322,7 +347,10 @@ export function Optimize() {
         <p className={cn("text-[11px] leading-relaxed text-dim")}>
           提示：释放内存/清理缓存会让被回收的内容在下次访问时重新加载，建议在游戏前或内存占用偏高时使用。所有操作均安全可逆（缓存会自然重建）。
         </p>
-      </div>
+          </div>
+          )}
+        </motion.div>
+      </AnimatePresence>
     </>
   );
 }

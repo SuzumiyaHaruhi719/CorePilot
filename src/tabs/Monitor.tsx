@@ -3,7 +3,6 @@ import {
   ArrowDown,
   ArrowUp,
   Cpu,
-  Gamepad2,
   Gauge,
   HardDrive,
   MemoryStick,
@@ -266,30 +265,6 @@ function LiveDashboard() {
           reduce={reduce}
         />
       </div>
-
-      {/* In-game FPS plate (honest: PresentMon overlay component pending) */}
-      <motion.div
-        initial={reduce ? false : { opacity: 0, y: 12 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3, delay: 0.15, ease: easeOut }}
-        className="hud-frame glass hairline flex items-center justify-between rounded-2xl p-4"
-      >
-        <div className="flex items-center gap-3">
-          <span className="grid h-11 w-11 place-items-center rounded-xl bg-accent/15 text-accent">
-            <Gamepad2 size={21} />
-          </span>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="hud-label text-[11px] text-ink">游戏帧率 · FPS</span>
-              <span className="nums rounded-md bg-surface3 px-1.5 py-0.5 text-[8.5px] text-dim">待机</span>
-            </div>
-            <div className="mt-0.5 text-[11.5px] text-dim">
-              启动游戏后自动检测 · 游戏内 FPS / 帧时间叠加 (PresentMon) 即将上线
-            </div>
-          </div>
-        </div>
-        <div className="nums text-[34px] font-bold leading-none text-dim">—</div>
-      </motion.div>
 
       {/* Section: I/O + power */}
       <div className="flex items-center gap-2 pl-0.5">

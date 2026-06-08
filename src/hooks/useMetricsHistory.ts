@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { type Metrics } from "../lib/ipc";
-import { useSharedMetrics } from "./useSharedTelemetry";
+import { historySnapshot, isRecording, useSharedMetrics } from "./useSharedTelemetry";
 
 interface MetricsHistory {
   cpu: number[];
@@ -11,8 +11,9 @@ interface MetricsHistory {
 /** Rolling history buffers for charts, fed by the shared metrics poller (so the
  *  app keeps a single `get_metrics` interval regardless of how many views use it). */
 export function useMetricsHistory(points = 60): MetricsHistory {
-  const [cpu, setCpu] = useState<number[]>(() => new Array(points).fill(0));
-  const [memPct, setMemPct] = useState<number[]>(() => new Array(points).fill(0));
+  // Seed from background-recorded history when it's on, so charts open full.
+  const [cpu, setCpu] = useState<number[]>(() => (isRecording() ? historySnapshot.cpu() : new Array(points).fill(0)));
+  const [memPct, setMemPct] = useState<number[]>(() => (isRecording() ? historySnapshot.memPct() : new Array(points).fill(0)));
   const latest = useSharedMetrics();
 
   useEffect(() => {

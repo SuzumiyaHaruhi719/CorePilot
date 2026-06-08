@@ -121,6 +121,7 @@ export function OsdOverlay() {
       oledShift: global.oledShift,
       desktopMode: global.desktopMode,
       inject: global.inject,
+      autoInject: global.autoInject,
       metrics: global.metrics,
     },
     targets,

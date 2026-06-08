@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { type Sensors } from "../lib/ipc";
-import { useSharedSensors } from "./useSharedTelemetry";
+import { historySnapshot, isRecording, useSharedSensors } from "./useSharedTelemetry";
 
 /** Rolling sensor history for the perf views, fed by the shared sensors poller
  *  (one `get_sensors` interval app-wide instead of one per consuming view).
@@ -19,12 +19,15 @@ export function useSensors(points = 60): {
   powerHist: number[];
 } {
   const latest = useSharedSensors();
-  const [gpuHist, setGpuHist] = useState<number[]>(() => new Array(points).fill(0));
-  const [diskHist, setDiskHist] = useState<number[]>(() => new Array(points).fill(0));
-  const [netHist, setNetHist] = useState<number[]>(() => new Array(points).fill(0));
-  const [netUpHist, setNetUpHist] = useState<number[]>(() => new Array(points).fill(0));
-  const [netDownHist, setNetDownHist] = useState<number[]>(() => new Array(points).fill(0));
-  const [powerHist, setPowerHist] = useState<number[]>(() => new Array(points).fill(0));
+  // Seed from background-recorded history when it's on, so charts open full.
+  const rec = isRecording();
+  const seed = (snap: () => number[]) => (rec ? snap() : new Array(points).fill(0));
+  const [gpuHist, setGpuHist] = useState<number[]>(() => seed(historySnapshot.gpu));
+  const [diskHist, setDiskHist] = useState<number[]>(() => seed(historySnapshot.disk));
+  const [netHist, setNetHist] = useState<number[]>(() => seed(historySnapshot.net));
+  const [netUpHist, setNetUpHist] = useState<number[]>(() => seed(historySnapshot.netUp));
+  const [netDownHist, setNetDownHist] = useState<number[]>(() => seed(historySnapshot.netDown));
+  const [powerHist, setPowerHist] = useState<number[]>(() => seed(historySnapshot.power));
 
   useEffect(() => {
     if (!latest) return;

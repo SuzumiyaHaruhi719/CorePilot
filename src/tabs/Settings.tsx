@@ -608,6 +608,13 @@ export function Settings() {
             />
           </SettingRow>
 
+          <SettingRow title="后台记录性能曲线" desc="关闭任务管理器后仍在后台记录 CPU / GPU / 内存 / 磁盘 / 网络，下次打开图表即为完整曲线（会略增空闲占用）">
+            <Toggle
+              checked={settings.bgRecord}
+              onChange={(value) => settings.update({ bgRecord: value })}
+            />
+          </SettingRow>
+
           <SettingRow
             title="关闭后保留到托盘"
             desc="关闭窗口时收起到系统托盘，后台继续运行（亲和性 / 超频 / OSD）；右键托盘图标可退出"
