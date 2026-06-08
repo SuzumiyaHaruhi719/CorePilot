@@ -55,6 +55,10 @@ static LAST: Lazy<Mutex<HashMap<String, (String, i32)>>> = Lazy::new(|| Mutex::n
 
 static ENGINE_STARTED: AtomicBool = AtomicBool::new(false);
 
+/// True while an AI calibration sweep is running; pauses the engine so it does
+/// not fight the sweep's manual duty writes.
+static CALIBRATING: AtomicBool = AtomicBool::new(false);
+
 // --- shapes sent to / received from the frontend -------------------------------
 
 /// One controllable fan header: its control plus the best-matched RPM reading.
@@ -279,6 +283,10 @@ fn interp(curve: &[CurvePoint], temp: f32) -> f32 {
 
 /// One pass: turn each configured fan's mode into a sidecar command.
 fn apply_once() {
+    // An AI calibration sweep is driving the fans directly — don't fight it.
+    if CALIBRATING.load(Ordering::SeqCst) {
+        return;
+    }
     let cfgs = FAN_CONFIG.lock().clone();
     if cfgs.is_empty() {
         return;
@@ -536,4 +544,193 @@ pub fn fan_set_config(configs: Vec<FanChannelConfig>) -> crate::error::CoreResul
     *FAN_CONFIG.lock() = validated;
     apply_once();
     Ok(())
+}
+
+// --- AI calibration (per-fan PWM↔RPM sweep) ------------------------------------
+//
+// The CorePilot equivalent of FanXpert's "AI Tuning": for each controllable
+// header, step the PWM duty across its range, let the fan settle, and record the
+// resulting RPM. From that we derive the lowest duty the fan reliably spins at
+// (its quietest stable speed), its max RPM, and the duty beyond which RPM no
+// longer climbs — enough for the UI to build a no-stall curve tailored per fan.
+// Implementation is our own (no third-party fan-control code).
+
+/// One measured (duty %, RPM) sample from a calibration sweep.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibPoint {
+    pub duty: f32,
+    pub rpm: f32,
+}
+
+/// The result of calibrating one fan header.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FanCalibration {
+    pub control_id: String,
+    pub name: String,
+    /// Lowest duty at which the fan reliably spins (its quietest stable speed).
+    pub min_start_duty: f32,
+    pub max_rpm: f32,
+    /// Lowest duty whose RPM already reaches ~97% of max (higher is wasted noise).
+    pub saturation_duty: f32,
+    pub points: Vec<CalibPoint>,
+    /// True when the header never produced any RPM (no fan, or RPM not wired).
+    pub disconnected: bool,
+}
+
+/// Progress event payload, emitted as `fan-calib-progress` after every step.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CalibProgress {
+    control_id: String,
+    name: String,
+    fan_index: usize,
+    fan_total: usize,
+    duty: f32,
+    rpm: Option<f32>,
+}
+
+/// RPM currently paired to `control_id` in the latest snapshot (same chip prefix
+/// + channel index as [`build_state`]). `None` if unread / unpaired.
+fn paired_rpm(control_id: &str) -> Option<f32> {
+    let raw = SNAP.lock();
+    let (cprefix, cidx) = split_id(control_id, "/control/")?;
+    raw.fans.iter().find_map(|(fid, _, frpm)| match split_id(fid, "/fan/") {
+        Some((fprefix, fidx)) if fprefix == cprefix && fidx == cidx => *frpm,
+        _ => None,
+    })
+}
+
+/// Human name of a control id from the latest snapshot (falls back to the id).
+fn control_name(control_id: &str) -> String {
+    SNAP.lock()
+        .controls
+        .iter()
+        .find(|(id, _, _, _, _)| id == control_id)
+        .map(|(_, name, _, _, _)| name.clone())
+        .unwrap_or_else(|| control_id.to_string())
+}
+
+/// Duty steps for the sweep — denser at the low end, where start/stop lives.
+const CALIB_STEPS: [f32; 13] =
+    [0.0, 8.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0];
+/// Settle time per step before reading RPM (≈2 sidecar samples at ~1 Hz).
+const CALIB_SETTLE_MS: u64 = 2500;
+/// RPM at or below this is treated as "not spinning".
+const CALIB_MIN_RPM: f32 = 150.0;
+
+/// Sweep one header and derive its calibration. Hands the header back to the
+/// BIOS at the end so it is never left pinned by the sweep.
+fn calibrate_one(
+    app: &tauri::AppHandle,
+    control_id: &str,
+    idx: usize,
+    total: usize,
+) -> FanCalibration {
+    use tauri::Emitter;
+    let name = control_name(control_id);
+    let mut points: Vec<CalibPoint> = Vec::new();
+
+    for &duty in CALIB_STEPS.iter() {
+        send_set(control_id, duty);
+        std::thread::sleep(Duration::from_millis(CALIB_SETTLE_MS));
+        let rpm = paired_rpm(control_id);
+        let _ = app.emit(
+            "fan-calib-progress",
+            CalibProgress {
+                control_id: control_id.to_string(),
+                name: name.clone(),
+                fan_index: idx,
+                fan_total: total,
+                duty,
+                rpm,
+            },
+        );
+        if let Some(r) = rpm {
+            points.push(CalibPoint { duty, rpm: r.max(0.0) });
+        }
+    }
+    send_auto(control_id);
+
+    let max_rpm = points.iter().map(|p| p.rpm).fold(0.0_f32, f32::max);
+    let disconnected = max_rpm < CALIB_MIN_RPM;
+    let min_start_duty = points
+        .iter()
+        .find(|p| p.rpm >= CALIB_MIN_RPM)
+        .map(|p| p.duty)
+        .unwrap_or(0.0);
+    let sat_threshold = max_rpm * 0.97;
+    let saturation_duty = points
+        .iter()
+        .find(|p| max_rpm > 0.0 && p.rpm >= sat_threshold)
+        .map(|p| p.duty)
+        .unwrap_or(100.0);
+
+    FanCalibration {
+        control_id: control_id.to_string(),
+        name,
+        min_start_duty,
+        max_rpm,
+        saturation_duty,
+        points,
+        disconnected,
+    }
+}
+
+/// Run an AI calibration sweep over the given controllable headers (or all of
+/// them when the list is empty). Pauses the engine for the duration, steps each
+/// fan's PWM across [`CALIB_STEPS`], and returns the per-fan calibration. Emits a
+/// `fan-calib-progress` event after every step so the UI can show live progress.
+#[tauri::command]
+pub async fn fan_calibrate(
+    app: tauri::AppHandle,
+    control_ids: Vec<String>,
+) -> crate::error::CoreResult<Vec<FanCalibration>> {
+    crate::sensors::ensure_sidecar();
+
+    let controllable = controllable_ids();
+    let mut targets: Vec<String> = if control_ids.is_empty() {
+        controllable.iter().cloned().collect()
+    } else {
+        control_ids
+            .into_iter()
+            .filter(|id| is_valid_control_id(id) && controllable.contains(id))
+            .collect()
+    };
+    targets.sort();
+    if targets.is_empty() {
+        return Err(crate::error::CoreError::from(
+            "no controllable fan headers to calibrate".to_string(),
+        ));
+    }
+    // Only one sweep at a time — it takes exclusive manual control of the fans.
+    if CALIBRATING.swap(true, Ordering::SeqCst) {
+        return Err(crate::error::CoreError::from(
+            "a fan calibration is already running".to_string(),
+        ));
+    }
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let total = targets.len();
+        let mut out = Vec::with_capacity(total);
+        for (i, id) in targets.iter().enumerate() {
+            out.push(calibrate_one(&app, id, i, total));
+        }
+        out
+    })
+    .await;
+
+    CALIBRATING.store(false, Ordering::SeqCst);
+    // Force the engine to re-apply the user's real config now (LAST is stale after
+    // the sweep drove the fans directly, so clear it first to defeat hysteresis).
+    LAST.lock().clear();
+    apply_once();
+
+    match result {
+        Ok(out) => Ok(out),
+        Err(e) => Err(crate::error::CoreError::from(format!(
+            "calibration task failed: {e}"
+        ))),
+    }
 }

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import { api, type FanChannelConfig, type FanCurvePoint, type FanMode } from "../lib/ipc";
+import { api, type FanCalibration, type FanChannelConfig, type FanCurvePoint, type FanMode } from "../lib/ipc";
 import { tauriStorage } from "../lib/persist";
 
 /** Per-fan configuration as edited in the UI (keyed by control id). */
@@ -23,6 +23,57 @@ export const DEFAULT_CURVE: FanCurvePoint[] = [
 
 export function defaultConfig(): FanConfig {
   return { mode: "auto", manualPct: 50, tempSourceId: null, curve: DEFAULT_CURVE, minDuty: 20 };
+}
+
+// Both curves hit 100 % at 70 °C — the full-speed threshold for the Ryzen 9
+// 9950X3D (keeps the hot V-Cache CCD in check before it throttles).
+
+/** Quiet: barely audible at idle, holds low, then ramps hard into 70 °C → full. */
+const QUIET_CURVE: FanCurvePoint[] = [
+  { tempC: 30, duty: 20 },
+  { tempC: 45, duty: 30 },
+  { tempC: 55, duty: 45 },
+  { tempC: 63, duty: 65 },
+  { tempC: 70, duty: 100 },
+];
+
+/** Turbo: aggressive — high baseline, full speed by 70 °C. */
+const TURBO_CURVE: FanCurvePoint[] = [
+  { tempC: 30, duty: 45 },
+  { tempC: 50, duty: 70 },
+  { tempC: 60, duty: 88 },
+  { tempC: 70, duty: 100 },
+];
+
+/** Built-in one-click presets. Quiet/Turbo are temperature curves (they need a
+ *  temp source — the UI supplies a sensible default per channel); Full Blast pins
+ *  every fan to 100 % (manual). */
+export interface FanPreset {
+  id: string;
+  name: string;
+  mode: FanMode;
+  curve?: FanCurvePoint[];
+  manualPct?: number;
+}
+
+export const FAN_PRESETS: FanPreset[] = [
+  { id: "preset-quiet", name: "Quiet", mode: "curve", curve: QUIET_CURVE },
+  { id: "preset-turbo", name: "Turbo", mode: "curve", curve: TURBO_CURVE },
+  { id: "preset-fullblast", name: "Full Blast", mode: "manual", manualPct: 100 },
+];
+
+/** Build a no-stall curve from a calibrated start duty: idle at the fan's
+ *  quietest stable speed (30 °C), then ramp to full by 70 °C (the 9950X3D
+ *  full-speed threshold), with all duties at or above the measured floor. */
+function calibratedCurve(minStartDuty: number): FanCurvePoint[] {
+  const lo = Math.round(Math.max(0, Math.min(minStartDuty, 60)));
+  const span = 100 - lo;
+  return [
+    { tempC: 30, duty: lo },
+    { tempC: 50, duty: Math.round(lo + span * 0.35) },
+    { tempC: 60, duty: Math.round(lo + span * 0.7) },
+    { tempC: 70, duty: 100 },
+  ];
 }
 
 /** A saved, named snapshot of all fan configs for one-click switching. */
@@ -74,10 +125,19 @@ interface FanProfileState {
   activeProfileId: string | null;
   /** Profile whose apply is in flight; becomes active only after it succeeds. */
   pendingProfileId: string | null;
-  /** Snapshot the current configs as a named profile and make it active. */
+  /** Snapshot the current configs as a NEW named profile and make it active (另存为). */
   saveProfile: (name: string) => void;
+  /** Overwrite the currently-active profile with the live configs (保存当前). No-op
+   *  when no profile is active. */
+  updateActiveProfile: () => void;
   /** Apply a saved profile: load its configs and push to the engine. */
   applyProfile: (id: string) => void;
+  /** Apply a built-in preset (Quiet/Turbo curve, or Full Blast 100%) to every
+   *  controllable channel; `defaultTempSourceId` seeds the curve modes' source. */
+  applyPreset: (presetId: string, channelIds: string[], defaultTempSourceId: string | null) => void;
+  /** Turn AI-calibration results into a tailored no-stall curve per fan (idle at
+   *  the measured start duty, full speed by 70 °C) and push them to the engine. */
+  applyCalibration: (calibs: FanCalibration[], defaultTempSourceId: string | null) => void;
   deleteProfile: (id: string) => void;
   /** Push the current config set to the backend engine. */
   push: () => void;
@@ -132,6 +192,15 @@ export const useFanProfiles = create<FanProfileState>()(
         const profile: FanProfile = { id, name, configs: cloneConfigs(get().configs) };
         set((s) => ({ profiles: [...s.profiles, profile], activeProfileId: id }));
       },
+      updateActiveProfile: () => {
+        const { activeProfileId, configs } = get();
+        if (!activeProfileId) return;
+        set((s) => ({
+          profiles: s.profiles.map((p) =>
+            p.id === activeProfileId ? { ...p, configs: cloneConfigs(configs) } : p,
+          ),
+        }));
+      },
       applyProfile: (id) => {
         const profile = get().profiles.find((p) => p.id === id);
         if (!profile) return;
@@ -144,6 +213,55 @@ export const useFanProfiles = create<FanProfileState>()(
           .fanSetConfig(toBackend(configs))
           .then(() => set({ activeProfileId: id, pendingProfileId: null, lastError: null }))
           .catch((e) => set({ pendingProfileId: null, lastError: applyErrorMessage(e) }));
+      },
+      applyPreset: (presetId, channelIds, defaultTempSourceId) => {
+        const preset = FAN_PRESETS.find((p) => p.id === presetId);
+        if (!preset || channelIds.length === 0) return;
+        const cur = get().configs;
+        const configs = { ...cur };
+        for (const id of channelIds) {
+          const prev = cur[id] ?? defaultConfig();
+          if (preset.mode === "curve") {
+            configs[id] = {
+              ...prev,
+              mode: "curve",
+              curve: (preset.curve ?? DEFAULT_CURVE).map((p) => ({ ...p })),
+              // Keep the channel's own temp source if it already has one; else fall
+              // back to the supplied default (curve mode with no source reverts to
+              // BIOS auto in the engine).
+              tempSourceId: prev.tempSourceId ?? defaultTempSourceId,
+            };
+          } else {
+            configs[id] = { ...prev, mode: "manual", manualPct: preset.manualPct ?? 100 };
+          }
+        }
+        set({ configs, pendingProfileId: presetId });
+        api
+          .fanSetConfig(toBackend(configs))
+          .then(() => set({ activeProfileId: presetId, pendingProfileId: null, lastError: null }))
+          .catch((e) => set({ pendingProfileId: null, lastError: applyErrorMessage(e) }));
+      },
+      applyCalibration: (calibs, defaultTempSourceId) => {
+        const cur = get().configs;
+        const configs = { ...cur };
+        for (const cal of calibs) {
+          if (cal.disconnected) continue; // no fan on this header — leave it alone
+          const prev = cur[cal.controlId] ?? defaultConfig();
+          const lo = Math.round(Math.max(0, Math.min(cal.minStartDuty, 60)));
+          configs[cal.controlId] = {
+            ...prev,
+            mode: "curve",
+            curve: calibratedCurve(lo),
+            minDuty: lo,
+            tempSourceId: prev.tempSourceId ?? defaultTempSourceId,
+          };
+        }
+        // Tuned state isn't a named preset, so clear any active-preset highlight.
+        set({ configs, activeProfileId: null, pendingProfileId: null });
+        api
+          .fanSetConfig(toBackend(configs))
+          .then(() => set({ lastError: null }))
+          .catch((e) => set({ lastError: applyErrorMessage(e) }));
       },
       deleteProfile: (id) =>
         set((s) => ({

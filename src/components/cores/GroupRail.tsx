@@ -1,5 +1,6 @@
 import { Download, ListTree, Plus, Power, Upload } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
+import type { CSSProperties } from "react";
 import { cn } from "../../lib/cn";
 import { groupColor } from "../../lib/colors";
 import { maskToCpuList } from "../../lib/format";
@@ -17,9 +18,14 @@ interface GroupRailProps {
   onImport: () => void;
 }
 
+// How many of the group's name patterns currently have a process running — i.e.
+// "active rules", always ≤ the pattern count shown as the denominator. (Counting
+// matched patterns, not process instances: a group with N rules could otherwise
+// report far more than N "active" when names like svchost.exe run many copies,
+// which read as a nonsensical "657 / 239".)
 function activeCount(group: GroupRule, processes: ProcInfo[]): number {
-  const names = new Set(group.patterns);
-  return processes.filter((p) => names.has(p.name.toLowerCase())).length;
+  const running = new Set(processes.map((p) => p.name.toLowerCase()));
+  return group.patterns.reduce((n, pat) => (running.has(pat.toLowerCase()) ? n + 1 : n), 0);
 }
 
 export function GroupRail({
@@ -104,7 +110,7 @@ export function GroupRail({
                 <div className="flex min-w-0 items-center gap-2">
                   <span
                     className={cn("h-2.5 w-2.5 shrink-0 rounded-full", selected && "glow-sm")}
-                    style={{ background: color }}
+                    style={{ background: color, "--glow": color } as CSSProperties}
                   />
                   <span className="truncate text-[13px] font-medium text-ink">{group.name}</span>
                   {group.builtin && (
@@ -113,7 +119,10 @@ export function GroupRail({
                     </span>
                   )}
                 </div>
-                <span className="nums shrink-0 text-[11px] text-muted">
+                <span
+                  className="nums shrink-0 text-[11px] text-muted"
+                  title={`${active} / ${group.patterns.length} 个规则有进程正在运行`}
+                >
                   <span className={active > 0 ? "text-ink" : ""}>{active}</span> / {group.patterns.length}
                 </span>
               </div>

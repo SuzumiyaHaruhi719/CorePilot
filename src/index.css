@@ -200,7 +200,32 @@
   }
 
   .grad-accent {
-    background-image: linear-gradient(135deg, var(--color-accent-bright), color-mix(in oklch, var(--color-rose) 70%, var(--color-accent)));
+    position: relative;
+    isolation: isolate;
+    background-color: var(--color-accent);
+    background-image:
+      /* specular gloss, upper-left — light catching a glass surface */
+      radial-gradient(135% 125% at 14% -30%, rgb(255 255 255 / 0.34), rgb(255 255 255 / 0) 46%),
+      /* cylindrical depth — bright crown fading to a grounded base */
+      linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(0 0 0 / 0.22)),
+      /* rich body — deep violet rising to the accent, a single rose ember at the end */
+      linear-gradient(120deg,
+        color-mix(in oklch, var(--color-accent) 68%, #0a0712) 0%,
+        var(--color-accent) 38%,
+        var(--color-accent-bright) 70%,
+        color-mix(in oklch, var(--color-rose) 52%, var(--color-accent-bright)) 100%);
+  }
+  /* Fine film grain for material texture (质感), overlaid beneath the content. */
+  .grad-accent::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    pointer-events: none;
+    opacity: 0.13;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   }
   /* Rose-tinted glow variant (energy / danger highlights). */
   .glow-rose {
@@ -385,18 +410,8 @@
   animation: spin-slow 3s linear infinite;
 }
 
-/* Motion is primarily controlled in-app via the 减弱动画 setting (MotionConfig,
-   reducedMotion="user" in App.tsx). We ALSO honor the OS prefers-reduced-motion
-   preference here for CSS-level animations/transitions (spinners, pulses, glows,
-   hover fades) so an OS-level "reduce motion" request is respected even when the
-   in-app toggle is off. */
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
-    scroll-behavior: auto !important;
-  }
-}
+/* Motion is controlled IN-APP only, via the 减弱动画 setting (MotionConfig in
+   App.tsx) — deliberately NOT the OS prefers-reduced-motion media query. Many
+   users run Windows with "show animations" off for the desktop but still want
+   CorePilot's premium HUD motion; honoring the OS flag here wiped all animations,
+   so animations always play unless the user turns them off inside CorePilot. */

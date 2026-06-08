@@ -230,6 +230,36 @@ export interface FanChannelConfig {
   minDuty?: number;
 }
 
+/** One measured (duty %, RPM) sample from an AI calibration sweep. */
+export interface CalibPoint {
+  duty: number;
+  rpm: number;
+}
+
+/** Per-fan AI-calibration result (FanXpert-style auto tuning). */
+export interface FanCalibration {
+  controlId: string;
+  name: string;
+  /** Lowest duty at which the fan reliably spins (its quietest stable speed). */
+  minStartDuty: number;
+  maxRpm: number;
+  /** Lowest duty whose RPM already reaches ~97% of max. */
+  saturationDuty: number;
+  points: CalibPoint[];
+  /** True when the header never produced any RPM during the sweep. */
+  disconnected: boolean;
+}
+
+/** Live progress event (`fan-calib-progress`) emitted after each sweep step. */
+export interface FanCalibProgress {
+  controlId: string;
+  name: string;
+  fanIndex: number;
+  fanTotal: number;
+  duty: number;
+  rpm: number | null;
+}
+
 export interface ServiceItem {
   name: string;
   display: string;
@@ -330,6 +360,10 @@ export const api = {
   fanInfo: () => invoke<FanInfo>("fan_info"),
   /** Push the per-fan configuration (mode/curve) to the backend fan engine. */
   fanSetConfig: (configs: FanChannelConfig[]) => invoke<void>("fan_set_config", { configs }),
+  /** AI-calibrate the given controllable headers (or all when empty): sweep PWM,
+   *  measure RPM, and return each fan's start/stop/saturation envelope. Emits
+   *  `fan-calib-progress` events during the (multi-second) sweep. */
+  fanCalibrate: (controlIds: string[]) => invoke<FanCalibration[]>("fan_calibrate", { controlIds }),
   /** Apply a reversible system optimization tweak by id (深度优化). Returns a JSON
    *  snapshot of the pre-apply state; persist it and pass it back to `tweakRevert`
    *  to restore the EXACT prior values (empty string when nothing was captured). */

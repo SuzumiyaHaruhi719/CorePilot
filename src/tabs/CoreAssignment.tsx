@@ -1,6 +1,6 @@
 import { CircleMinus, Copy, Cpu, ListTree, Plus, Search, SlidersHorizontal, X, Zap } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from "react";
 import { CoreGrid } from "../components/cores/CoreGrid";
 import { GroupRail } from "../components/cores/GroupRail";
 import { ProcessTable, type SortKey } from "../components/cores/ProcessTable";
@@ -498,7 +498,7 @@ export function CoreAssignment() {
                 >
                   <span
                     className="h-4 w-4 rounded-full glow-sm"
-                    style={{ background: groupColor(selectedGroup.hue) }}
+                    style={{ background: groupColor(selectedGroup.hue), "--glow": groupColor(selectedGroup.hue) } as CSSProperties}
                   />
                 </button>
                 <input

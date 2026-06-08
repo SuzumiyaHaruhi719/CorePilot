@@ -135,7 +135,7 @@ function ControlCard({ icon: Icon, iconClass, title, supported, right, children 
 
 export function GpuTune() {
   const pollMs = useSettings((s) => s.pollMs);
-  const { profiles, activeId, applyOnStartup, addProfile, deleteProfile, setActive, setApplyOnStartup } =
+  const { profiles, activeId, applyOnStartup, addProfile, updateProfile, deleteProfile, setActive, setApplyOnStartup } =
     useGpuProfiles();
 
   const [info, setInfo] = useState<GpuOcInfo | null>(null);
@@ -259,6 +259,14 @@ export function GpuTune() {
     setNewName("");
     setShowSave(false);
     setStatus(`已保存配置「${name}」`);
+  }
+
+  // Save Current (保存当前): overwrite the active profile's settings in place.
+  function saveCurrent() {
+    if (!activeId) return;
+    updateProfile(activeId, { settings: draftToSettings() });
+    const name = profiles.find((p) => p.id === activeId)?.name ?? "当前配置";
+    setStatus(`已保存到「${name}」`);
   }
 
   async function loadProfile(p: GpuProfile) {
@@ -477,8 +485,11 @@ export function GpuTune() {
               <Button variant="primary" onClick={() => void applySettings(draftToSettings(), "已应用调优设置")} disabled={applying}>
                 {applying ? <Loader2 size={14} className="animate-spin" /> : <Rocket size={14} />} {applying ? "应用中…" : "应用"}
               </Button>
-              <Button variant="subtle" onClick={() => setShowSave(true)} disabled={applying}>
-                <Save size={14} /> 保存为配置
+              <Button variant="subtle" onClick={saveCurrent} disabled={applying || !activeId} title="覆盖保存到当前所选配置">
+                <Save size={14} /> 保存当前
+              </Button>
+              <Button variant="subtle" onClick={() => setShowSave(true)} disabled={applying} title="保存为新的配置">
+                <Save size={14} /> 另存为
               </Button>
               <Button variant="subtle" onClick={() => void reset()} disabled={applying} title="清零所有偏移并恢复固件默认">
                 <RotateCcw size={14} /> 恢复默认

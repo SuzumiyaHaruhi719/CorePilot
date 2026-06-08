@@ -147,6 +147,7 @@ pub fn run() {
             gpu::gpu_oc_reset,
             fan::fan_info,
             fan::fan_set_config,
+            fan::fan_calibrate,
             tweaks::tweak_apply,
             tweaks::tweak_revert,
             tweaks::create_restore_point,

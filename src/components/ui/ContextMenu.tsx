@@ -62,8 +62,13 @@ export function ContextMenu({ state, onClose }: ContextMenuProps) {
             top: Math.max(8, Math.min(state.y, window.innerHeight - state.items.length * ITEM_HEIGHT - 16)),
             maxHeight: window.innerHeight - 16,
             overflowY: "auto",
+            // Real frosted glass: a translucent surface PLUS an always-on backdrop
+            // blur (the base .glass only blurs in acrylic mode, so a portaled menu
+            // showed the page through sharply). The blur frosts what's behind while
+            // the tint keeps the text readable.
+            background: "color-mix(in oklch, var(--color-elevated) 64%, transparent)",
           }}
-          className="glass glow fixed z-[100] origin-top-left rounded-xl border border-line-strong p-1.5"
+          className="glass glow fixed z-[100] origin-top-left rounded-xl border border-line-strong p-1.5 backdrop-blur-2xl backdrop-saturate-150"
           onClick={(e) => e.stopPropagation()}
           onContextMenu={(e) => e.preventDefault()}
         >

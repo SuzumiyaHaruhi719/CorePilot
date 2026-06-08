@@ -1,10 +1,11 @@
 import { AnimatePresence, motion } from "motion/react";
-import { Gamepad2, Trash2, X } from "lucide-react";
+import { Ban, CircleCheck, Gamepad2, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cn } from "../../lib/cn";
 import { hoverPop } from "../../lib/motion";
 import { gameDisplayName, type PerfSession } from "../../lib/perf";
 import { usePerfHistory } from "../../store/perfHistory";
+import { useRecordTargets, type RecordListKind } from "../../store/recordTargets";
 import { Button } from "../ui/Button";
 import { Modal } from "../ui/Modal";
 import { PerfReport } from "./PerfReport";
@@ -48,11 +49,15 @@ function Badge({ label, value, hue }: { label: string; value: string; hue: numbe
 interface SessionCardProps {
   session: PerfSession;
   active: boolean;
+  /** Which record list this exe is on (white/black), or null. */
+  listKind: RecordListKind | null;
   onSelect: () => void;
   onDelete: () => void;
+  onWhite: () => void;
+  onBlack: () => void;
 }
 
-function SessionCard({ session, active, onSelect, onDelete }: SessionCardProps) {
+function SessionCard({ session, active, listKind, onSelect, onDelete, onWhite, onBlack }: SessionCardProps) {
   const { summary } = session;
   return (
     <motion.button
@@ -78,7 +83,7 @@ function SessionCard({ session, active, onSelect, onDelete }: SessionCardProps) 
           {session.path ? <ProcIcon exePath={session.path} size={18} /> : <Gamepad2 size={16} />}
         </span>
         <div className="min-w-0 flex-1">
-          <div className="truncate pr-5 text-[12.5px] font-medium text-ink" title={gameDisplayName(session.exe)}>
+          <div className="truncate pr-16 text-[12.5px] font-medium text-ink" title={gameDisplayName(session.exe)}>
             {gameDisplayName(session.exe)}
           </div>
           <div className="nums mt-0.5 text-[10.5px] text-dim">
@@ -90,18 +95,54 @@ function SessionCard({ session, active, onSelect, onDelete }: SessionCardProps) 
           </div>
         </div>
       </div>
-      <span
-        role="button"
-        tabIndex={-1}
-        aria-label="删除报告"
-        onClick={(e) => {
-          e.stopPropagation();
-          onDelete();
-        }}
-        className="absolute right-2 top-2 grid h-5 w-5 place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white group-hover:opacity-100"
-      >
-        <X size={12} />
-      </span>
+      {/* Quick record white/black-list toggles (always visible; highlighted when
+          active) + a hover-reveal delete. */}
+      <div className="absolute right-2 top-2 flex items-center gap-1">
+        <span
+          role="button"
+          tabIndex={-1}
+          aria-label="加入白名单（强制录制）"
+          title="白名单 · 强制录制此程序"
+          onClick={(e) => {
+            e.stopPropagation();
+            onWhite();
+          }}
+          className={cn(
+            "grid h-5 w-5 cursor-pointer place-items-center rounded-md transition-colors",
+            listKind === "white" ? "bg-ok/20 text-ok" : "text-dim hover:bg-surface3 hover:text-ok",
+          )}
+        >
+          <CircleCheck size={12} />
+        </span>
+        <span
+          role="button"
+          tabIndex={-1}
+          aria-label="加入黑名单（不录制）"
+          title="黑名单 · 不录制此程序"
+          onClick={(e) => {
+            e.stopPropagation();
+            onBlack();
+          }}
+          className={cn(
+            "grid h-5 w-5 cursor-pointer place-items-center rounded-md transition-colors",
+            listKind === "black" ? "bg-danger/20 text-danger" : "text-dim hover:bg-surface3 hover:text-danger",
+          )}
+        >
+          <Ban size={12} />
+        </span>
+        <span
+          role="button"
+          tabIndex={-1}
+          aria-label="删除报告"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+          className="grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white group-hover:opacity-100"
+        >
+          <X size={12} />
+        </span>
+      </div>
     </motion.button>
   );
 }
@@ -112,6 +153,20 @@ export function PerfHistory() {
   const clear = usePerfHistory((s) => s.clear);
   const pendingReportId = usePerfHistory((s) => s.pendingReportId);
   const clearPendingReport = usePerfHistory((s) => s.clearPendingReport);
+  const targets = useRecordTargets((s) => s.targets);
+  const addTarget = useRecordTargets((s) => s.addTarget);
+  const removeTarget = useRecordTargets((s) => s.removeTarget);
+  const setTargetList = useRecordTargets((s) => s.setTargetList);
+
+  // Toggle an exe on the record white/black list: same list again clears it,
+  // a different list switches, otherwise it's added.
+  function toggleList(exe: string, kind: RecordListKind) {
+    const name = exe.trim().toLowerCase();
+    const cur = targets.find((t) => t.name === name)?.list ?? null;
+    if (cur === kind) removeTarget(name);
+    else if (cur) setTargetList(name, kind);
+    else addTarget(name, kind);
+  }
 
   const [selectedId, setSelectedId] = useState<string | null>(sessions[0]?.id ?? null);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -179,15 +234,22 @@ export function PerfHistory() {
         </div>
         <div className="min-h-0 flex-1 space-y-2 overflow-auto pr-1">
           <AnimatePresence initial={false}>
-            {sessions.map((session) => (
-              <SessionCard
-                key={session.id}
-                session={session}
-                active={session.id === selected.id}
-                onSelect={() => setSelectedId(session.id)}
-                onDelete={() => setConfirmDeleteId(session.id)}
-              />
-            ))}
+            {sessions.map((session) => {
+              const name = session.exe.trim().toLowerCase();
+              const listKind = targets.find((t) => t.name === name)?.list ?? null;
+              return (
+                <SessionCard
+                  key={session.id}
+                  session={session}
+                  active={session.id === selected.id}
+                  listKind={listKind}
+                  onSelect={() => setSelectedId(session.id)}
+                  onDelete={() => setConfirmDeleteId(session.id)}
+                  onWhite={() => toggleList(session.exe, "white")}
+                  onBlack={() => toggleList(session.exe, "black")}
+                />
+              );
+            })}
           </AnimatePresence>
         </div>
       </div>

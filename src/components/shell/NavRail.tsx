@@ -2,7 +2,7 @@ import { Cpu, Fan, Gauge, ListTree, MonitorPlay, Rocket, Settings as SettingsIco
 import type { LucideIcon } from "lucide-react";
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
-import { hoverPop } from "../../lib/motion";
+import { springSmooth } from "../../lib/motion";
 import { useUi, type TabId } from "../../store/ui";
 import { ClickRipple } from "../ui/Ripple";
 
@@ -24,10 +24,10 @@ const ITEMS: NavItem[] = [
   { id: "settings", label: "设置", icon: SettingsIcon },
 ];
 
-// Variant labels (not inline objects) so the button's hover/tap gesture
-// propagates to the icon, which plays its own slightly larger "pop".
-const ITEM_VARIANTS = { hover: { scale: 1.08, y: -2 }, tap: { scale: 0.95 } };
-const ICON_VARIANTS = { hover: { scale: 1.16, y: -2 }, tap: { scale: 0.9 } };
+// The whole tab scales as one cohesive unit on hover — icon, label and the
+// active pill lift and grow together. (Previously the icon had its own larger
+// scale that compounded with the button's, so only the icon appeared to "pop".)
+const ITEM_VARIANTS = { hover: { scale: 1.06, y: -2 }, tap: { scale: 0.96 } };
 
 export function NavRail() {
   const tab = useUi((s) => s.tab);
@@ -54,7 +54,7 @@ export function NavRail() {
             variants={ITEM_VARIANTS}
             whileHover="hover"
             whileTap="tap"
-            transition={hoverPop}
+            transition={springSmooth}
             className="no-drag relative flex h-[60px] w-[72px] shrink-0 flex-col items-center justify-center gap-1 rounded-xl transition-colors hover:bg-surface2/40"
           >
             {active && (
@@ -66,16 +66,14 @@ export function NavRail() {
                 <span className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-accent-bright" />
               </motion.span>
             )}
-            <motion.span
-              variants={ICON_VARIANTS}
-              transition={hoverPop}
+            <span
               className={cn(
                 "relative z-10 transition-colors",
                 active ? "text-accent-bright glow-text" : "text-dim",
               )}
             >
               <Icon size={21} strokeWidth={active ? 2.5 : 2} />
-            </motion.span>
+            </span>
             <span
               className={cn(
                 "relative z-10 text-[10.5px] font-medium transition-colors",

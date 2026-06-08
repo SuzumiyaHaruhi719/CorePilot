@@ -1,6 +1,7 @@
-import { AlertTriangle, Check, Eye, EyeOff, Fan, Gauge, Info, Layers, Loader2, Pencil, Save, Thermometer, Trash2, Wind } from "lucide-react";
+import { AlertTriangle, Check, Eye, EyeOff, Fan, Gauge, Info, Layers, Loader2, Moon, Pencil, RefreshCw, Save, Sparkles, Thermometer, Trash2, Wind } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { FanCurveEditor } from "../components/fans/FanCurveEditor";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
@@ -10,15 +11,18 @@ import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
 import { hoverPop } from "../lib/motion";
-import { api, type FanChannel, type FanCurvePoint, type FanInfo, type FanMode, type FanTempSource } from "../lib/ipc";
+import { api, type FanCalibProgress, type FanCalibration, type FanChannel, type FanCurvePoint, type FanInfo, type FanMode, type FanTempSource } from "../lib/ipc";
 import { useSettings } from "../store/settings";
-import { defaultConfig, useFanProfiles, type FanConfig } from "../store/fanProfiles";
+import { defaultConfig, FAN_PRESETS, useFanProfiles, type FanConfig } from "../store/fanProfiles";
 
 const MODE_OPTIONS: { value: FanMode; label: string }[] = [
   { value: "auto", label: "自动" },
   { value: "manual", label: "手动" },
   { value: "curve", label: "曲线" },
 ];
+
+/** Icon per built-in preset id (kept here so the store stays icon-free). */
+const PRESET_ICON = { "preset-quiet": Moon, "preset-turbo": Gauge, "preset-fullblast": Wind } as const;
 
 /** Linear interpolation of a fan curve (mirrors the Rust engine) for the live
  *  operating-point marker. */
@@ -254,7 +258,7 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
 
 export function FanControl() {
   const pollMs = useSettings((s) => s.pollMs);
-  const { configs, labels, applyOnStartup, setConfig, setApplyOnStartup, setLabel, profiles, activeProfileId, pendingProfileId, saveProfile, applyProfile, deleteProfile, lastError, clearError } =
+  const { configs, labels, applyOnStartup, setConfig, setApplyOnStartup, setLabel, profiles, activeProfileId, pendingProfileId, saveProfile, updateActiveProfile, applyProfile, applyPreset, applyCalibration, deleteProfile, lastError, clearError } =
     useFanProfiles();
   const [delProfile, setDelProfile] = useState<{ id: string; name: string } | null>(null);
   const [info, setInfo] = useState<FanInfo | null>(null);
@@ -264,6 +268,13 @@ export function FanControl() {
   const [showAll, setShowAll] = useState(false);
   const [showSave, setShowSave] = useState(false);
   const [newName, setNewName] = useState("");
+  // AI calibration (FanXpert-style auto tuning) state.
+  const [showCalibConfirm, setShowCalibConfirm] = useState(false);
+  const [calibrating, setCalibrating] = useState(false);
+  const [calibProgress, setCalibProgress] = useState<FanCalibProgress | null>(null);
+  const [calibResults, setCalibResults] = useState<FanCalibration[] | null>(null);
+  const [calibError, setCalibError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   // Apply saved fan configs when the page opens (hydration-aware).
   useEffect(() => {
@@ -307,11 +318,57 @@ export function FanControl() {
   }, [pollMs]);
 
   const channels = info?.channels ?? [];
-  // Auto-hide headers with no detectable RPM (never spun) — show once they do.
+  // Presets apply only to software-controllable headers; curve presets need a
+  // temp source, so default to a CPU temperature (else the first available one).
+  const controllableIds = channels.filter((c) => c.controllable).map((c) => c.id);
+  const temps = info?.temps ?? [];
+  const presetTempSourceId =
+    (temps.find((t) => /cpu|package|tctl|tdie|核/i.test(t.name)) ?? temps[0])?.id ?? null;
+  // Show a header when it currently reports RPM, has spun this session, OR the
+  // user has explicitly claimed it with a custom label — so a fan you manage never
+  // vanishes just because a low curve momentarily stopped it. Unclaimed, never-spun
+  // headers (empty ports) stay hidden until they actually turn.
   const visibleChannels = showAll
     ? channels
-    : channels.filter((c) => (c.rpm ?? 0) > 0 || seen.has(c.id));
+    : channels.filter((c) => (c.rpm ?? 0) > 0 || seen.has(c.id) || !!labels[c.id]);
   const hiddenCount = channels.length - visibleChannels.length;
+
+  // Run an AI calibration sweep: listen for live progress, calibrate every
+  // controllable header, then auto-apply the tailored per-fan curves.
+  async function runCalibration() {
+    setShowCalibConfirm(false);
+    setCalibResults(null);
+    setCalibError(null);
+    setCalibProgress(null);
+    setCalibrating(true);
+    const unlisten = await listen<FanCalibProgress>("fan-calib-progress", (e) =>
+      setCalibProgress(e.payload),
+    );
+    try {
+      const results = await api.fanCalibrate(controllableIds);
+      applyCalibration(results, presetTempSourceId);
+      setCalibResults(results);
+    } catch (e) {
+      setCalibError(typeof e === "string" ? e : e instanceof Error ? e.message : "校准失败");
+    } finally {
+      unlisten();
+      setCalibrating(false);
+      setCalibProgress(null);
+    }
+  }
+
+  // Manual refresh: re-read the live fan headers immediately (a header that just
+  // spun up will appear without waiting for the next poll tick).
+  async function refreshFans() {
+    setRefreshing(true);
+    try {
+      setInfo(await api.fanInfo());
+    } catch {
+      /* sidecar not ready — keep last */
+    } finally {
+      setTimeout(() => setRefreshing(false), 400);
+    }
+  }
 
   return (
     <>
@@ -352,10 +409,82 @@ export function FanControl() {
                 <span className="hud-label text-[10px] text-dim">风扇配置</span>
                 {profiles.length > 0 && <span className="nums text-[10px] text-dim">· {profiles.length}</span>}
               </div>
-              <Button onClick={() => { setNewName(""); setShowSave(true); }}>
-                <Save size={13} /> 保存当前
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  onClick={() => setShowCalibConfirm(true)}
+                  disabled={calibrating || controllableIds.length === 0}
+                  title="逐个风扇扫描转速，自动生成专属曲线（约 30 秒/风扇）"
+                >
+                  {calibrating ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />} AI 智能校准
+                </Button>
+                <Button onClick={updateActiveProfile} disabled={!activeProfileId} title="覆盖保存到当前所选配置">
+                  <Save size={13} /> 保存当前
+                </Button>
+                <Button onClick={() => { setNewName(""); setShowSave(true); }} title="保存为新的配置">
+                  <Layers size={13} /> 另存为
+                </Button>
+              </div>
             </div>
+
+            {calibrating && (
+              <div className="mb-3 rounded-lg border border-accent/30 bg-accent/[0.06] px-3 py-2">
+                <div className="flex items-center gap-2 text-[11.5px] text-muted">
+                  <Loader2 size={13} className="animate-spin text-accent-bright" />
+                  <span>正在校准</span>
+                  <span className="font-medium text-ink">{calibProgress?.name ?? "…"}</span>
+                  {calibProgress && (
+                    <span className="text-dim">
+                      ({calibProgress.fanIndex + 1}/{calibProgress.fanTotal})
+                    </span>
+                  )}
+                  <span className="nums ml-auto text-dim">
+                    {calibProgress ? `${calibProgress.duty}% → ${calibProgress.rpm ?? "—"} RPM` : ""}
+                  </span>
+                </div>
+                <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-surface3">
+                  <div
+                    className="h-full rounded-full bg-accent transition-[width] duration-300"
+                    style={{ width: `${calibProgress?.duty ?? 0}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Built-in quick presets (Quiet/Turbo curves + Full Blast). */}
+            <div className="mb-3">
+              <div className="hud-label mb-1.5 text-[9.5px] text-dim">快速预设 · PRESETS</div>
+              <div className="flex flex-wrap gap-2">
+                {FAN_PRESETS.map((preset) => {
+                  const Icon = PRESET_ICON[preset.id as keyof typeof PRESET_ICON] ?? Layers;
+                  const pending = preset.id === pendingProfileId;
+                  const active = preset.id === activeProfileId && !pending;
+                  const disabled = controllableIds.length === 0;
+                  return (
+                    <motion.button
+                      key={preset.id}
+                      whileHover={disabled ? undefined : { scale: 1.03, y: -2 }}
+                      whileTap={disabled ? undefined : { scale: 0.97 }}
+                      transition={hoverPop}
+                      disabled={disabled}
+                      onClick={() => applyPreset(preset.id, controllableIds, presetTempSourceId)}
+                      aria-pressed={active}
+                      title={preset.mode === "curve" ? "温度曲线预设(自动按温度调速)" : "全速 100%"}
+                      className={cn(
+                        "no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
+                        active
+                          ? "border-accent/50 bg-accent/12 text-accent-bright glow-sm"
+                          : "border-line bg-surface2/50 text-muted hover:bg-surface3 hover:text-ink",
+                        disabled && "cursor-not-allowed opacity-40",
+                      )}
+                    >
+                      {pending ? <Loader2 size={12} className="animate-spin" /> : <Icon size={12} />}
+                      {preset.name}
+                    </motion.button>
+                  );
+                })}
+              </div>
+            </div>
+
             {profiles.length === 0 ? (
               <p className="text-[11px] leading-relaxed text-dim">
                 把每个风扇调好后点「保存当前」存为一套方案,之后即可一键切换(如「静音」「游戏全速」)。
@@ -434,14 +563,22 @@ export function FanControl() {
               <span className="h-px flex-1 bg-line" />
             </div>
             <div className="flex shrink-0 items-center gap-3">
-              {hiddenCount > 0 && (
+              <button
+                type="button"
+                onClick={() => void refreshFans()}
+                title="刷新风扇接口"
+                className="no-drag flex cursor-pointer items-center gap-1.5 text-[11px] text-dim transition-colors hover:text-muted"
+              >
+                <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} /> 刷新
+              </button>
+              {channels.length > 0 && (
                 <button
                   type="button"
                   onClick={() => setShowAll((v) => !v)}
                   className="no-drag flex cursor-pointer items-center gap-1.5 text-[11px] text-dim transition-colors hover:text-muted"
                 >
                   {showAll ? <EyeOff size={12} /> : <Eye size={12} />}
-                  {showAll ? "隐藏未接入" : `显示全部 (+${hiddenCount})`}
+                  {showAll ? "仅显示活动" : hiddenCount > 0 ? `显示全部 (+${hiddenCount})` : "显示全部"}
                 </button>
               )}
               <label className="flex shrink-0 cursor-pointer items-center gap-2 text-[11.5px] text-muted">
@@ -542,6 +679,67 @@ export function FanControl() {
         <p className="text-[13px] leading-relaxed text-muted">
           确定删除配置 <span className="font-semibold text-ink">{delProfile?.name}</span> 吗？此操作不可撤销（当前风扇设置不受影响）。
         </p>
+      </Modal>
+
+      <Modal
+        open={showCalibConfirm}
+        onClose={() => setShowCalibConfirm(false)}
+        title="AI 智能校准"
+        footer={
+          <>
+            <Button onClick={() => setShowCalibConfirm(false)}>取消</Button>
+            <Button variant="primary" onClick={() => void runCalibration()}>
+              <Sparkles size={13} /> 开始校准
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] leading-relaxed text-muted">
+          将依次把每个可调风扇从 0 拉到 100% 扫描转速（约 {controllableIds.length} 个风扇 × 30 秒），测出每个风扇的
+          <span className="text-ink">起转转速与最高转速</span>，并生成专属曲线（怠速取最低稳定转速、70°C 全速）。
+        </p>
+        <p className="mt-2 text-[11.5px] text-dim">
+          期间风扇会明显变速、可能有噪音，属正常现象；校准时建议不要运行重负载。完成后自动应用。
+        </p>
+      </Modal>
+
+      <Modal
+        open={calibResults !== null || calibError !== null}
+        onClose={() => { setCalibResults(null); setCalibError(null); }}
+        title={calibError ? "校准失败" : "AI 校准完成"}
+        footer={
+          <Button variant="primary" onClick={() => { setCalibResults(null); setCalibError(null); }}>
+            完成
+          </Button>
+        }
+      >
+        {calibError ? (
+          <p className="text-[13px] leading-relaxed text-danger">{calibError}</p>
+        ) : (
+          <>
+            <p className="mb-3 text-[12.5px] leading-relaxed text-muted">
+              已为每个风扇生成专属曲线（怠速取最低稳定转速，70°C 全速）并自动应用。
+            </p>
+            <div className="space-y-1.5">
+              {(calibResults ?? []).map((c) => (
+                <div
+                  key={c.controlId}
+                  className="flex items-center justify-between rounded-lg border border-line bg-surface2/50 px-3 py-2 text-[12px]"
+                >
+                  <span className="font-medium text-ink">{labels[c.controlId] ?? c.name}</span>
+                  {c.disconnected ? (
+                    <span className="text-dim">未检测到风扇</span>
+                  ) : (
+                    <span className="nums text-muted">
+                      起转 <span className="text-ink">{Math.round(c.minStartDuty)}%</span> · 最高{" "}
+                      <span className="text-ink">{Math.round(c.maxRpm)}</span> RPM
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </Modal>
     </>
   );

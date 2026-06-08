@@ -65,20 +65,21 @@ internal static class Program
     /// re-open-on-stale logic so a fanless board doesn't thrash.</summary>
     private static bool _sawMoboFan;
 
-    /// <summary>Reopen the chip only after this many CONSECUTIVE all-zero
-    /// motherboard-fan samples, so a single legit BIOS fan-stop (0 RPM) does not
-    /// trigger a driver close/open.</summary>
-    private const int StaleSamplesBeforeReopen = 3;
+    /// <summary>Reopen spacing while the bank is genuinely refreshing (fans spin,
+    /// the read was merely stale) — roughly one poll interval, so a stale NCT6701D
+    /// bank is refreshed promptly with no visible 0-RPM flicker.</summary>
+    private const int LiveReopenCooldownMs = 1_500;
 
-    /// <summary>Minimum spacing between chip reopens, so repeated stale readings
-    /// can't churn the kernel driver more than once per this window.</summary>
-    private const int ReopenCooldownMs = 10_000;
+    /// <summary>Reopen spacing after a reopen that stayed all-zero — i.e. a genuine
+    /// BIOS fan-stop. Backed off this far so legit 0 RPM never churns the driver.</summary>
+    private const int StaleReopenCooldownMs = 8_000;
 
-    /// <summary>Count of consecutive all-zero motherboard-fan samples.</summary>
-    private static int _consecutiveZeroSamples;
+    /// <summary>Adaptive spacing between chip reopens: starts live, backs off to
+    /// the stale value whenever a reopen fails to restore any fan RPM.</summary>
+    private static int _reopenCooldownMs = LiveReopenCooldownMs;
 
     /// <summary>Tick (ms) of the last chip reopen, for the cooldown above.</summary>
-    private static long _lastReopenTick = -ReopenCooldownMs;
+    private static long _lastReopenTick = -StaleReopenCooldownMs;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -128,41 +129,30 @@ internal static class Program
             {
                 line = BuildSample(computer, visitor, out bool stale);
 
-                // Stale NCT6701D bank (board fans all zero after having spun).
-                // Track CONSECUTIVE all-zero samples: a single legit BIOS
-                // fan-stop reads 0 RPM and must NOT trigger a driver reopen.
-                if (stale)
-                {
-                    _consecutiveZeroSamples++;
-                }
-                else
-                {
-                    _consecutiveZeroSamples = 0;
-                }
-
-                // Reopen only after a sustained run of zeros, the board has
-                // actually spun this session, and the reopen cooldown elapsed —
-                // so legit fan-stop never churns the kernel driver. Reopening
-                // rebuilds the sample inline so the emitted line carries real RPM.
+                // Stale NCT6701D bank: board fans read all-zero after having spun
+                // this session. Reopen the chip PROMPTLY to refresh its register
+                // bank, then rebuild the sample inline so the emitted line carries
+                // real RPM (no 0-flicker). The cooldown is adaptive: after a reopen
+                // that restores RPM we keep refreshing at the live cadence; one that
+                // stays all-zero means a genuine BIOS fan-stop, so we back off and
+                // never churn the kernel driver while fans are legitimately parked.
+                // (Driven fans are NOT reset here — the chip holds the last PWM
+                // across the reopen and the engine re-applies via the rebuilt map;
+                // ResetTouched runs on the exit paths so nothing is left pinned.)
                 long nowTick = Environment.TickCount64;
-                bool cooldownElapsed = nowTick - _lastReopenTick >= ReopenCooldownMs;
-                if (_consecutiveZeroSamples >= StaleSamplesBeforeReopen
+                if (stale
                     && _sawMoboFan
                     && computer != null
-                    && cooldownElapsed)
+                    && nowTick - _lastReopenTick >= _reopenCooldownMs)
                 {
                     lock (Gate)
                     {
-                        // Restore any fans we drove to BIOS default BEFORE the
-                        // handle (and its control map) is destroyed; resetting
-                        // after Close() would run against a stale control map.
-                        ResetTouched();
                         try { computer.Close(); } catch { /* ignore */ }
                         computer = OpenComputer();
                     }
                     _lastReopenTick = nowTick;
-                    _consecutiveZeroSamples = 0;
-                    line = BuildSample(computer, visitor, out _);
+                    line = BuildSample(computer, visitor, out bool stillStale);
+                    _reopenCooldownMs = stillStale ? StaleReopenCooldownMs : LiveReopenCooldownMs;
                 }
             }
             catch

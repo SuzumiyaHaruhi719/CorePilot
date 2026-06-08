@@ -223,7 +223,7 @@ export function Optimize() {
           </div>
           <div className="h-2.5 overflow-hidden rounded-full bg-surface3">
             <motion.div
-              className="h-full rounded-full grad-accent glow-sm"
+              className="h-full rounded-full bg-accent glow-sm"
               initial={false}
               animate={{ width: `${loadPct}%` }}
               transition={{ type: "spring", stiffness: 120, damping: 22 }}
@@ -261,16 +261,16 @@ export function Optimize() {
           whileTap={heroBusy ? undefined : { scale: 0.99 }}
           transition={hoverPop}
           className={cn(
-            "chamfer relative flex w-full items-center gap-4 overflow-hidden rounded-2xl grad-accent p-4 text-left text-white glow transition-[filter] duration-200",
-            heroBusy ? "cursor-wait opacity-95" : "cursor-pointer hover:brightness-110",
+            "relative flex w-full items-center gap-4 overflow-hidden rounded-2xl border border-accent/40 bg-accent/10 p-4 text-left text-ink glow transition-[border-color,background-color,box-shadow] duration-200",
+            heroBusy ? "cursor-wait opacity-90" : "cursor-pointer hover:border-accent/60 hover:bg-accent/15",
           )}
         >
-          <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-white/15">
+          <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl border border-accent/30 bg-accent/20 text-accent-bright glow-sm">
             {heroBusy ? <Loader2 size={24} className="animate-spin" /> : <Wand2 size={24} />}
           </span>
           <div className="flex-1">
             <div className="display text-[15px] font-bold uppercase tracking-[0.06em]">一键优化</div>
-            <div className="text-[12px] text-white/80">释放内存 + 清理缓存 + 清理临时文件 + 刷新 DNS</div>
+            <div className="text-[12px] text-muted">释放内存 + 清理缓存 + 清理临时文件 + 刷新 DNS</div>
             <AnimatePresence>
               {heroResult && (
                 <motion.div

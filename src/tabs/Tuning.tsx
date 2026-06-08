@@ -57,11 +57,16 @@ function getErrorMessage(e: unknown): string {
 export function Tuning() {
   const { applied, snapshots, setApplied, setSnapshot } = useTweaks();
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Optimistic per-row state so a toggle flips (and its spring plays) the instant
+  // it's actioned, instead of only after the async apply returns. Reconciled in
+  // doApply — on failure the toggle animates back to its real state.
+  const [optimistic, setOptimistic] = useState<Record<string, boolean>>({});
   const [status, setStatus] = useState<{ msg: string; ok: boolean } | null>(null);
   const [confirmTweak, setConfirmTweak] = useState<TweakMeta | null>(null);
 
   async function doApply(meta: TweakMeta, next: boolean) {
     setBusyId(meta.id);
+    setOptimistic((o) => ({ ...o, [meta.id]: next }));
     setStatus(null);
     try {
       if (next) {
@@ -81,6 +86,11 @@ export function Tuning() {
       setStatus({ msg: getErrorMessage(e), ok: false });
     } finally {
       setBusyId(null);
+      setOptimistic((o) => {
+        const rest = { ...o };
+        delete rest[meta.id];
+        return rest;
+      });
     }
   }
 
@@ -125,8 +135,8 @@ export function Tuning() {
   }
 
   function TweakRow({ meta, zone }: { meta: TweakMeta; zone: Zone }) {
-    const on = !!applied[meta.id];
     const busy = busyId === meta.id;
+    const on = optimistic[meta.id] ?? !!applied[meta.id];
     // Lock every toggle while ANY tweak / bulk op is running, so concurrent or
     // conflicting operations can't be triggered.
     const anyBusy = busyId !== null;
@@ -146,12 +156,14 @@ export function Tuning() {
           </div>
           <div className="mt-0.5 text-[11px] leading-relaxed text-dim">{meta.desc}</div>
         </div>
-        <div className="flex shrink-0 items-center">
-          {busy ? (
-            <Loader2 size={16} className="animate-spin text-dim" />
-          ) : (
-            <Toggle checked={on} disabled={anyBusy} label={meta.name} onChange={(v) => handleToggle(meta, zone, v)} />
-          )}
+        <div className="flex shrink-0 items-center gap-2">
+          {busy && <Loader2 size={14} className="animate-spin text-dim" />}
+          <Toggle
+            checked={on}
+            disabled={anyBusy && !busy}
+            label={meta.name}
+            onChange={(v) => handleToggle(meta, zone, v)}
+          />
         </div>
       </div>
     );

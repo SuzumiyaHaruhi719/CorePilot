@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect } from "react";
+import { useEffect, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn";
 import { GROUP_PALETTE, groupColor, hueDistance } from "../../lib/colors";
@@ -55,8 +55,10 @@ export function ColorPicker({ anchor, hue, onChange, onClose }: ColorPickerProps
             left: Math.min(anchor.x, window.innerWidth - POP_WIDTH - 8),
             top: Math.min(anchor.y, window.innerHeight - 168),
             width: POP_WIDTH,
+            // Frosted glass: translucent tint + always-on backdrop blur.
+            background: "color-mix(in oklch, var(--color-elevated) 64%, transparent)",
           }}
-          className="glass glow fixed z-[100] origin-top-left rounded-xl border border-line-strong p-3"
+          className="glass glow fixed z-[100] origin-top-left rounded-xl border border-line-strong p-3 backdrop-blur-2xl backdrop-saturate-150"
           onClick={(e) => e.stopPropagation()}
           onContextMenu={(e) => e.preventDefault()}
         >
@@ -65,7 +67,7 @@ export function ColorPicker({ anchor, hue, onChange, onClose }: ColorPickerProps
             <span className="flex items-center gap-1.5">
               <span
                 className="h-3.5 w-3.5 rounded-full glow-sm"
-                style={{ background: groupColor(hue) }}
+                style={{ background: groupColor(hue), "--glow": groupColor(hue) } as CSSProperties}
               />
               <span className="nums text-[11px] text-dim">{Math.round(hue)}°</span>
             </span>
@@ -84,7 +86,7 @@ export function ColorPicker({ anchor, hue, onChange, onClose }: ColorPickerProps
                     "h-7 w-7 rounded-full border-2 transition-colors",
                     active ? "border-ink glow-sm" : "border-transparent hover:border-line-strong",
                   )}
-                  style={{ background: groupColor(h) }}
+                  style={{ background: groupColor(h), "--glow": groupColor(h) } as CSSProperties}
                 />
               );
             })}

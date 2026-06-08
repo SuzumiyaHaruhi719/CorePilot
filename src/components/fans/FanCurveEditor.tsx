@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { FanCurvePoint } from "../../lib/ipc";
 
 interface FanCurveEditorProps {
@@ -17,6 +17,8 @@ interface FanCurveEditorProps {
 const HEIGHT = 200;
 const PAD = 26;
 const TEMP_MAX = 100;
+/** Max points in a curve (matches the backend's MAX_CURVE_POINTS). */
+const MAX_POINTS = 24;
 
 /** A draggable temperature→duty fan-curve editor (FanXpert-style). X axis is
  *  temperature (0–100 °C), Y axis is duty (0–100%). Drag points to reshape. */
@@ -85,6 +87,28 @@ export function FanCurveEditor({ points, onChange, onCommit, live, minDuty = 0 }
     }
   }
 
+  // Double-click empty space to add a new point at the cursor (temperature/duty).
+  function onAddPoint(e: ReactMouseEvent<SVGSVGElement>) {
+    const el = wrapRef.current;
+    if (!el || sorted.length >= MAX_POINTS) return;
+    const rect = el.getBoundingClientRect();
+    const tempC = Math.round(pxToTemp(e.clientX - rect.left));
+    const duty = Math.max(Math.round(minDuty), Math.min(100, Math.round(pxToDuty(e.clientY - rect.top))));
+    // Ignore if it lands on top of an existing point (that double-click removes instead).
+    if (sorted.some((p) => Math.abs(p.tempC - tempC) < 1)) return;
+    const next = [...sorted, { tempC, duty }].sort((a, b) => a.tempC - b.tempC);
+    onChange(next);
+    onCommit?.(next);
+  }
+
+  // Double-click an existing point to remove it (keep at least two points).
+  function removePoint(i: number) {
+    if (sorted.length <= 2) return;
+    const next = sorted.filter((_, idx) => idx !== i);
+    onChange(next);
+    onCommit?.(next);
+  }
+
   const floorY = yToPx(minDuty);
   const liveX = live ? xToPx(Math.max(0, Math.min(TEMP_MAX, live.tempC))) : 0;
   const liveY = live ? yToPx(Math.max(0, Math.min(100, live.duty))) : 0;
@@ -100,7 +124,8 @@ export function FanCurveEditor({ points, onChange, onCommit, live, minDuty = 0 }
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
         onPointerLeave={endDrag}
-        style={{ touchAction: "none", display: "block" }}
+        onDoubleClick={onAddPoint}
+        style={{ touchAction: "none", display: "block", cursor: "crosshair" }}
       >
         <defs>
           <linearGradient id="fan-curve-fill" x1="0" y1="0" x2="0" y2="1">
@@ -122,6 +147,11 @@ export function FanCurveEditor({ points, onChange, onCommit, live, minDuty = 0 }
             <text x={8} y={yToPx(d) + 3} textAnchor="start" fill="currentColor" className="text-dim text-[9px]">{d}</text>
           </g>
         ))}
+
+        {/* edit hint */}
+        <text x={width - PAD} y={13} textAnchor="end" fill="currentColor" className="text-dim text-[8.5px]">
+          双击空白加点 · 双击点删除
+        </text>
 
         {/* min-duty floor band */}
         {minDuty > 0 && (
@@ -180,7 +210,13 @@ export function FanCurveEditor({ points, onChange, onCommit, live, minDuty = 0 }
                   e.currentTarget.setPointerCapture?.(e.pointerId);
                   setDragging(i);
                 }}
-              />
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  removePoint(i);
+                }}
+              >
+                <title>{`${p.tempC}° → ${p.duty}% · 拖动调整，双击删除`}</title>
+              </circle>
             </g>
           );
         })}
