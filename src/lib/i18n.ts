@@ -539,142 +539,149 @@ function makeEdges(nodes: NeuralNode[]): Array<[number, number]> {
 }
 
 /**
- * Build a full-screen overlay where a neural network ignites (synapses draw via
- * stroke-dashoffset, nodes glow in), the text swaps at the ignition peak, then the
- * whole thing extinguishes. Pure WAAPI timing; self-cleaning. Returns a disposer.
+ * Language switch: a SILKY content crossfade — the foreground UI gently dips, the
+ * text swaps at the trough, then it returns — accompanied by a subtle neural-network
+ * shimmer rendered in the BACKGROUND (inside `.app-backdrop`, low opacity, behind the
+ * content). NEVER a flash over the UI. Pure WAAPI; self-cleaning. Returns a disposer.
  */
 function runNeuralSwitch(runWalk: () => void): () => void {
-  const w = window.innerWidth || document.documentElement.clientWidth || 1280;
-  const h = window.innerHeight || document.documentElement.clientHeight || 720;
-  const accent = readVar("--color-accent", "oklch(62% 0.225 293)");
-  const cyan = readVar("--color-cyan", "oklch(80% 0.13 218)");
+  const SWAP_AT = 280; // text swaps at the crossfade trough
+  const FADE_MS = 640; // content dip-and-return
+  const LAYER_MS = 800; // background shimmer lifetime
 
-  const overlay = document.createElement("div");
-  overlay.setAttribute("aria-hidden", "true");
-  Object.assign(overlay.style, {
-    position: "fixed",
-    inset: "0",
-    pointerEvents: "none",
-    zIndex: "9600",
-    contain: "strict",
-  } as CSSStyleDeclaration);
+  // Crossfade ONLY the foreground content (the app shell's children EXCEPT the
+  // backdrop), so the background neural shimmer keeps glowing while the UI dips and
+  // the backdrop itself never fades with the content.
+  const backdrop = document.querySelector(".app-backdrop") as HTMLElement | null;
+  const shell = backdrop?.parentElement ?? null;
+  const contentEls: HTMLElement[] = shell
+    ? Array.from(shell.children).filter(
+        (el): el is HTMLElement =>
+          el instanceof HTMLElement && !el.classList.contains("app-backdrop"),
+      )
+    : [document.body];
+  const contentAnims = contentEls.map((el) =>
+    el.animate([{ opacity: 1 }, { opacity: 0.6, offset: 0.42 }, { opacity: 1 }], {
+      duration: FADE_MS,
+      easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+    }),
+  );
 
-  const svg = document.createElementNS(SVG_NS, "svg");
-  svg.setAttribute("width", String(w));
-  svg.setAttribute("height", String(h));
-  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
-  Object.assign(svg.style, { width: "100%", height: "100%", display: "block" } as CSSStyleDeclaration);
-  overlay.appendChild(svg);
+  // Subtle neural shimmer INSIDE the backdrop (behind the UI, low opacity). Skipped
+  // when the backdrop is absent or hidden (低 GPU 模式 sets .app-backdrop display:none)
+  // → then it's a pure content crossfade, still silky, just no shimmer.
+  let layer: HTMLDivElement | null = null;
+  if (backdrop && getComputedStyle(backdrop).display !== "none") {
+    const accent = readVar("--color-accent", "oklch(62% 0.225 293)");
+    const cyan = readVar("--color-cyan", "oklch(80% 0.13 218)");
+    const w = backdrop.clientWidth || window.innerWidth || 1280;
+    const h = backdrop.clientHeight || window.innerHeight || 720;
 
-  const nodeCount = 14 + Math.floor(Math.random() * 5); // 14–18
-  const nodes = makeNodes(nodeCount, w, h);
-  const edges = makeEdges(nodes);
+    layer = document.createElement("div");
+    layer.setAttribute("aria-hidden", "true");
+    Object.assign(layer.style, {
+      position: "absolute",
+      inset: "0",
+      zIndex: "1", // above .hud-grid but still inside the -z-10 backdrop → behind UI
+      pointerEvents: "none",
+      overflow: "hidden",
+      opacity: "0",
+      contain: "paint",
+    } as CSSStyleDeclaration);
 
-  const lineEls: SVGLineElement[] = [];
-  edges.forEach(([a, b]) => {
-    const line = document.createElementNS(SVG_NS, "line");
-    line.setAttribute("x1", String(nodes[a].x));
-    line.setAttribute("y1", String(nodes[a].y));
-    line.setAttribute("x2", String(nodes[b].x));
-    line.setAttribute("y2", String(nodes[b].y));
-    const useCyan = Math.random() < 0.35;
-    line.setAttribute("stroke", useCyan ? cyan : accent);
-    line.setAttribute("stroke-width", "1.2");
-    line.setAttribute("stroke-linecap", "round");
-    line.style.filter = `drop-shadow(0 0 3px ${useCyan ? cyan : accent})`;
-    svg.appendChild(line);
-    lineEls.push(line);
-  });
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    Object.assign(svg.style, { width: "100%", height: "100%", display: "block" } as CSSStyleDeclaration);
+    layer.appendChild(svg);
 
-  const nodeEls: SVGCircleElement[] = [];
-  nodes.forEach((node, i) => {
-    const c = document.createElementNS(SVG_NS, "circle");
-    c.setAttribute("cx", String(node.x));
-    c.setAttribute("cy", String(node.y));
-    c.setAttribute("r", String(2.4 + Math.random() * 2.2));
-    const useCyan = i % 4 === 0;
-    c.setAttribute("fill", useCyan ? cyan : accent);
-    c.style.filter = `drop-shadow(0 0 6px ${useCyan ? cyan : accent})`;
-    c.style.transformBox = "fill-box";
-    c.style.transformOrigin = "center";
-    svg.appendChild(c);
-    nodeEls.push(c);
-  });
+    const nodes = makeNodes(14 + Math.floor(Math.random() * 5), w, h);
+    const edges = makeEdges(nodes);
+    const lineEls: SVGLineElement[] = [];
+    edges.forEach(([a, b]) => {
+      const line = document.createElementNS(SVG_NS, "line");
+      line.setAttribute("x1", String(nodes[a].x));
+      line.setAttribute("y1", String(nodes[a].y));
+      line.setAttribute("x2", String(nodes[b].x));
+      line.setAttribute("y2", String(nodes[b].y));
+      const useCyan = Math.random() < 0.35;
+      line.setAttribute("stroke", useCyan ? cyan : accent);
+      line.setAttribute("stroke-width", "1.1");
+      line.setAttribute("stroke-linecap", "round");
+      line.style.opacity = "0";
+      svg.appendChild(line);
+      lineEls.push(line);
+    });
+    const nodeEls: SVGCircleElement[] = [];
+    nodes.forEach((node, i) => {
+      const c = document.createElementNS(SVG_NS, "circle");
+      c.setAttribute("cx", String(node.x));
+      c.setAttribute("cy", String(node.y));
+      c.setAttribute("r", String(2 + Math.random() * 1.8));
+      const useCyan = i % 4 === 0;
+      c.setAttribute("fill", useCyan ? cyan : accent);
+      c.style.filter = `drop-shadow(0 0 5px ${useCyan ? cyan : accent})`;
+      c.style.transformBox = "fill-box";
+      c.style.transformOrigin = "center";
+      c.style.opacity = "0";
+      svg.appendChild(c);
+      nodeEls.push(c);
+    });
 
-  document.body.appendChild(overlay);
+    backdrop.appendChild(layer);
 
-  const STAGGER = 18; // ms between synapses lighting up (organic propagation)
-  const DRAW_MS = 340;
-  const IGNITE_PEAK = 260; // text swaps here
-  const EXTINGUISH_MS = 300;
-  // Cap the cascade so a dense graph still finishes inside the ~800–950ms budget.
-  const MAX_HOLD = 600;
-
-  // IGNITE — neurons FLICKER on like synapses firing: rapid, erratic opacity
-  // blinks (STEPPED, not smooth, so they read as a flicker) that settle to fully
-  // lit, staggered for a propagating-firing feel. Opacity-only WAAPI — cheap.
-  const FLICKER: Keyframe[] = [
-    { opacity: 0 },
-    { opacity: 1, offset: 0.1 },
-    { opacity: 0.12, offset: 0.24 },
-    { opacity: 1, offset: 0.4 },
-    { opacity: 0.35, offset: 0.58 },
-    { opacity: 1, offset: 0.74 },
-    { opacity: 0.6, offset: 0.88 },
-    { opacity: 1 },
-  ];
-  lineEls.forEach((line, i) => {
-    line.animate(FLICKER, { duration: 400 + (i % 5) * 45, delay: i * STAGGER, easing: "steps(1, end)", fill: "both" });
-  });
-
-  nodeEls.forEach((c, i) => {
-    c.animate(
-      [
-        { opacity: 0, transform: "scale(0.5)" },
-        { opacity: 1, transform: "scale(1.3)", offset: 0.1 },
-        { opacity: 0.12, transform: "scale(0.9)", offset: 0.26 },
-        { opacity: 1, transform: "scale(1.2)", offset: 0.46 },
-        { opacity: 0.4, transform: "scale(1)", offset: 0.64 },
-        { opacity: 1, transform: "scale(1.12)", offset: 0.82 },
-        { opacity: 1, transform: "scale(1)" },
-      ],
-      { duration: 440 + (i % 4) * 55, delay: i * STAGGER * 0.7, easing: "steps(1, end)", fill: "both" },
+    // Whole-layer envelope: fade in, hold faint, fade out — ambient, never harsh.
+    layer.animate(
+      [{ opacity: 0 }, { opacity: 0.7, offset: 0.2 }, { opacity: 0.7, offset: 0.72 }, { opacity: 0 }],
+      { duration: LAYER_MS, easing: "ease-in-out", fill: "both" },
     );
-  });
+    // SMOOTH (not stepped) low-opacity synapse pulses, staggered for an organic feel.
+    const STAGGER = 16;
+    lineEls.forEach((line, i) => {
+      line.animate(
+        [{ opacity: 0 }, { opacity: 0.16, offset: 0.45 }, { opacity: 0.08, offset: 0.75 }, { opacity: 0.13 }],
+        { duration: 520, delay: 80 + i * STAGGER, easing: "ease-in-out", fill: "both" },
+      );
+    });
+    nodeEls.forEach((c, i) => {
+      c.animate(
+        [
+          { opacity: 0, transform: "scale(0.6)" },
+          { opacity: 0.22, transform: "scale(1.15)", offset: 0.45 },
+          { opacity: 0.12, transform: "scale(1)", offset: 0.75 },
+          { opacity: 0.18, transform: "scale(1.05)" },
+        ],
+        { duration: 560, delay: 60 + Math.round(i * STAGGER * 0.8), easing: "ease-in-out", fill: "both" },
+      );
+    });
+  }
 
+  // Swap the language at the crossfade trough so the change reads as a smooth dip.
   let swapped = false;
   const swap = () => {
     if (swapped) return;
     swapped = true;
     runWalk();
   };
+  const swapTimer = window.setTimeout(swap, SWAP_AT);
 
-  // Swap text at the ignition peak.
-  const swapTimer = window.setTimeout(swap, IGNITE_PEAK);
-
-  // EXTINGUISH: hold the lit network briefly, then fade the whole overlay out.
-  const lastDelay = Math.max(lineEls.length - 1, 0) * STAGGER + DRAW_MS;
-  const holdUntil = Math.min(Math.max(lastDelay, IGNITE_PEAK + 220), MAX_HOLD);
   let removed = false;
   const cleanup = () => {
     if (removed) return;
     removed = true;
     window.clearTimeout(swapTimer);
-    window.clearTimeout(fadeTimer);
-    overlay.remove();
+    window.clearTimeout(endTimer);
+    contentAnims.forEach((a) => {
+      try {
+        a.cancel();
+      } catch {
+        /* already finished/removed */
+      }
+    });
+    layer?.remove();
   };
+  const endTimer = window.setTimeout(cleanup, LAYER_MS + 40);
 
-  const fade = overlay.animate([{ opacity: 1 }, { opacity: 0 }], {
-    duration: EXTINGUISH_MS,
-    delay: holdUntil,
-    easing: "ease-in",
-    fill: "forwards",
-  });
-  fade.onfinish = cleanup;
-  // Safety net in case onfinish never fires (e.g. animation cancelled).
-  const fadeTimer = window.setTimeout(cleanup, holdUntil + EXTINGUISH_MS + 80);
-
-  // Disposer: ensure the swap still happens and the overlay is removed on unmount.
+  // Disposer: ensure the swap still happens and everything is cleaned up on unmount.
   return () => {
     swap();
     cleanup();
@@ -704,8 +711,9 @@ export function useGlobalI18n(): void {
       langFirst.current = false;
       runWalk();
     } else {
-      // "神经脉络亮起熄灭" — a neural network ignites across the viewport, swaps the
-      // language at the ignition peak, then extinguishes.
+      // Silky content crossfade (the UI dips, text swaps at the trough, then
+      // returns) with a SUBTLE neural shimmer in the BACKDROP — never a flash over
+      // the UI (see runNeuralSwitch).
       disposeNeural = runNeuralSwitch(runWalk);
     }
 
