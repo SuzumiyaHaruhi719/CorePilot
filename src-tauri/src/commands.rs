@@ -3,7 +3,7 @@
 //! few bits for a 64-logical-CPU mask); see `serde_u64`.
 
 use crate::affinity;
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 use crate::optimize::{self, CleanResult, MemDetail};
 use crate::process::{self, ProcInfo};
 use crate::state::AppState;
@@ -159,24 +159,40 @@ pub fn get_memory_detail() -> CoreResult<MemDetail> {
     optimize::memory_detail()
 }
 
-#[tauri::command]
-pub fn free_working_sets() -> CoreResult<()> {
-    optimize::free_working_sets()
+/// Run a blocking optimization step on the blocking thread pool. Sync Tauri
+/// commands execute on the MAIN thread — the window's message pump — so
+/// seconds-long work (temp-tree deletion, standby purge, powercfg/ipconfig
+/// child processes) froze the whole app into "未响应". Async commands leave the
+/// main thread alone; `spawn_blocking` keeps the heavy work off the async
+/// reactor too.
+async fn run_blocking<T, F>(f: F) -> CoreResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CoreResult<T> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| CoreError::Msg(format!("blocking task failed: {e}")))?
 }
 
 #[tauri::command]
-pub fn purge_standby() -> CoreResult<()> {
-    optimize::purge_standby()
+pub async fn free_working_sets() -> CoreResult<()> {
+    run_blocking(optimize::free_working_sets).await
 }
 
 #[tauri::command]
-pub fn clean_temp() -> CoreResult<CleanResult> {
-    Ok(optimize::clean_temp())
+pub async fn purge_standby() -> CoreResult<()> {
+    run_blocking(optimize::purge_standby).await
 }
 
 #[tauri::command]
-pub fn flush_dns() -> CoreResult<()> {
-    optimize::flush_dns()
+pub async fn clean_temp() -> CoreResult<CleanResult> {
+    run_blocking(|| Ok(optimize::clean_temp())).await
+}
+
+#[tauri::command]
+pub async fn flush_dns() -> CoreResult<()> {
+    run_blocking(optimize::flush_dns).await
 }
 
 #[tauri::command]
@@ -267,13 +283,15 @@ pub fn reveal_in_explorer(path: String) -> CoreResult<()> {
 }
 
 #[tauri::command]
-pub fn get_power_plan() -> CoreResult<String> {
-    optimize::get_power_plan()
+pub async fn get_power_plan() -> CoreResult<String> {
+    // Shells out to powercfg — a child-process spawn+wait that stalled the
+    // main thread's message pump as a sync command.
+    run_blocking(optimize::get_power_plan).await
 }
 
 #[tauri::command]
-pub fn set_power_plan(plan: String) -> CoreResult<()> {
-    optimize::set_power_plan(&plan)
+pub async fn set_power_plan(plan: String) -> CoreResult<()> {
+    run_blocking(move || optimize::set_power_plan(&plan)).await
 }
 
 #[tauri::command]
