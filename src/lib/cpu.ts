@@ -4,7 +4,7 @@ import type { CpuTopology } from "./ipc";
  *  bits is exact (a JS `number` only holds integers < 2^53, losing bits ≥ 53 on
  *  HEDT parts with > 53 logical CPUs). */
 
-export function idsFromMask(mask: bigint): number[] {
+function idsFromMask(mask: bigint): number[] {
   const ids: number[] = [];
   for (let i = 0n; i < 64n; i++) {
     if ((mask >> i) & 1n) ids.push(Number(i));
@@ -28,15 +28,6 @@ export function popcount(mask: bigint): number {
   return idsFromMask(mask).length;
 }
 
-export const PRIORITY_LABELS: Record<number, string> = {
-  0x40: "低",
-  0x4000: "低于正常",
-  0x20: "正常",
-  0x8000: "高于正常",
-  0x80: "高",
-  0x100: "实时",
-};
-
 /** Backend cluster kinds, plus the synthetic spans used for affinity masks. */
 export type CcdKind = "all" | "vcache" | "freq" | "standard" | "pcore" | "ecore" | "mixed" | "none";
 
@@ -46,12 +37,6 @@ interface ClusterLike {
   label: string;
 }
 
-/** True when this CPU actually has a distinct 3D V-Cache CCD. On non-X3D AMD,
- *  Intel, or single-cluster CPUs this is false, and the V-Cache / 频率 labels
- *  must not be used (they'd be misleading). */
-export function hasVcache(topo: CpuTopology | null): boolean {
-  return !!topo && topo.vcacheCcd != null;
-}
 
 /** Human display name for a CPU cluster, generalized across hardware:
  *  Intel P/E → "性能核"/"能效核"; multi-CCD → "CCD N"; single cluster → "全部核心". */

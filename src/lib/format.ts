@@ -6,10 +6,6 @@ export function formatBytes(bytes: number, digits = 1): string {
   return `${(bytes / 1024 ** i).toFixed(digits)} ${UNITS[i]}`;
 }
 
-export function formatPct(value: number, digits = 1): string {
-  return `${value.toFixed(digits)}%`;
-}
-
 /** Seconds → "H:MM:SS" (process CPU time). */
 export function formatDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return "0:00:00";

@@ -23,7 +23,7 @@ export interface FanConfig {
  * floor — newer GeForce cards ignore <30% and only do 0-RPM in auto mode), a
  * gentle mid-range, then full speed by 85 °C. Works for case/CPU/AIO and GPU fans.
  */
-export const DEFAULT_CURVE: FanCurvePoint[] = [
+const DEFAULT_CURVE: FanCurvePoint[] = [
   { tempC: 30, duty: 30 },
   { tempC: 45, duty: 38 },
   { tempC: 55, duty: 50 },

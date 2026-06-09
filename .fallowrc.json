@@ -1,0 +1,6 @@
+{
+  "$schema": "https://docs.fallow.tools/schema/fallowrc.json",
+  "entry": ["src/main.tsx"],
+  "ignorePatterns": ["branding/**", "src-tauri/**", "dist/**", "design-system/**", "docs/**"],
+  "ignoreDependencies": ["@resvg/resvg-js"]
+}

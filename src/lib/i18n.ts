@@ -16,7 +16,7 @@ import { useSettings } from "../store/settings";
  *     each call site. Interpolated strings (with `${…}`) won't match and stay
  *     Chinese — a graceful fallback.
  */
-export const EN: Record<string, string> = {
+const EN: Record<string, string> = {
   // Navigation / shell
   "核心分配": "Cores",
   "任务管理器": "Task Manager",

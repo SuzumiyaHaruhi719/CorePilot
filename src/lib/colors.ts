@@ -6,8 +6,8 @@
  */
 
 /** The OKLCH lightness/chroma every group dot shares. */
-export const GROUP_L = 74;
-export const GROUP_C = 0.15;
+const GROUP_L = 74;
+const GROUP_C = 0.15;
 
 /** True when the app is in light mode (drives theme-aware telemetry colors). */
 export function isLightTheme(): boolean {

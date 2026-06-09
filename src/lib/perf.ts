@@ -144,7 +144,7 @@ const MS_PER_HOUR = 3_600_000;
  * interval, that interval is skipped (so partial telemetry under-reports rather
  * than fabricating zeros). Returns null when no interval had any power data.
  */
-export function computeEnergyWh(samples: PerfSample[]): number | null {
+function computeEnergyWh(samples: PerfSample[]): number | null {
   if (samples.length < 2) return null;
   let wh = 0;
   let any = false;
@@ -208,7 +208,7 @@ export function summarize(samples: PerfSample[]): PerfSummary {
 
 /** Max stored chart points per session (keeps persisted history small while
  *  retaining enough resolution for smooth curves at 5 Hz). */
-export const CHART_POINTS = 1200;
+const CHART_POINTS = 1200;
 
 /** Uniformly downsample to at most `max` points (keeps the final point). */
 export function downsample(samples: PerfSample[], max = CHART_POINTS): PerfSample[] {

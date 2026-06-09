@@ -120,9 +120,6 @@ export const historySnapshot = {
   perCore: () => perCoreHist.map((a) => a.slice()),
 };
 
-/** Background-recorded history length (per-core rings + scalar rings share it). */
-export const HISTORY_LEN = HISTORY_N;
-
 /**
  * App-level recorder. While `settings.bgRecord` is on, subscribe to the shared
  * metrics + sensors pollers (which also keeps them running) and append every
