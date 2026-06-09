@@ -694,7 +694,7 @@ export function FanControl() {
             <Button
               variant="primary"
               onClick={() => {
-                saveProfile(newName.trim() || `配置 ${profiles.length + 1}`);
+                saveProfile(newName.trim() || tf(`配置 ${profiles.length + 1}`, `Profile ${profiles.length + 1}`));
                 setShowSave(false);
               }}
             >
@@ -709,7 +709,7 @@ export function FanControl() {
           onChange={(e) => setNewName(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
-              saveProfile(newName.trim() || `配置 ${profiles.length + 1}`);
+              saveProfile(newName.trim() || tf(`配置 ${profiles.length + 1}`, `Profile ${profiles.length + 1}`));
               setShowSave(false);
             }
           }}

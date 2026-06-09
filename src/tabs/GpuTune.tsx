@@ -267,7 +267,7 @@ export function GpuTune() {
   }
 
   function saveProfile() {
-    const name = newName.trim() || `配置 ${profiles.length + 1}`;
+    const name = newName.trim() || tf(`配置 ${profiles.length + 1}`, `Profile ${profiles.length + 1}`);
     addProfile(name, draftToSettings());
     setNewName("");
     setShowSave(false);

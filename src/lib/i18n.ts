@@ -95,6 +95,12 @@ export const EN: Record<string, string> = {
   "关闭任务管理器后仍在后台记录 CPU / GPU / 内存 / 磁盘 / 网络，下次打开图表即为完整曲线（会略增空闲占用）":
     "Keeps recording CPU / GPU / Memory / Disk / Network after Task Manager is closed, so charts open already full (slightly raises idle usage)",
   "关闭后保留到托盘": "Keep in tray on close",
+  "GPU 渲染（界面与动效）": "GPU rendering (UI & animations)",
+  "开启时用 GPU 加速亚克力模糊、光晕与动画；关闭后改用极简渲染，几乎不占用显卡——游戏时避免与游戏抢 GPU，也可消除合成器卡顿":
+    "When on, the GPU accelerates the acrylic blur, glow and animations; when off, a minimal render path uses almost no GPU — so it won't compete with your game, and it clears compositor stutter.",
+  "开机自启动": "Start on boot",
+  "登录 Windows 时自动以管理员身份启动（计划任务方式，不弹 UAC）；配合“关闭后保留到托盘”可在开机后静默后台运行":
+    "Auto-starts as administrator at Windows logon (via a scheduled task — no UAC prompt); pair it with “Keep in tray on close” to run silently in the background after boot.",
   "关闭窗口时收起到系统托盘，后台继续运行（亲和性 / 超频 / OSD）；右键托盘图标可退出":
     "Minimize to the system tray on close; keeps running (affinity / OC / OSD). Right-click the tray icon to quit.",
   "语言 / Language": "Language",
@@ -397,7 +403,7 @@ export const EN: Record<string, string> = {
   "点击重命名": "Rename", "删除配置": "Delete profile", "移除": "Remove", "未发现进程": "No processes found",
   "分组名称": "Group name", "停止服务": "Stop service", "重启服务": "Restart service",
   "刷新服务列表": "Refresh service list", "刷新启动项": "Refresh startup items",
-  "诊断 · DEBUG": "DIAGNOSTICS", "导出调试日志": "Export debug logs", "调试日志": "Debug log",
+  "诊断 · DEBUG": "DIAGNOSTICS", "导出调试日志": "Export debug logs", "调试日志": "Debug log", "导出失败": "Export failed",
   "将本次启动以来的完整日志保存到下载文件夹，便于反馈问题。":
     "Saves the complete log since this launch to your Downloads folder for bug reports.",
   "预览 · 默认": "Preview · default", "中文": "Chinese", "游戏": "Games",
