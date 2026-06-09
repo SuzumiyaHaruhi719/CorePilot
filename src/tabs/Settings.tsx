@@ -115,6 +115,9 @@ function CheckRow({ check }: { check: NetCheck }) {
 
 function NetworkCard() {
   const tf = useTf();
+  // Network results come from the backend (some details embed live IPs), so the
+  // backend localizes them — pass the app's current language.
+  const en = useSettings((s) => s.language) === "en";
   const [diagnosing, setDiagnosing] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [checks, setChecks] = useState<NetCheck[] | null>(null);
@@ -128,7 +131,7 @@ function NetworkCard() {
     setError(null);
     setRepairResults(null);
     try {
-      const result = await api.networkDiagnose();
+      const result = await api.networkDiagnose(en);
       setChecks(result);
       // Pre-select repairs tied to any failed check; the user can still change.
       const failed = new Set(result.filter((c) => !c.ok).map((c) => c.id));
@@ -160,7 +163,7 @@ function NetworkCard() {
     try {
       // Preserve REPAIR_OPTIONS order for a stable, predictable result list.
       const actions = REPAIR_OPTIONS.filter((opt) => selected.has(opt.id)).map((opt) => opt.id);
-      setRepairResults(await api.networkRepair(actions));
+      setRepairResults(await api.networkRepair(actions, en));
     } catch (err: unknown) {
       setError(getErrorMessage(err));
     } finally {

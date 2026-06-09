@@ -357,8 +357,8 @@ export const api = {
   listStartup: () => invoke<StartupItem[]>("list_startup"),
   setStartupEnabled: (name: string, location: string, enabled: boolean) =>
     invoke<void>("set_startup_enabled", { name, location, enabled }),
-  networkDiagnose: () => invoke<NetCheck[]>("network_diagnose"),
-  networkRepair: (actions: string[]) => invoke<NetCheck[]>("network_repair", { actions }),
+  networkDiagnose: (en: boolean) => invoke<NetCheck[]>("network_diagnose", { en }),
+  networkRepair: (actions: string[], en: boolean) => invoke<NetCheck[]>("network_repair", { actions, en }),
   gpuOcInfo: () => invoke<GpuOcInfo>("gpu_oc_info"),
   gpuOcApply: (settings: GpuOcSettings) => invoke<void>("gpu_oc_apply", { settings }),
   gpuOcReset: () => invoke<void>("gpu_oc_reset"),

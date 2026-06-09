@@ -1,11 +1,14 @@
 //! One-click network diagnostics & repair, inspired by 360断网急救箱.
 //!
 //! All checks are best-effort and must never panic — a failed probe simply
-//! becomes a `NetCheck { ok: false, .. }` with a human-readable zh-CN detail.
-//! Probes use short timeouts so the whole sweep stays responsive even when the
-//! machine is offline. External tools (ipconfig / netsh / ping) run via
-//! `std::process::Command` with `CREATE_NO_WINDOW` so no console window flashes
-//! in front of the GUI.
+//! becomes a `NetCheck { ok: false, .. }` with a human-readable detail. Probes use
+//! short timeouts so the whole sweep stays responsive even when the machine is
+//! offline. External tools (ipconfig / netsh / ping) run via `std::process::Command`
+//! with `CREATE_NO_WINDOW` so no console window flashes in front of the GUI.
+//!
+//! i18n: results are produced by the BACKEND (some details interpolate live IPs, so
+//! the frontend dictionary can't translate them). Each command takes `en` — the
+//! app's current language — and returns English or Chinese label/detail strings.
 
 use serde::Serialize;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -34,6 +37,17 @@ impl NetCheck {
             ok,
             detail: detail.into(),
         }
+    }
+}
+
+/// Pick the English or Chinese variant of a fixed (compile-time) string. Callers
+/// always pass string literals, which are already `&'static str` — no allocation,
+/// no unsafe.
+fn tr(en: bool, en_s: &'static str, zh_s: &'static str) -> &'static str {
+    if en {
+        en_s
+    } else {
+        zh_s
     }
 }
 
@@ -119,24 +133,48 @@ fn parse_ipconfig(text: &str) -> (Option<String>, Option<String>) {
 }
 
 /// adapter: a non-loopback adapter must have a routable IPv4 address.
-fn check_adapter(ipconfig: &str) -> NetCheck {
+fn check_adapter(ipconfig: &str, en: bool) -> NetCheck {
     let (local_ip, _) = parse_ipconfig(ipconfig);
+    let label = tr(en, "Network adapter", "网络适配器");
     match local_ip {
-        Some(ip) => NetCheck::new("adapter", "网络适配器", true, format!("已分配 IPv4 地址 {ip}")),
+        Some(ip) => NetCheck::new(
+            "adapter",
+            label,
+            true,
+            if en {
+                format!("IPv4 address {ip} assigned")
+            } else {
+                format!("已分配 IPv4 地址 {ip}")
+            },
+        ),
         None => NetCheck::new(
             "adapter",
-            "网络适配器",
+            label,
             false,
-            "未检测到有效的 IPv4 地址，网卡可能被禁用或未连接",
+            tr(
+                en,
+                "No valid IPv4 address — the adapter may be disabled or unplugged",
+                "未检测到有效的 IPv4 地址，网卡可能被禁用或未连接",
+            ),
         ),
     }
 }
 
 /// gateway: the default gateway must answer a single short ping.
-fn check_gateway(ipconfig: &str) -> NetCheck {
+fn check_gateway(ipconfig: &str, en: bool) -> NetCheck {
     let (_, gateway) = parse_ipconfig(ipconfig);
+    let label = tr(en, "Default gateway", "默认网关");
     let Some(gw) = gateway else {
-        return NetCheck::new("gateway", "默认网关", false, "未找到默认网关，可能未连接到路由器");
+        return NetCheck::new(
+            "gateway",
+            label,
+            false,
+            tr(
+                en,
+                "No default gateway found — you may not be connected to a router",
+                "未找到默认网关，可能未连接到路由器",
+            ),
+        );
     };
 
     // ping -n 1 -w 1000: one echo, 1s timeout. Success is signalled by the exit
@@ -146,54 +184,78 @@ fn check_gateway(ipconfig: &str) -> NetCheck {
         .unwrap_or(false);
 
     if reachable {
-        NetCheck::new("gateway", "默认网关", true, format!("网关 {gw} 可达"))
+        NetCheck::new(
+            "gateway",
+            label,
+            true,
+            if en {
+                format!("Gateway {gw} reachable")
+            } else {
+                format!("网关 {gw} 可达")
+            },
+        )
     } else {
         NetCheck::new(
             "gateway",
-            "默认网关",
+            label,
             false,
-            format!("网关 {gw} 无响应，本地网络连接可能存在故障"),
+            if en {
+                format!("Gateway {gw} not responding — the local network may be faulty")
+            } else {
+                format!("网关 {gw} 无响应，本地网络连接可能存在故障")
+            },
         )
     }
 }
 
 /// dns: a known connectivity host must resolve to at least one address.
-fn check_dns() -> NetCheck {
+fn check_dns(en: bool) -> NetCheck {
     let resolved = ("www.msftconnecttest.com", 80)
         .to_socket_addrs()
         .map(|mut addrs| addrs.next().is_some())
         .unwrap_or(false);
 
+    let label = tr(en, "DNS resolution", "DNS 解析");
     if resolved {
-        NetCheck::new("dns", "DNS 解析", true, "域名解析正常")
+        NetCheck::new("dns", label, true, tr(en, "Domain resolution OK", "域名解析正常"))
     } else {
         NetCheck::new(
             "dns",
-            "DNS 解析",
+            label,
             false,
-            "域名无法解析，DNS 服务器可能配置错误或不可用",
+            tr(
+                en,
+                "Can't resolve domains — the DNS server may be misconfigured or down",
+                "域名无法解析，DNS 服务器可能配置错误或不可用",
+            ),
         )
     }
 }
 
 /// internet: a TCP handshake to a public anycast host (AliDNS 223.5.5.5:443)
 /// within ~1s proves real outbound reachability past the gateway.
-fn check_internet() -> NetCheck {
+fn check_internet(en: bool) -> NetCheck {
     let addr: SocketAddr = "223.5.5.5:443".parse().expect("static addr");
+    let label = tr(en, "Internet connection", "互联网连接");
     match TcpStream::connect_timeout(&addr, Duration::from_millis(1000)) {
-        Ok(_) => NetCheck::new("internet", "互联网连接", true, "已成功连接到互联网"),
+        Ok(_) => NetCheck::new("internet", label, true, tr(en, "Connected to the internet", "已成功连接到互联网")),
         Err(_) => NetCheck::new(
             "internet",
-            "互联网连接",
+            label,
             false,
-            "无法连接到外部服务器，互联网访问可能中断",
+            tr(
+                en,
+                "Can't reach external servers — internet access may be down",
+                "无法连接到外部服务器，互联网访问可能中断",
+            ),
         ),
     }
 }
 
 /// proxy: report HKCU Internet Settings. ok = true means "no system proxy"
 /// (the normal state); ok = false flags an enabled proxy that may break access.
-fn check_proxy() -> NetCheck {
+fn check_proxy(en: bool) -> NetCheck {
+    let label = tr(en, "Proxy settings", "代理设置");
     // `reg query` avoids a registry-crate dependency and matches the project's
     // shell-out style. ProxyEnable is a REG_DWORD (0x0 / 0x1).
     let out = run_capture(
@@ -223,7 +285,7 @@ fn check_proxy() -> NetCheck {
         .unwrap_or(false);
 
     if !enabled {
-        return NetCheck::new("proxy", "代理设置", true, "未启用系统代理（正常）");
+        return NetCheck::new("proxy", label, true, tr(en, "No system proxy (normal)", "未启用系统代理（正常）"));
     }
 
     // A proxy is on — surface the server string so the user can judge it.
@@ -243,57 +305,72 @@ fn check_proxy() -> NetCheck {
             .and_then(|l| l.split("REG_SZ").nth(1).map(|s| s.trim().to_string()))
     })
     .filter(|s| !s.is_empty())
-    .unwrap_or_else(|| "未知".to_string());
+    .unwrap_or_else(|| if en { "unknown".to_string() } else { "未知".to_string() });
 
     NetCheck::new(
         "proxy",
-        "代理设置",
+        label,
         false,
-        format!("已启用系统代理（{server}），若无法上网可尝试重置代理"),
+        if en {
+            format!("System proxy enabled ({server}); if you can't get online, try resetting the proxy")
+        } else {
+            format!("已启用系统代理（{server}），若无法上网可尝试重置代理")
+        },
     )
 }
 
-/// Run the full diagnostic sweep. Best-effort, never panics.
+/// Run the full diagnostic sweep. Best-effort, never panics. `en` selects the
+/// language of the returned label/detail strings.
 #[tauri::command]
-pub fn network_diagnose() -> Vec<NetCheck> {
+pub fn network_diagnose(en: bool) -> Vec<NetCheck> {
     // One ipconfig call feeds both the adapter and gateway checks.
     let ipconfig = run_capture("ipconfig", &["/all"])
         .map(|o| decode_console(&o.stdout))
         .unwrap_or_default();
 
     vec![
-        check_adapter(&ipconfig),
-        check_gateway(&ipconfig),
-        check_dns(),
-        check_internet(),
-        check_proxy(),
+        check_adapter(&ipconfig, en),
+        check_gateway(&ipconfig, en),
+        check_dns(en),
+        check_internet(en),
+        check_proxy(en),
     ]
 }
 
 /// Run a repair command silently and map the result to a NetCheck. `ok`
-/// reflects the process exit status; `detail` is the supplied zh-CN message.
-fn run_fix(id: &str, label: &str, ok_detail: &str, program: &str, args: &[&str]) -> NetCheck {
+/// reflects the process exit status; `ok_detail` is the success message.
+fn run_fix(id: &str, label: &str, ok_detail: &str, program: &str, args: &[&str], en: bool) -> NetCheck {
     match run_capture(program, args) {
         Some(out) if out.status.success() => NetCheck::new(id, label, true, ok_detail),
-        Some(_) => NetCheck::new(id, label, false, "命令执行失败，请确认以管理员身份运行"),
-        None => NetCheck::new(id, label, false, "无法启动修复命令"),
+        Some(_) => NetCheck::new(
+            id,
+            label,
+            false,
+            tr(
+                en,
+                "Command failed — make sure CorePilot is running as administrator",
+                "命令执行失败，请确认以管理员身份运行",
+            ),
+        ),
+        None => NetCheck::new(id, label, false, tr(en, "Couldn't start the repair command", "无法启动修复命令")),
     }
 }
 
 /// Apply the requested repairs. Unknown ids are ignored. Each requested id
-/// yields exactly one NetCheck describing the outcome.
+/// yields exactly one NetCheck describing the outcome. `en` selects the language.
 #[tauri::command]
-pub fn network_repair(actions: Vec<String>) -> Vec<NetCheck> {
+pub fn network_repair(actions: Vec<String>, en: bool) -> Vec<NetCheck> {
     let mut results = Vec::with_capacity(actions.len());
 
     for action in actions {
         let result = match action.as_str() {
             "flushDns" => run_fix(
                 "flushDns",
-                "刷新 DNS 缓存",
-                "DNS 缓存已刷新",
+                tr(en, "Flush DNS cache", "刷新 DNS 缓存"),
+                tr(en, "DNS cache flushed", "DNS 缓存已刷新"),
                 "ipconfig",
                 &["/flushdns"],
+                en,
             ),
             "renewDhcp" => {
                 // Release first, then renew. A release failure (e.g. static IP)
@@ -301,32 +378,36 @@ pub fn network_repair(actions: Vec<String>) -> Vec<NetCheck> {
                 let _ = run_capture("ipconfig", &["/release"]);
                 run_fix(
                     "renewDhcp",
-                    "重新获取 IP",
-                    "已重新向 DHCP 获取 IP 地址",
+                    tr(en, "Renew IP", "重新获取 IP"),
+                    tr(en, "Renewed IP address from DHCP", "已重新向 DHCP 获取 IP 地址"),
                     "ipconfig",
                     &["/renew"],
+                    en,
                 )
             }
             "resetWinsock" => run_fix(
                 "resetWinsock",
-                "重置 Winsock",
-                "Winsock 目录已重置，需重启后生效",
+                tr(en, "Reset Winsock", "重置 Winsock"),
+                tr(en, "Winsock catalog reset — takes effect after a reboot", "Winsock 目录已重置，需重启后生效"),
                 "netsh",
                 &["winsock", "reset"],
+                en,
             ),
             "resetTcpip" => run_fix(
                 "resetTcpip",
-                "重置 TCP/IP",
-                "TCP/IP 协议栈已重置，需重启后生效",
+                tr(en, "Reset TCP/IP", "重置 TCP/IP"),
+                tr(en, "TCP/IP stack reset — takes effect after a reboot", "TCP/IP 协议栈已重置，需重启后生效"),
                 "netsh",
                 &["int", "ip", "reset"],
+                en,
             ),
             "resetProxy" => run_fix(
                 "resetProxy",
-                "重置代理",
-                "WinHTTP 代理已重置为直连",
+                tr(en, "Reset proxy", "重置代理"),
+                tr(en, "WinHTTP proxy reset to direct", "WinHTTP 代理已重置为直连"),
                 "netsh",
                 &["winhttp", "reset", "proxy"],
+                en,
             ),
             // Unknown action — silently skip per spec.
             _ => continue,
