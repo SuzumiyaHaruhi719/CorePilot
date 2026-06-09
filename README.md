@@ -85,21 +85,34 @@
 ## 📊 ③ 任务管理器 · Task Manager （1:1 复刻）
 
 <p align="center">
-  <img src="branding/feature-monitor.gif" alt="Live performance — CPU/GPU/RAM sparklines and a per-core heatmap" width="92%">
+  <img src="branding/feature-taskmgr.gif" alt="Task Manager — process table with GPU-engine columns, app-group expand, sortable headers" width="92%">
 </p>
 
 保留 CorePilot 风格的二级标签页：
 
-- **性能** — CPU / 内存 / GPU / 显存 / 磁盘 / 网络实时曲线 + 每逻辑核·每 CCD 热力图，**可自选显示哪些指标**
-- **进程** — 可排序进程表 + GPU 占用 / GPU 引擎列（3D / Video Encode / Compute…）
+- **进程** — 可排序进程表，应用分组可展开（如 Google Chrome）+ GPU 占用 / GPU 引擎列（3D / Video Encode / Video Decode…）+ 一键结束任务
 - **详细信息** — 名称 / PID / 用户 / CPU / CPU 时间 / 内存 / 句柄 / 线程 / 平台
 - **服务 · 启动** — 1:1 列复刻；服务与启动项可按 “已启动优先” 排序、启停 / 禁用
+- **性能** — 见下方 ④「实时监控」
+
+> 上图为进程页：应用分组展开、每行 CPU 迷你条（>60% 转琥珀）、GPU 引擎徽章、点击列排序、悬停结束任务。
+
+---
+
+## 📈 ④ 实时监控 · Live monitoring
+
+<p align="center">
+  <img src="branding/feature-monitor.gif" alt="Live performance — CPU/GPU/RAM sparklines and a per-core heatmap" width="92%">
+</p>
+
+- CPU / 内存 / GPU / 显存 / 磁盘 / 网络实时曲线 + 每逻辑核·每 CCD 热力图，**可自选显示哪些指标**
+- 大号读数 + 曲线，磁盘 / 网络实时速率
 
 > 上图为实时监控仪表盘：CPU / GPU / 内存大号读数 + 曲线，磁盘 / 网络速率，以及每核负载热力图（CCD0 V-Cache 青 · CCD1 高频 琥珀）。
 
 ---
 
-## ⚡ ④ 一键优化 · One-click optimization
+## ⚡ ⑤ 一键优化 · One-click optimization
 
 <p align="center">
   <img src="branding/feature-optimize.gif" alt="One-click optimization — checklist runs while memory usage drops" width="92%">
@@ -111,7 +124,24 @@
 
 ---
 
-## 🎮 ⑤ 游戏内 OSD · In-game overlay
+## 🌀 ⑥ 风扇控制 · Fan control （FanXpert 式）
+
+<p align="center">
+  <img src="branding/feature-fan.gif" alt="Fan control — radial RPM gauge + temperature→duty curve editor with a live operating point" width="92%">
+</p>
+
+主板风扇调速，**自动 / 手动 / 温度曲线** 三种模式，基于 LibreHardwareMonitor 读取 Super-I/O（Nuvoton / ITE / Fintek）转速并写入 PWM：
+
+- **径向转速表** + 实时 RPM / 占空比读数；**温度 → 转速曲线** 可拖动调整（双击空白加点、双击点删除），曲线上的实时工作点随温度移动
+- 内置预设 **Silent / Standard / Turbo / Full Blast**；可选温度源、最低转速下限（默认 20%，避免 AIO 水泵 / CPU 散热器停转）
+- **依赖主板固件是否开放写入** —— 锁定的消费级主板（如部分 B850）只能读取转速、不能调速，界面会明确提示「主板已锁定」（优雅降级，绝不伪造）
+- CorePilot 退出时自动把接管的风扇恢复为 BIOS 默认
+
+> 上图为曲线模式：径向转速表内风扇随转速旋转、外环占空比弧，温度 → 转速曲线上的青色工作点随温度实时移动。
+
+---
+
+## 🎮 ⑦ 游戏内 OSD · In-game overlay
 
 <p align="center">
   <img src="branding/feature-osd.gif" alt="In-game OSD overlay — transparent click-through metrics plate with hotkey" width="92%">
