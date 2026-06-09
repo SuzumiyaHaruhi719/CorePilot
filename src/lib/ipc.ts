@@ -323,6 +323,19 @@ interface RawAffinityInfo {
   sysMask: string;
 }
 
+/** SMU tuning status from the sidecar (Curve Optimizer / PBO write host). */
+export interface SmuStatus {
+  /** PawnIO ring-0 driver installed on the machine. */
+  pawnIo: boolean;
+  /** RyzenSMU module loaded → SMU writes possible. */
+  loaded: boolean;
+  version: number;
+  versionStr: string;
+  /** Detail text of the last apply reply (error/success). */
+  lastReply: string | null;
+  lastReplyOk: boolean;
+}
+
 export const api = {
   getOverview: () => invoke<Overview>("get_overview"),
   getTopology: async (): Promise<CpuTopology> => {
@@ -356,6 +369,17 @@ export const api = {
   flushDns: () => invoke<void>("flush_dns"),
   endTask: (pid: number) => invoke<void>("end_task", { pid }),
   getSensors: () => invoke<Sensors>("get_sensors"),
+  // SMU tuning (Curve Optimizer / PBO) — forwarded to the sensord sidecar.
+  smuStatus: () => invoke<SmuStatus>("smu_status"),
+  smuApplyCo: (ccd: number, core: number, margin: number, revertSecs: number) =>
+    invoke<boolean>("smu_apply_co", { ccd, core, margin, revertSecs }),
+  smuApplyCoAll: (margin: number, revertSecs: number) =>
+    invoke<boolean>("smu_apply_co_all", { margin, revertSecs }),
+  smuApplyLimit: (kind: "ppt" | "tdc" | "edc", value: number) =>
+    invoke<boolean>("smu_apply_limit", { kind, value }),
+  smuSetScalar: (scalar: number) => invoke<boolean>("smu_set_scalar", { scalar }),
+  smuConfirm: () => invoke<void>("smu_confirm"),
+  smuRevertCo: () => invoke<boolean>("smu_revert_co"),
   /** Reveal a file in Windows Explorer (open its folder + select it). */
   revealInExplorer: (path: string) => invoke<void>("reveal_in_explorer", { path }),
   /** Dump the full session log to Downloads/<folderName>/; returns the folder path. */
