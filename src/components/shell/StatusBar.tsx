@@ -3,12 +3,14 @@ import { motion } from "motion/react";
 import { formatBytes } from "../../lib/format";
 import { useSharedMetrics } from "../../hooks/useSharedTelemetry";
 import { useUi } from "../../store/ui";
+import { useSettings } from "../../store/settings";
 import { useT } from "../../lib/i18n";
 import { AnimatedNumber } from "../ui/AnimatedNumber";
 
 export function StatusBar() {
   const metrics = useSharedMetrics();
   const optimizationEnabled = useUi((s) => s.optimizationEnabled);
+  const reduceMotion = useSettings((s) => s.reduceMotion);
   const t = useT();
 
   const memPct = metrics ? (metrics.memUsed / metrics.memTotal) * 100 : 0;
@@ -34,8 +36,8 @@ export function StatusBar() {
         {optimizationEnabled ? (
           <>
             <motion.span
-              animate={{ opacity: [0.45, 1, 0.45] }}
-              transition={{ duration: 2.4, repeat: Infinity, ease: "easeInOut" }}
+              animate={reduceMotion ? { opacity: 1 } : { opacity: [0.45, 1, 0.45] }}
+              transition={reduceMotion ? { duration: 0 } : { duration: 2.4, repeat: Infinity, ease: "easeInOut" }}
               className="text-ok"
             >
               <ShieldCheck size={13} />

@@ -16,7 +16,7 @@ interface NavItem {
 const ITEMS: NavItem[] = [
   { id: "cores", label: "核心分配", icon: Cpu },
   { id: "taskmgr", label: "任务管理器", icon: ListTree },
-  { id: "monitor", label: "监控", icon: Gauge },
+  { id: "monitor", label: "历史", icon: Gauge },
   { id: "osd", label: "游戏OSD", icon: MonitorPlay },
   { id: "gpu", label: "GPU", icon: Rocket },
   { id: "fans", label: "风扇", icon: Fan },

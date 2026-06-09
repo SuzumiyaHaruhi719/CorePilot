@@ -869,22 +869,25 @@ function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
           ]}
         />
       </Row>
-      <Row label="屏幕位置">
-        <Segmented
-          id="osd-pos"
-          value={cfg.position}
-          onChange={(v) => onChange({ position: v as OsdCfg["position"] })}
-          options={[
-            { value: "tl", label: "左上" },
-            { value: "tc", label: "上中" },
-            { value: "tr", label: "右上" },
-            { value: "bl", label: "左下" },
-            { value: "bc", label: "下中" },
-            { value: "br", label: "右下" },
-            { value: "free", label: "自由" },
-          ]}
-        />
-      </Row>
+      <div className="sm:col-span-2">
+        <Row label="屏幕位置">
+          <Segmented
+            id="osd-pos"
+            value={cfg.position}
+            onChange={(v) => onChange({ position: v as OsdCfg["position"] })}
+            wrap
+            options={[
+              { value: "tl", label: "左上" },
+              { value: "tc", label: "上中" },
+              { value: "tr", label: "右上" },
+              { value: "bl", label: "左下" },
+              { value: "bc", label: "下中" },
+              { value: "br", label: "右下" },
+              { value: "free", label: "自由" },
+            ]}
+          />
+        </Row>
+      </div>
       {cfg.position === "free" && (
         <>
           <div className="sm:col-span-1">

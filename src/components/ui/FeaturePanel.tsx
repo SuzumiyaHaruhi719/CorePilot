@@ -1,5 +1,6 @@
 import { Check } from "lucide-react";
 import { motion } from "motion/react";
+import { useSettings } from "../../store/settings";
 
 interface FeaturePanelProps {
   label?: string;
@@ -8,17 +9,18 @@ interface FeaturePanelProps {
 }
 
 export function FeaturePanel({ label = "模块能力", points, note }: FeaturePanelProps) {
+  const reduceMotion = useSettings((s) => s.reduceMotion);
   return (
     <motion.div
-      initial={{ opacity: 0, y: 14 }}
+      initial={reduceMotion ? false : { opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+      transition={reduceMotion ? { duration: 0 } : { duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
       className="glass hairline rounded-2xl p-6"
     >
       <div className="mb-4 flex items-center gap-2">
         <motion.span
-          animate={{ opacity: [0.4, 1, 0.4] }}
-          transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
+          animate={reduceMotion ? { opacity: 1 } : { opacity: [0.4, 1, 0.4] }}
+          transition={reduceMotion ? { duration: 0 } : { duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
           className="h-2 w-2 rounded-full bg-accent glow-sm"
         />
         <span className="text-[11.5px] font-semibold uppercase tracking-[0.14em] text-muted">{label}</span>

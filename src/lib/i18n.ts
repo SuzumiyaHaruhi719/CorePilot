@@ -34,7 +34,8 @@ export const EN: Record<string, string> = {
   // Tab headers
   "深度优化": "Deep Optimization",
   "游戏内监控 OSD": "In-Game OSD",
-  "游戏监控": "Game Monitor",
+  "游戏监控": "Game Monitor", "游戏历史": "Game History",
+  "每局游戏的性能报告 — CPU / GPU / 内存 / 磁盘 / 网络": "Per-game performance reports — CPU / GPU / Memory / Disk / Network",
   "GPU 超频": "GPU Overclock",
   "风扇控制": "Fan Control",
   "进程核心分配": "Process Core Assignment",
@@ -551,6 +552,13 @@ function makeEdges(nodes: NeuralNode[]): Array<[number, number]> {
  * content). NEVER a flash over the UI. Pure WAAPI; self-cleaning. Returns a disposer.
  */
 function runNeuralSwitch(runWalk: () => void): () => void {
+  // Reduce-motion safety net: the caller only invokes this when reduce-motion is
+  // off, but the effect re-runs only on language change — so if reduce-motion was
+  // toggled on mid-flight, bail to an instant swap with no animation.
+  if (document.documentElement.dataset.reduceMotion === "true") {
+    runWalk();
+    return () => {};
+  }
   const SWAP_AT = 280; // text swaps at the crossfade trough
   const FADE_MS = 640; // content dip-and-return
   const LAYER_MS = 800; // background shimmer lifetime

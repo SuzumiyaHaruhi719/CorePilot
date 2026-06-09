@@ -12,12 +12,22 @@ interface SegmentedProps<T extends string> {
   value: T;
   options: Option<T>[];
   onChange: (value: T) => void;
+  /** Allow the options to wrap to multiple rows instead of one fixed row. Use for
+   *  many/long options (e.g. the OSD position picker) so they never overflow the
+   *  width — especially in English where labels are longer. */
+  wrap?: boolean;
 }
 
-export function Segmented<T extends string>({ id, value, options, onChange }: SegmentedProps<T>) {
+export function Segmented<T extends string>({ id, value, options, onChange, wrap }: SegmentedProps<T>) {
   const t = useT();
   return (
-    <div role="group" className="no-drag inline-flex rounded-lg border border-line bg-surface2 p-0.5">
+    <div
+      role="group"
+      className={cn(
+        "no-drag rounded-lg border border-line bg-surface2 p-0.5",
+        wrap ? "flex flex-wrap gap-0.5" : "inline-flex",
+      )}
+    >
       {options.map((option) => {
         const active = option.value === value;
         return (
