@@ -177,12 +177,18 @@ export function effectiveConfig(global: OsdConfig, override?: Partial<OsdConfig>
 
 /**
  * Decide whether the OSD should render for the given foreground app, and with
- * what config. The default is to show on apps auto-detected as games, with the
- * white/black lists acting as explicit overrides:
+ * what config. Two independent layers:
  *
- * - blacklist match → force HIDE (never show, even if it is a game).
- * - whitelist match → force SHOW (show even if NOT detected as a game).
- * - no match → show **iff** the foreground app is a game (`isGame`).
+ *   1. The **in-game overlay** — shows on apps auto-detected as games when the
+ *      master switch (`enabled`) is on. The per-app lists tune this layer:
+ *        - whitelist → force SHOW (even if NOT detected as a game).
+ *        - blacklist → suppress it (treat the app as "not a game to show on").
+ *   2. The **desktop OSD** — a persistent overlay the user turned on
+ *      (`desktopMode`). It shows on the desktop / regular (non-game) apps,
+ *      INCLUDING blacklisted ones. Blacklisting an app must NOT tear the desktop
+ *      OSD down when you alt-tab to it — the black list only governs the in-game
+ *      layer (which matters when `desktopMode` is off). FPS is hidden here (no
+ *      game → no FPS), handled by the caller.
  *
  * Returns the effective `OsdConfig` to render, or `null` to hide.
  */
@@ -194,15 +200,14 @@ export function resolveOsd(
 ): OsdConfig | null {
   const n = exe ? normName(exe) : "";
   const match = n ? targets.find((t) => t.name === n) : undefined;
-  if (match) {
-    if (match.list === "black") return null;
-    // white → force show, even if not detected as a game.
-    return effectiveConfig(global, match.config);
-  }
-  // No explicit override: a game shows when the in-game overlay (`enabled`) is
-  // on; a non-game / desktop shows when `desktopMode` is on (the overlay hides
-  // FPS metrics there). The overlay window itself only exists when either flag
-  // is on, so "both off" shows nothing.
-  if (isGame) return global.enabled ? effectiveConfig(global, undefined) : null;
-  return global.desktopMode ? effectiveConfig(global, undefined) : null;
+  // Whitelist: force SHOW for this app, even if it isn't detected as a game.
+  if (match?.list === "white") return effectiveConfig(global, match.config);
+  // A blacklisted app is treated as "not a game" so it never triggers the
+  // in-game overlay — but the persistent desktop OSD (below) still applies.
+  const blacked = match?.list === "black";
+  if (!blacked && isGame) return global.enabled ? effectiveConfig(global, undefined) : null;
+  // Non-game (or a blacklisted app treated as one): the desktop OSD shows iff
+  // desktop mode is on. This is what keeps the desktop OSD alive when you switch
+  // to a blacklisted app; with desktop mode off, a blacklist genuinely hides it.
+  return global.desktopMode ? effectiveConfig(global, match?.config) : null;
 }

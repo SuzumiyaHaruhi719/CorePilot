@@ -87,10 +87,13 @@ export function DualAxisChart({
     const downColor = hueColor(downHue, 74, 0.15);
     const chrome = chartChrome();
 
+    // Gaps must be `null` in a PLAIN array — a `NaN` in a typed array poisons
+    // uPlot's y autoscale (non-finite min/max → blank y-axis + line). See the
+    // matching note in TimeSeriesChart.tsx.
     const data: uPlot.AlignedData = [
       Float64Array.from(timesSec),
-      Float64Array.from(up.map((v) => (isNum(v) ? v : NaN))),
-      Float64Array.from(down.map((v) => (isNum(v) ? v : NaN))),
+      up.map((v) => (isNum(v) ? v : null)),
+      down.map((v) => (isNum(v) ? v : null)),
     ];
 
     const areaFill = (color: string, top: number) => (u: uPlot) => {
@@ -109,12 +112,12 @@ export function DualAxisChart({
         x: true,
         y: false,
         sync: { key: syncKey, setSeries: false },
-        hover: { skip: [undefined, NaN] },
+        hover: { skip: [undefined, null] },
       },
       scales: {
         x: { time: false },
-        y: { range: (_u, _min, max) => [0, max <= 0 ? 1 : max * 1.1] },
-        y2: { range: (_u, _min, max) => [0, max <= 0 ? 1 : max * 1.1] },
+        y: { range: (_u, _min, max) => [0, Number.isFinite(max) && max > 0 ? max * 1.1 : 1] },
+        y2: { range: (_u, _min, max) => [0, Number.isFinite(max) && max > 0 ? max * 1.1 : 1] },
       },
       axes: [
         {

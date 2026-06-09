@@ -58,8 +58,8 @@ export const OSD_METRICS: OsdMetricDef[] = [
   { key: "fps.low1", cat: "fps", label: "1% Low FPS", tag: "1%", supported: true, value: (d) => (d.fps?.low1 == null ? null : d.fps.low1.toFixed(0)) },
   { key: "fps.low01", cat: "fps", label: "0.1% Low FPS", tag: "0.1%", supported: true, value: (d) => (d.fps?.low01 == null ? null : d.fps.low01.toFixed(0)) },
   { key: "fps.frametime", cat: "fps", label: "帧时间 (ms)", tag: "FT", supported: true, value: (d) => (d.fps?.frametimeMs == null ? null : `${d.fps.frametimeMs.toFixed(1)}ms`) },
-  { key: "net.down", cat: "net", label: "下载速度", tag: "↓", supported: true, value: (d) => { const r = rate(d.sensors?.netDown); return r ? `↓${r}` : null; } },
   { key: "net.up", cat: "net", label: "上传速度", tag: "↑", supported: true, value: (d) => { const r = rate(d.sensors?.netUp); return r ? `↑${r}` : null; } },
+  { key: "net.down", cat: "net", label: "下载速度", tag: "↓", supported: true, value: (d) => { const r = rate(d.sensors?.netDown); return r ? `↓${r}` : null; } },
 
   // CPU
   { key: "cpu.util", cat: "cpu", label: "占用率 (%)", tag: "CPU", supported: true, value: (d) => pct(d.metrics?.cpuOverall, 0) },
@@ -87,16 +87,12 @@ export const OSD_METRICS: OsdMetricDef[] = [
   { key: "disk.write", cat: "disk", label: "写入速度", tag: "W", supported: true, value: (d) => rate(d.sensors?.diskWrite) },
 ];
 
-export const OSD_METRIC_BY_KEY: Record<string, OsdMetricDef> = Object.fromEntries(
-  OSD_METRICS.map((m) => [m.key, m]),
-);
-
 /**
  * `show::*` layout-flag bits in `corepilot-osd-ipc` (the injected overlay reads
  * these from the shared block to decide which metric ROWS to draw). Must stay in
  * sync with the Rust `show` module.
  */
-export const OSD_SHOW_FLAGS = {
+const OSD_SHOW_FLAGS = {
   fps: 1 << 0,
   frametime: 1 << 1,
   cpu: 1 << 2,

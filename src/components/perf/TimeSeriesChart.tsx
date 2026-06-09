@@ -119,9 +119,15 @@ export function TimeSeriesChart({
     // Cache the latest cursor x-index in CSS px for the ref-line + tooltip hook.
     const refVals = refLines.map((r) => r.value).filter(isNum);
 
+    // uPlot treats only `null` (not `NaN`) as a gap. A `NaN` inside a typed array
+    // poisons the y autoscale scan — min/max go non-finite — so the y-axis, line
+    // and fill silently disappear while the x-axis still draws (the "random blank
+    // chart" bug: whichever series hits a leading/edge NaN during a mount/resize
+    // autoscale pass loses its y-scale). Use a PLAIN array with `null` gaps so
+    // `spanGaps` works and the scale stays finite.
     const data: uPlot.AlignedData = [
       Float64Array.from(timesSec),
-      Float64Array.from(values.map((v) => (isNum(v) ? v : NaN))),
+      values.map((v) => (isNum(v) ? v : null)),
     ];
 
     const opts: uPlot.Options = {
@@ -136,17 +142,21 @@ export function TimeSeriesChart({
         y: false,
         points: { show: true, size: 6, width: 2, stroke: line, fill: chrome.point },
         sync: { key: syncKey, setSeries: false },
-        // Bridge nulls when scanning for the closest hover index.
-        hover: { skip: [undefined, NaN] },
+        // Bridge gaps (now `null`) when scanning for the closest hover index.
+        hover: { skip: [undefined, null] },
       },
       scales: {
         x: { time: false },
         y: zeroFloor
-          ? { range: (_u, _min, max) => [0, max <= 0 ? 1 : max * 1.08] }
+          ? { range: (_u, _min, max) => [0, Number.isFinite(max) && max > 0 ? max * 1.08 : 1] }
           : {
+              // Guard against a non-finite scan (all-gap / leading-NaN series) so a
+              // bad autoscale pass can never install a [NaN, NaN] y-range.
               range: (_u, min, max) => {
-                const lo = Math.min(min, ...refVals);
-                const hi = Math.max(max, ...refVals);
+                const dmin = Number.isFinite(min) ? min : 0;
+                const dmax = Number.isFinite(max) ? max : 1;
+                const lo = Math.min(dmin, ...refVals);
+                const hi = Math.max(dmax, ...refVals);
                 const span = hi - lo || 1;
                 return [Math.max(0, lo - span * 0.08), hi + span * 0.08];
               },
