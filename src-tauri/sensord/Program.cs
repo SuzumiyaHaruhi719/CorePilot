@@ -367,6 +367,7 @@ internal static class Program
         var fans = new List<SensorReading>();
         var temps = new List<SensorReading>();
         var controls = new List<ControlReading>();
+        var cpuSensors = new List<CpuSensorReading>();
         var controlMap = new Dictionary<string, ISensor>();
 
         lock (Gate)
@@ -380,6 +381,7 @@ internal static class Program
                     case HardwareType.Cpu:
                         cpuPower ??= FindCpuPower(hardware);
                         cpuTemp ??= FindCpuTemp(hardware);
+                        CollectCpuSensors(hardware, cpuSensors);
                         break;
                     case HardwareType.GpuNvidia:
                     case HardwareType.GpuAmd:
@@ -412,7 +414,7 @@ internal static class Program
             moboFansAllZero = true;
         }
 
-        return BuildLine(cpuPower, cpuTemp, gpuPower, gpuTemp, fans, temps, controls);
+        return BuildLine(cpuPower, cpuTemp, gpuPower, gpuTemp, fans, temps, controls, cpuSensors);
     }
 
     /// <summary>
@@ -511,6 +513,33 @@ internal static class Program
         return 0;
     }
 
+    /// <summary>
+    /// Collect every CPU power / voltage / clock / current / temperature / load
+    /// sensor LHM exposes (per-core effective clocks, CCD temps, VDDCR / SoC
+    /// voltages, package power, TDC / EDC, etc. — many sourced from the AMD SMU
+    /// PM table). Read-only; degrades gracefully to whatever LHM provides.
+    /// </summary>
+    private static void CollectCpuSensors(IHardware cpu, List<CpuSensorReading> outList)
+    {
+        foreach (ISensor s in cpu.Sensors)
+        {
+            switch (s.SensorType)
+            {
+                case SensorType.Power:
+                case SensorType.Voltage:
+                case SensorType.Clock:
+                case SensorType.Current:
+                case SensorType.Temperature:
+                case SensorType.Load:
+                case SensorType.Factor:
+                    outList.Add(new CpuSensorReading(s.Name, s.SensorType.ToString(), Finite(s.Value)));
+                    break;
+            }
+        }
+        foreach (IHardware sub in cpu.SubHardware)
+            CollectCpuSensors(sub, outList);
+    }
+
     // --- CPU/GPU sensor selection (unchanged behaviour) -----------------------
 
     private static float? FindCpuPower(IHardware hardware) =>
@@ -588,10 +617,12 @@ internal static class Program
 
     private readonly record struct SensorReading(string id, string name, double? value);
     private readonly record struct ControlReading(string id, string name, double? pct, bool controllable, string hw);
+    private readonly record struct CpuSensorReading(string name, string type, double? value);
 
     private static string BuildLine(
         float? cpuPower, float? cpuTemp, float? gpuPower, float? gpuTemp,
-        List<SensorReading> fans, List<SensorReading> temps, List<ControlReading> controls)
+        List<SensorReading> fans, List<SensorReading> temps, List<ControlReading> controls,
+        List<CpuSensorReading> cpuSensors)
     {
         var payload = new
         {
@@ -602,12 +633,13 @@ internal static class Program
             fans = fans.ConvertAll(f => new { f.id, f.name, rpm = f.value }),
             temps = temps.ConvertAll(t => new { t.id, t.name, c = t.value }),
             controls = controls.ConvertAll(c => new { c.id, c.name, pct = c.pct, c.controllable, c.hw }),
+            cpu = cpuSensors.ConvertAll(s => new { s.name, s.type, value = s.value }),
         };
         return JsonSerializer.Serialize(payload, JsonOpts);
     }
 
     private static string NullLine() =>
-        "{\"cpuPower\":null,\"cpuTemp\":null,\"gpuPower\":null,\"gpuTemp\":null,\"fans\":[],\"temps\":[],\"controls\":[]}";
+        "{\"cpuPower\":null,\"cpuTemp\":null,\"gpuPower\":null,\"gpuTemp\":null,\"fans\":[],\"temps\":[],\"controls\":[],\"cpu\":[]}";
 
     /// <summary>Return a finite double or null (NaN/Infinity -> null) so the
     /// emitted JSON stays strict.</summary>

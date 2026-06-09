@@ -115,6 +115,14 @@ export interface CleanResult {
   files: number;
 }
 
+/** One deep SMU/CPU sensor (per-core clock, CCD temp, VDDCR/SoC voltage, package
+ *  power, TDC/EDC, …). `kind` is the LHM SensorType. Read-only telemetry. */
+export interface CpuSensor {
+  name: string;
+  kind: string;
+  value: number | null;
+}
+
 export interface Sensors {
   gpuPct: number | null;
   gpuName: string | null;
@@ -131,6 +139,9 @@ export interface Sensors {
   gpuTemp: number | null;
   /** Live CPU clock in MHz (base × % processor performance); null if unavailable. */
   cpuClock: number | null;
+  /** Deep SMU/CPU sensors (per-core clocks, CCD temps, voltages, TDC/EDC…); empty
+   *  if no hardware-sensor driver (PawnIO) is available. */
+  cpuSensors: CpuSensor[];
 }
 
 export interface GpuOcInfo {

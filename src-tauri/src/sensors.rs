@@ -65,6 +65,7 @@ pub struct SensorSample {
     pub cpu_temp: Option<f32>,    // °C
     pub gpu_temp: Option<f32>,    // °C
     pub cpu_clock: Option<f64>,   // live CPU clock, MHz (base × % perf)
+    pub cpu_sensors: Vec<CpuSensor>, // deep SMU/CPU sensors (per-core clk, CCD temp, voltages, TDC/EDC…)
 }
 
 /// A PDH query handle plus the counters opened against it. PDH handles are raw
@@ -100,6 +101,20 @@ struct SidecarReadings {
 
 /// Shared, thread-safe store for the most recent sidecar readings.
 static SIDECAR: Lazy<Mutex<SidecarReadings>> = Lazy::new(|| Mutex::new(SidecarReadings::default()));
+
+/// One deep CPU sensor from the sidecar's `cpu` array (per-core clock, CCD temp,
+/// VDDCR / SoC voltage, package power, TDC / EDC, … — many SMU-sourced). Read-only.
+#[derive(Serialize, Clone)]
+pub struct CpuSensor {
+    pub name: String,
+    /// LHM SensorType: Power | Voltage | Clock | Current | Temperature | Load | Factor.
+    pub kind: String,
+    pub value: Option<f32>,
+}
+
+/// Shared store of the most recent deep CPU sensors (kept out of the `Copy`
+/// `SidecarReadings` so that stays a cheap value type).
+static CPU_SENSORS: Lazy<Mutex<Vec<CpuSensor>>> = Lazy::new(|| Mutex::new(Vec::new()));
 /// Whether a sidecar process is currently believed to be alive.
 ///
 /// Set `true` (via a CAS) by [`ensure_sidecar`] when it wins the right to spawn,
@@ -205,6 +220,9 @@ pub fn ensure_sidecar() {
                 if let Some(readings) = parse_sidecar_line(&line) {
                     *SIDECAR.lock() = readings;
                 }
+                if let Some(cs) = parse_cpu_sensors(&line) {
+                    *CPU_SENSORS.lock() = cs;
+                }
                 // The same line also carries fan / temp / control arrays for
                 // the fan engine; let it parse what it needs.
                 crate::fan::ingest_line(&line);
@@ -213,6 +231,7 @@ pub fn ensure_sidecar() {
             // the UI shows power/temp as unavailable ("—") rather than stale
             // last-known values.
             *SIDECAR.lock() = SidecarReadings::default();
+            CPU_SENSORS.lock().clear();
             crate::fan::clear();
             // stdout closed → sidecar exited. Reap it; ignore the result.
             let _ = child.wait();
@@ -260,6 +279,34 @@ fn parse_sidecar_line(line: &str) -> Option<SidecarReadings> {
         cpu_temp: field("cpuTemp"),
         gpu_temp: field("gpuTemp"),
     })
+}
+
+/// Parse the `cpu` array (deep SMU/CPU sensors) from a sidecar JSON line.
+/// Returns `None` if the line isn't valid JSON or has no `cpu` array.
+fn parse_cpu_sensors(line: &str) -> Option<Vec<CpuSensor>> {
+    let json: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    let arr = json.get("cpu")?.as_array()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let kind = item.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let value = item
+            .get("value")
+            .and_then(|v| v.as_f64())
+            .filter(|n| n.is_finite())
+            .map(|n| n as f32);
+        out.push(CpuSensor { name, kind, value });
+    }
+    Some(out)
+}
+
+/// Latest deep CPU sensors parsed from the sidecar (empty until one arrives or
+/// if no hardware-sensor driver is available).
+pub fn cpu_sensors() -> Vec<CpuSensor> {
+    CPU_SENSORS.lock().clone()
 }
 
 /// Persistent sampler state.
@@ -622,5 +669,6 @@ pub fn sample() -> SensorSample {
         out.gpu_power = nvml_power.or(readings.gpu_power);
     }
 
+    out.cpu_sensors = cpu_sensors();
     out
 }
