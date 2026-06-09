@@ -135,7 +135,17 @@ export function OsdOverlay() {
 
   // Desktop mode: when showing on a non-game (desktop / regular app), FPS is
   // unavailable — hide the FPS-group metrics so only CPU/GPU/mem/disk/net show.
-  const shownMetrics = fg.isGame ? cfg.metrics : cfg.metrics.filter((k) => !k.startsWith("fps"));
+  const baseMetrics = fg.isGame ? cfg.metrics : cfg.metrics.filter((k) => !k.startsWith("fps"));
+  // Always render network upload (↑) before download (↓), regardless of the order
+  // they were toggled on — flips existing saved configs without a re-toggle.
+  const shownMetrics = (() => {
+    const up = baseMetrics.indexOf("net.up");
+    const down = baseMetrics.indexOf("net.down");
+    if (up === -1 || down === -1 || up < down) return baseMetrics;
+    const out = baseMetrics.filter((k) => k !== "net.up");
+    out.splice(out.indexOf("net.down"), 0, "net.up");
+    return out;
+  })();
   const needGpu = shownMetrics.some((k) => k.startsWith("gpu."));
   // Any FPS-group metric (fps / 1% low / 0.1% low / frametime) needs the stats fetch.
   const needFps = shownMetrics.some((k) => k.startsWith("fps"));
@@ -146,27 +156,48 @@ export function OsdOverlay() {
   useEffect(() => {
     let alive = true;
     const tick = async () => {
+      // Idle short-circuit: when the OSD can NEVER show — master switch off,
+      // desktop mode off, and no whitelist force-show entries — `resolveOsd`
+      // returns null for every possible foreground, so polling the backend is
+      // pure waste. Skip the IPC entirely (the window is already parked
+      // off-screen); the tick keeps running on cheap synchronous store reads, so
+      // flipping any of those flags brings the overlay back within one tick.
+      const g = useOsd.getState();
+      const tgts = useOsdTargets.getState().targets;
+      if (!g.enabled && !g.desktopMode && !tgts.some((t) => t.list === "white")) {
+        setFg((p) => (p.exe === null && !p.isGame ? p : { exe: null, isGame: false }));
+        setMon((p) => (p === null ? p : null));
+        return;
+      }
       const info = await api.foregroundInfo().catch(() => null);
       if (!alive) return;
       const exe = info?.exe ?? null;
       const isGame = info?.isGame ?? false;
-      setFg({ exe, isGame });
+      // Only commit a NEW fg snapshot when it actually changed — a fresh object
+      // every tick re-rendered the whole overlay tree once a second forever.
+      setFg((p) => (p.exe === exe && p.isGame === isGame ? p : { exe, isGame }));
       // Resolve visibility from the JUST-fetched foreground info + live store
       // state — NOT the stale `show` closed over from the previous render. This
       // lets a game gaining focus fetch its metrics in the SAME tick, so the
       // overlay appears immediately instead of after one empty poll.
-      const freshCfg = resolveOsd(useOsd.getState(), useOsdTargets.getState().targets, exe, isGame);
+      const freshCfg = resolveOsd(useOsd.getState(), tgts, exe, isGame);
       const showNow = freshCfg !== null;
       // Follow the foreground window's monitor when the OSD is showing FOR that
       // specific app — a detected game OR a whitelisted target — so the overlay
       // tracks it across displays. Desktop mode (general, no match) keeps mon=null
       // and stays on the primary monitor, so it can never be dragged off.
       const n = exe ? exe.trim().toLowerCase() : "";
-      const whitelisted =
-        !!n && useOsdTargets.getState().targets.some((t) => t.name === n && t.list === "white");
+      const whitelisted = !!n && tgts.some((t) => t.name === n && t.list === "white");
       const followFg = !!info && (isGame || whitelisted);
       const m = followFg ? await api.osdTargetMonitor().catch(() => null) : null;
-      if (alive) setMon(m);
+      // Same-value dedupe: the monitor tuple is a fresh array each fetch; only
+      // commit when the bounds actually changed.
+      if (alive)
+        setMon((p) =>
+          p === m || (p && m && p[0] === m[0] && p[1] === m[1] && p[2] === m[2] && p[3] === m[3])
+            ? p
+            : m,
+        );
       if (showNow) {
         // Derive the fetch flags from the freshly-resolved config + foreground
         // kind (desktop hides FPS), so the right data is fetched on the first

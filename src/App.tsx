@@ -26,7 +26,7 @@ import { AmdTuning } from "./tabs/AmdTuning";
 import { Tuning } from "./tabs/Tuning";
 import { useGpuProfiles } from "./store/gpuProfiles";
 import { useFanProfiles } from "./store/fanProfiles";
-import { useOsd } from "./store/osd";
+import { useOsd, useOsdTargets } from "./store/osd";
 
 /** Last pointer-down position, used as the origin for the theme-switch circular
  *  reveal so the new theme appears to wipe out from where the user clicked. */
@@ -151,6 +151,35 @@ function App() {
       return;
     }
     return useOsd.persist.onFinishHydration(showIfEnabled);
+  }, []);
+
+  // Mirror the OSD store + target lists to the overlay webview WHENEVER they
+  // change. Previously only the OSD config tab emitted these events, so the
+  // global hotkey (Ctrl+Shift+F10) — which flips `enabled` in THIS window's
+  // store — never reached the overlay unless that tab happened to be open.
+  // App is always mounted, so this is now the ONE standing emitter (the config
+  // tab keeps only its transient drag-follow emit). Coalesced to a trailing
+  // ~16 ms tick: the appearance sliders write the store per pointer-move, far
+  // faster than the IPC round-trip; latest config wins.
+  useEffect(() => {
+    let timer: number | null = null;
+    const emitCfg = () => {
+      if (timer != null) return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        const { enabled, style, scale, opacity, position, freeX, freeY, rounded, oledShift, desktopMode, inject, autoInject, metrics } = useOsd.getState();
+        void emit("osd:cfg", { enabled, style, scale, opacity, position, freeX, freeY, rounded, oledShift, desktopMode, inject, autoInject, metrics });
+      }, 16);
+    };
+    const unCfg = useOsd.subscribe(emitCfg);
+    const unTargets = useOsdTargets.subscribe(() =>
+      void emit("osd:targets", { targets: useOsdTargets.getState().targets }),
+    );
+    return () => {
+      unCfg();
+      unTargets();
+      if (timer != null) clearTimeout(timer);
+    };
   }, []);
 
   useEffect(() => {

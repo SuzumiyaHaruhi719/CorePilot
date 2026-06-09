@@ -114,33 +114,9 @@ export function OsdConfig() {
     };
   }, [needGpu, needFps]);
 
-  // Push every default-config change to the live overlay window (no-op if closed).
-  // The X/Y position sliders mutate the store far faster than the IPC can deliver,
-  // so coalesce to a trailing ~16 ms tick (latest config wins) — otherwise the
-  // emits pile up and the overlay's live follow stutters and lags behind.
-  useEffect(() => {
-    let timer: number | null = null;
-    let pending: OsdCfg | null = null;
-    const unsub = useOsd.subscribe((s) => {
-      pending = cfgOf(s);
-      if (timer != null) return;
-      timer = window.setTimeout(() => {
-        timer = null;
-        const c = pending;
-        pending = null;
-        if (c) void emit("osd:cfg", c);
-      }, 16);
-    });
-    return () => {
-      unsub();
-      if (timer != null) clearTimeout(timer);
-    };
-  }, []);
-  // Push every list change too, so the overlay re-resolves immediately.
-  useEffect(
-    () => useOsdTargets.subscribe((s) => void emit("osd:targets", { targets: s.targets })),
-    [],
-  );
+  // NOTE: the standing osd:cfg / osd:targets mirroring now lives in <App> (always
+  // mounted, 16 ms-coalesced) so the global hotkey reaches the overlay from any
+  // tab. This tab keeps only the transient drag-follow emit below.
 
   const [overlayErr, setOverlayErr] = useState<string | null>(null);
   function setEnabled(enabled: boolean) {

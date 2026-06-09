@@ -91,6 +91,11 @@ export function usePerfRecorder(): void {
      * (so it's safe to call from a subscribe callback). The backend stores these
      * and applies them on its next tick.
      */
+    // Dedupe: this runs on EVERY change of the three stores — including per-frame
+    // settings writes like a window-opacity slider drag — but the recorder config
+    // almost never changes. Skip the IPC when the payload is identical to the
+    // last one sent.
+    let lastSent = "";
     const pushConfig = () => {
       const enabled = useSettings.getState().perfRecording;
       const recTargets = useRecordTargets.getState().targets;
@@ -98,7 +103,11 @@ export function usePerfRecorder(): void {
       const white = recTargets.filter((t) => t.list === "white").map((t) => t.name);
       const black = recTargets.filter((t) => t.list === "black").map((t) => t.name);
       const osdWhite = osdTargets.filter((t) => t.list === "white").map((t) => t.name);
-      api.perfRecorderConfig({ enabled, white, black, osdWhite }).catch(() => undefined);
+      const payload = { enabled, white, black, osdWhite };
+      const key = JSON.stringify(payload);
+      if (key === lastSent) return;
+      lastSent = key;
+      api.perfRecorderConfig(payload).catch(() => undefined);
     };
 
     /**
