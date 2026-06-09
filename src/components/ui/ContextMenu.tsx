@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from "motion/react";
 import type { LucideIcon } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn";
 import { useT } from "../../lib/i18n";
@@ -29,11 +29,33 @@ const MENU_WIDTH = 200;
 
 export function ContextMenu({ state, onClose }: ContextMenuProps) {
   const t = useT();
+  const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!state) return;
     const close = () => onClose();
+    /** Enabled item buttons in visual order (the keyboard-navigable set). */
+    const navItems = () =>
+      Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("button:not([disabled])") ?? []);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      // ARIA menu pattern: Arrow keys cycle the enabled items, Home/End jump.
+      // Enter/Space then activate the focused item via native button behavior.
+      if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Home" || e.key === "End") {
+        const items = navItems();
+        if (items.length === 0) return;
+        e.preventDefault();
+        const cur = items.indexOf(document.activeElement as HTMLButtonElement);
+        const next =
+          e.key === "Home" || (e.key === "ArrowDown" && cur === -1)
+            ? 0
+            : e.key === "End" || (e.key === "ArrowUp" && cur === -1)
+              ? items.length - 1
+              : (cur + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+        items[next].focus();
+      }
     };
     // Defer the click-to-close listener by a tick so the very click that opens
     // the menu (e.g. a left-click on a trigger button) doesn't immediately
@@ -70,6 +92,8 @@ export function ContextMenu({ state, onClose }: ContextMenuProps) {
             // the tint keeps the text readable.
             background: "color-mix(in oklch, var(--color-elevated) 64%, transparent)",
           }}
+          ref={menuRef}
+          role="menu"
           className="glass glow fixed z-[100] origin-top-left rounded-xl border border-line-strong p-1.5 backdrop-blur-2xl backdrop-saturate-150"
           onClick={(e) => e.stopPropagation()}
           onContextMenu={(e) => e.preventDefault()}
@@ -77,13 +101,14 @@ export function ContextMenu({ state, onClose }: ContextMenuProps) {
           {state.items.map((item, i) => (
             <button
               key={i}
+              role="menuitem"
               disabled={item.disabled}
               onClick={() => {
                 item.onClick();
                 onClose();
               }}
               className={cn(
-                "flex w-[180px] items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[12.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+                "flex w-[180px] items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[12.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:bg-surface3 focus-visible:ring-1 focus-visible:ring-accent/60",
                 item.danger ? "text-danger hover:bg-danger/15" : "text-ink hover:bg-surface3",
               )}
             >

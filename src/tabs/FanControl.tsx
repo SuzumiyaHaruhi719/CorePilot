@@ -305,6 +305,9 @@ export function FanControl() {
   const [showAll, setShowAll] = useState(false);
   const [showSave, setShowSave] = useState(false);
   const [newName, setNewName] = useState("");
+  // Reset-to-default confirm — the reset overwrites every fan's custom / AI-
+  // calibrated curve (30 s per fan to regenerate), so it must not be one-click.
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
   // AI calibration (FanXpert-style auto tuning) state.
   const [showCalibConfirm, setShowCalibConfirm] = useState(false);
   const [calibrating, setCalibrating] = useState(false);
@@ -453,7 +456,7 @@ export function FanControl() {
                   {calibrating ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />} AI 智能校准
                 </Button>
                 <Button
-                  onClick={() => resetToDefault(controllableIds, presetTempSourceId)}
+                  onClick={() => setShowResetConfirm(true)}
                   disabled={calibrating || controllableIds.length === 0}
                   title="撤销 AI 校准 / 自定义，恢复内置默认曲线"
                 >
@@ -740,6 +743,33 @@ export function FanControl() {
       >
         <p className="text-[13px] leading-relaxed text-muted">
           确定删除配置 <span className="font-semibold text-ink">{delProfile?.name}</span> 吗？此操作不可撤销（当前风扇设置不受影响）。
+        </p>
+      </Modal>
+
+      <Modal
+        open={showResetConfirm}
+        onClose={() => setShowResetConfirm(false)}
+        title="重置默认曲线"
+        footer={
+          <>
+            <Button onClick={() => setShowResetConfirm(false)}>取消</Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                resetToDefault(controllableIds, presetTempSourceId);
+                setShowResetConfirm(false);
+              }}
+            >
+              <RotateCcw size={13} /> 重置
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] leading-relaxed text-muted">
+          {tf(
+            "将把所有可调风扇恢复为内置默认曲线，覆盖你的自定义曲线与 AI 校准结果（重新校准约 30 秒/风扇）。已保存的配置不受影响。",
+            "This restores every controllable fan to the built-in default curve, overwriting your custom curves and AI calibration results (re-calibrating takes ~30 s per fan). Saved profiles are not affected.",
+          )}
         </p>
       </Modal>
 

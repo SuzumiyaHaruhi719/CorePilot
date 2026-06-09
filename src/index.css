@@ -360,6 +360,13 @@ html {
     outline: none;
     cursor: pointer;
   }
+  /* Keyboard focus must stay visible: replace the removed default outline with
+     an on-brand glow ring (mouse interaction stays clean via :focus-visible). */
+  .cp-slider:focus-visible {
+    box-shadow:
+      0 0 0 2px color-mix(in oklch, var(--color-accent) 60%, transparent),
+      0 0 12px color-mix(in oklch, var(--color-accent) 35%, transparent);
+  }
   .cp-slider::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;

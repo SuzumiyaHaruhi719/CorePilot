@@ -1,4 +1,4 @@
-import { Check, Download, ListTree, Plus, Power, Upload } from "lucide-react";
+import { Check, Download, ListTree, Loader2, Plus, Power, Upload } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { CSSProperties } from "react";
 import { cn } from "../../lib/cn";
@@ -14,6 +14,9 @@ interface GroupRailProps {
   processes: ProcInfo[];
   fullMask: bigint;
   optimizationEnabled: boolean;
+  /** True while a toggle's apply/restore sweep is still running — locks the
+   *  button so a second click can't interleave two affinity sweeps. */
+  optimizationBusy: boolean;
   onToggleOptimization: () => void;
   optimizeOnStartup: boolean;
   onToggleOptimizeOnStartup: () => void;
@@ -35,6 +38,7 @@ export function GroupRail({
   processes,
   fullMask,
   optimizationEnabled,
+  optimizationBusy,
   onToggleOptimization,
   optimizeOnStartup,
   onToggleOptimizeOnStartup,
@@ -183,16 +187,22 @@ export function GroupRail({
           whileTap={{ scale: 0.97 }}
           transition={hoverPop}
           onClick={onToggleOptimization}
+          disabled={optimizationBusy}
           style={optimizationEnabled ? ({ "--glow": "var(--color-ok)" } as CSSProperties) : undefined}
           className={cn(
             "flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl py-2.5 text-[12.5px] font-semibold transition-[background-color,border-color,color] duration-150",
             optimizationEnabled
               ? "border border-ok/45 bg-ok/15 text-ok glow-sm"
               : "border border-danger/40 bg-danger/15 text-danger hover:bg-danger/25",
+            optimizationBusy && "cursor-wait opacity-75",
           )}
         >
-          <Power size={15} />
-          {optimizationEnabled ? "优化已启用" : "已停用 · 点击启用"}
+          {optimizationBusy ? <Loader2 size={15} className="animate-spin" /> : <Power size={15} />}
+          {optimizationBusy
+            ? tf("应用中…", "Applying…")
+            : optimizationEnabled
+              ? "优化已启用"
+              : "已停用 · 点击启用"}
         </motion.button>
         <div className="flex gap-2">
           <button

@@ -82,8 +82,10 @@ export function ColorPicker({ anchor, hue, onChange, onClose }: ColorPickerProps
                   whileHover={{ scale: 1.15 }}
                   whileTap={{ scale: 0.9 }}
                   onClick={() => onChange(h)}
+                  aria-label={`色相 ${h}°`}
+                  aria-pressed={active}
                   className={cn(
-                    "h-7 w-7 rounded-full border-2 transition-colors",
+                    "h-7 w-7 rounded-full border-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:ring-offset-1 focus-visible:ring-offset-surface",
                     active ? "border-ink glow-sm" : "border-transparent hover:border-line-strong",
                   )}
                   style={{ background: groupColor(h), "--glow": groupColor(h) } as CSSProperties}

@@ -83,6 +83,8 @@ export function CoreAssignment() {
   const [pendingKill, setPendingKill] = useState<ProcInfo | null>(null);
   const [pendingDelGroup, setPendingDelGroup] = useState<GroupRule | null>(null);
   const [status, setStatus] = useState("");
+  // True while the optimization toggle's per-process apply/restore sweep runs.
+  const [optBusy, setOptBusy] = useState(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [colorAnchor, setColorAnchor] = useState<ColorAnchor | null>(null);
   const addBtnRef = useRef<HTMLDivElement>(null);
@@ -487,6 +489,11 @@ export function CoreAssignment() {
   }
 
   async function handleToggleOptimization() {
+    // Lock out re-entry: the sweep below awaits one IPC per process and can take
+    // seconds — a second click mid-sweep would interleave an apply pass with a
+    // restore pass, leaving affinities in an arbitrary mix of the two.
+    if (optBusy) return;
+    setOptBusy(true);
     const enabling = !optimizationEnabled;
     toggleOptimization();
     let failed = 0;
@@ -512,6 +519,7 @@ export function CoreAssignment() {
       (failed ? ` (${failed} failed)` : "") + (prioFailed ? ` (${prioFailed} priority not changed)` : ""),
     );
     setStatus(failed || prioFailed ? `${tf(base, baseEn)}${note}` : base);
+    setOptBusy(false);
   }
 
   function exportGroups() {
@@ -601,6 +609,7 @@ export function CoreAssignment() {
           processes={processes}
           fullMask={fullMask}
           optimizationEnabled={optimizationEnabled}
+          optimizationBusy={optBusy}
           onToggleOptimization={handleToggleOptimization}
           optimizeOnStartup={optimizeOnStartup}
           onToggleOptimizeOnStartup={() => setOptimizeOnStartup(!optimizeOnStartup)}

@@ -283,6 +283,9 @@ export function GpuTune() {
   }
 
   async function loadProfile(p: GpuProfile) {
+    // Re-entry guard: a second click mid-apply would overlap two gpuOcApply
+    // IPCs (racing hardware writes + status lines).
+    if (applying) return;
     // Mark active only AFTER the backend confirms the apply; show pending meanwhile.
     loadDraft(p.settings, info);
     setPendingId(p.id);
@@ -584,9 +587,11 @@ export function GpuTune() {
                         transition={hoverPop}
                         onClick={() => void loadProfile(p)}
                         aria-pressed={active}
+                        disabled={applying}
                         className={cn(
                           "no-drag group relative flex items-center gap-2 overflow-hidden rounded-xl border px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
                           active ? "border-accent/50 bg-accent/10 glow-sm" : "border-line bg-surface2/50 hover:bg-surface3",
+                          applying && !pending && "cursor-not-allowed opacity-55",
                         )}
                       >
                         <span className={cn("grid h-7 w-7 shrink-0 place-items-center rounded-lg", active ? "bg-accent/20 text-accent-bright" : "bg-surface3 text-dim")}>

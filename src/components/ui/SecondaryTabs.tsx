@@ -29,7 +29,7 @@ export function SecondaryTabs<T extends string>({
           <button
             key={tab.id}
             onClick={() => onChange(tab.id)}
-            className="no-drag relative px-3 py-2.5 text-[12.5px] font-medium"
+            className="no-drag relative cursor-pointer rounded-md px-3 py-2.5 text-[12.5px] font-medium focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60"
           >
             <span className={cn("relative z-10 transition-colors", isActive ? "text-ink" : "text-muted hover:text-ink")}>
               {t(tab.label)}

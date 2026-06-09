@@ -36,7 +36,7 @@ function SortHead({
     <button
       onClick={onClick}
       className={cn(
-        "hud-label no-drag flex cursor-pointer items-center gap-1 text-[9.5px] transition-colors hover:text-ink",
+        "hud-label no-drag flex cursor-pointer items-center gap-1 rounded-sm text-[9.5px] transition-colors hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60",
         align === "right" ? "justify-end" : "justify-start",
         active ? "text-accent" : "text-muted",
       )}

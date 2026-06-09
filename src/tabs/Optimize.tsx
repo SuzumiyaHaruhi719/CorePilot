@@ -51,10 +51,14 @@ function ActionCard({ icon: Icon, title, desc, hue, onRun }: ActionCardProps) {
   return (
     <motion.button
       onClick={run}
+      aria-busy={busy}
       whileHover={{ scale: 1.02, y: -3 }}
       whileTap={{ scale: 0.98 }}
       transition={hoverPop}
-      className="hud-frame glass hairline group relative flex min-h-[150px] cursor-pointer flex-col items-start gap-3 overflow-hidden rounded-2xl p-4 text-left transition-[box-shadow] duration-200"
+      className={cn(
+        "hud-frame glass hairline group relative flex min-h-[150px] flex-col items-start gap-3 overflow-hidden rounded-2xl p-4 text-left transition-[box-shadow] duration-200",
+        busy ? "cursor-wait" : "cursor-pointer",
+      )}
       style={{ "--glow": tint } as CSSProperties}
     >
       {/* Faint telemetry tint that lights up on hover. */}

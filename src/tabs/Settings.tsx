@@ -581,9 +581,16 @@ export function Settings() {
   useEffect(() => {
     api.getAutostart().then(setAutostartOn).catch(() => undefined);
   }, []);
+  const [autostartErr, setAutostartErr] = useState(false);
   const toggleAutostart = (v: boolean) => {
     setAutostartOn(v);
-    api.setAutostart(v).catch(() => setAutostartOn(!v));
+    setAutostartErr(false);
+    // Optimistic write-through; on failure revert the toggle AND say so — a
+    // silently-snapping-back toggle reads as a UI glitch, not a failed change.
+    api.setAutostart(v).catch(() => {
+      setAutostartOn(!v);
+      setAutostartErr(true);
+    });
   };
   // AMD/SMU tuning master switch (persisted). OFF by default so the dangerous SMU
   // write controls can't be reached by accident; unlocking reveals the hidden
@@ -743,7 +750,11 @@ export function Settings() {
 
           <SettingRow
             title="开机自启动"
-            desc="登录 Windows 时自动以管理员身份启动（计划任务方式，不弹 UAC）；配合“关闭后保留到托盘”可在开机后静默后台运行"
+            desc={
+              autostartErr
+                ? tf("设置失败,已恢复原状 — 请确认以管理员身份运行后重试", "Change failed and was reverted — make sure CorePilot runs as administrator, then retry")
+                : "登录 Windows 时自动以管理员身份启动（计划任务方式，不弹 UAC）；配合“关闭后保留到托盘”可在开机后静默后台运行"
+            }
           >
             <Toggle checked={autostartOn} onChange={(value) => toggleAutostart(value)} />
           </SettingRow>
