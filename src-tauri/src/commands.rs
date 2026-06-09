@@ -199,17 +199,17 @@ pub fn smu_status() -> crate::smu::SmuStatus {
     crate::smu::status()
 }
 
-/// Apply a per-core Curve Optimizer margin (clamped ±50 in the host) and arm the
-/// auto-revert watchdog (reverts to 0 after `revert_secs` unless confirmed).
+/// Apply a per-core Curve Optimizer margin (clamped ±50 in the host). Live
+/// override; never auto-reverted.
 #[tauri::command]
-pub fn smu_apply_co(ccd: i32, core: i32, margin: i32, revert_secs: u64) -> bool {
-    crate::smu::apply_co(ccd, core, margin, revert_secs)
+pub fn smu_apply_co(ccd: i32, core: i32, margin: i32) -> bool {
+    crate::smu::apply_co(ccd, core, margin)
 }
 
-/// Apply an all-core Curve Optimizer margin + arm the auto-revert watchdog.
+/// Apply an all-core Curve Optimizer margin. Live override; never auto-reverted.
 #[tauri::command]
-pub fn smu_apply_co_all(margin: i32, revert_secs: u64) -> bool {
-    crate::smu::apply_co_all(margin, revert_secs)
+pub fn smu_apply_co_all(margin: i32) -> bool {
+    crate::smu::apply_co_all(margin)
 }
 
 /// Set a PBO limit. `kind` ∈ {ppt, tdc, edc}; `value` W (PPT) or A (TDC/EDC).
@@ -224,16 +224,11 @@ pub fn smu_set_scalar(scalar: i32) -> bool {
     crate::smu::set_scalar(scalar)
 }
 
-/// Confirm (keep) the current Curve Optimizer apply — cancels the auto-revert.
+/// Explicit "force stock": all-core CO = 0. Overrides BIOS Curve-Optimizer for
+/// this boot (reboot restores the BIOS undervolt). User-initiated only.
 #[tauri::command]
-pub fn smu_confirm() {
-    crate::smu::confirm()
-}
-
-/// Immediately revert Curve Optimizer to 0.
-#[tauri::command]
-pub fn smu_revert_co() -> bool {
-    crate::smu::revert_co()
+pub fn smu_force_stock() -> bool {
+    crate::smu::force_stock_co()
 }
 
 /// Reveal a file in Windows Explorer (opens its folder and selects it). Used by

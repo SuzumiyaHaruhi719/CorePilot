@@ -1,4 +1,4 @@
-import { Cpu, Fan, Gauge, ListTree, MonitorPlay, Rocket, Settings as SettingsIcon, Zap } from "lucide-react";
+import { Activity, Cpu, Fan, Gauge, ListTree, MonitorPlay, Rocket, Settings as SettingsIcon, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
@@ -32,7 +32,15 @@ const ITEM_VARIANTS = { hover: { scale: 1.06, y: -2 }, tap: { scale: 0.96 } };
 export function NavRail() {
   const tab = useUi((s) => s.tab);
   const setTab = useUi((s) => s.setTab);
+  const amdUnlocked = useUi((s) => s.amdTuningUnlocked);
   const t = useT();
+
+  // The AMD tuning tab stays hidden until it's unlocked in Settings, so its
+  // dangerous SMU write controls can't be reached by accident. Slotted in just
+  // before Settings when unlocked.
+  const items: NavItem[] = amdUnlocked
+    ? [...ITEMS.slice(0, -1), { id: "amd", label: "AMD 优化", icon: Activity }, ITEMS[ITEMS.length - 1]]
+    : ITEMS;
 
   return (
     <nav
@@ -45,7 +53,7 @@ export function NavRail() {
         "[scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border-0 [&::-webkit-scrollbar-thumb]:bg-ink/10 hover:[&::-webkit-scrollbar-thumb]:bg-ink/20",
       )}
     >
-      {ITEMS.map((item) => {
+      {items.map((item) => {
         const active = tab === item.id;
         const Icon = item.icon;
         return (

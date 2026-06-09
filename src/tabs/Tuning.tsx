@@ -18,8 +18,6 @@ import { cn } from "../lib/cn";
 import { translate, useTf } from "../lib/i18n";
 import { api } from "../lib/ipc";
 import { useTweaks } from "../store/tweaks";
-import { SmuTelemetry } from "../components/tuning/SmuTelemetry";
-import { SmuTuning } from "../components/tuning/SmuTuning";
 
 type Zone = "safe" | "danger";
 
@@ -212,12 +210,6 @@ export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
           </AnimatePresence>
           <span className="ml-auto text-[11px] text-dim">建议先创建还原点再调整</span>
         </div>
-
-        {/* Deep SMU telemetry (read-only) — per-core clocks, CCD temps, voltages, power */}
-        <SmuTelemetry />
-
-        {/* SMU tuning (Curve Optimizer / PBO) — experimental, gated, auto-revert */}
-        <SmuTuning />
 
         {/* Safe zone */}
         <div className="glass hairline space-y-3 rounded-2xl p-4">

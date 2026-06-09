@@ -221,8 +221,7 @@ pub fn run() {
             commands::smu_apply_co_all,
             commands::smu_apply_limit,
             commands::smu_set_scalar,
-            commands::smu_confirm,
-            commands::smu_revert_co,
+            commands::smu_force_stock,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

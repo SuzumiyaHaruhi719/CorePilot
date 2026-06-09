@@ -371,15 +371,14 @@ export const api = {
   getSensors: () => invoke<Sensors>("get_sensors"),
   // SMU tuning (Curve Optimizer / PBO) — forwarded to the sensord sidecar.
   smuStatus: () => invoke<SmuStatus>("smu_status"),
-  smuApplyCo: (ccd: number, core: number, margin: number, revertSecs: number) =>
-    invoke<boolean>("smu_apply_co", { ccd, core, margin, revertSecs }),
-  smuApplyCoAll: (margin: number, revertSecs: number) =>
-    invoke<boolean>("smu_apply_co_all", { margin, revertSecs }),
+  smuApplyCo: (ccd: number, core: number, margin: number) =>
+    invoke<boolean>("smu_apply_co", { ccd, core, margin }),
+  smuApplyCoAll: (margin: number) => invoke<boolean>("smu_apply_co_all", { margin }),
   smuApplyLimit: (kind: "ppt" | "tdc" | "edc", value: number) =>
     invoke<boolean>("smu_apply_limit", { kind, value }),
   smuSetScalar: (scalar: number) => invoke<boolean>("smu_set_scalar", { scalar }),
-  smuConfirm: () => invoke<void>("smu_confirm"),
-  smuRevertCo: () => invoke<boolean>("smu_revert_co"),
+  /** Explicit "force stock": all-core CO = 0 (overrides BIOS for this boot). */
+  smuForceStock: () => invoke<boolean>("smu_force_stock"),
   /** Reveal a file in Windows Explorer (open its folder + select it). */
   revealInExplorer: (path: string) => invoke<void>("reveal_in_explorer", { path }),
   /** Dump the full session log to Downloads/<folderName>/; returns the folder path. */

@@ -1,13 +1,10 @@
 import { AnimatePresence, motion } from "motion/react";
 import { Check, Cpu, Loader2, RotateCcw, ShieldAlert, Zap } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "../ui/Button";
 import { cn } from "../../lib/cn";
 import { useTf } from "../../lib/i18n";
 import { api, type SmuStatus } from "../../lib/ipc";
-
-/** Seconds before an unconfirmed Curve-Optimizer apply auto-reverts to 0. */
-const REVERT_SECS = 15;
 
 interface PboInputs {
   ppt: string;
@@ -17,26 +14,23 @@ interface PboInputs {
 }
 
 /**
- * SMU tuning — Curve Optimizer (per-core undervolt) + PBO limits, written through
- * the sensord PawnIO host. Gated behind an explicit experimental opt-in. Every CO
- * apply arms an auto-revert watchdog (reverts to 0 after REVERT_SECS unless kept),
- * and nothing is persisted to BIOS — a reboot clears any applied state. Hardware
- * support requires the PawnIO driver + a supported Ryzen part.
+ * SMU tuning — Curve Optimizer (undervolt) + PBO limits, written through the
+ * sensord PawnIO host. Only mounted when the AMD tab's master safety switch is on.
+ *
+ * Writes are a deliberate, LIVE override and are NEVER auto-reverted — auto-zeroing
+ * would wipe a user's existing BIOS Curve-Optimizer offsets. All-core CO overrides
+ * the BIOS per-core curve for the current boot; a reboot re-applies the BIOS values
+ * (CorePilot never writes BIOS). "Force stock" is an explicit, separate action.
  */
 export function SmuTuning() {
   const tf = useTf();
-  const [enabled, setEnabled] = useState(false);
   const [status, setStatus] = useState<SmuStatus | null>(null);
   const [coMargin, setCoMargin] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [pending, setPending] = useState<number | null>(null);
   const [note, setNote] = useState<{ msg: string; ok: boolean } | null>(null);
   const [pbo, setPbo] = useState<PboInputs>({ ppt: "", tdc: "", edc: "", scalar: "" });
-  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Poll SMU status while the panel is enabled.
   useEffect(() => {
-    if (!enabled) return;
     let alive = true;
     const poll = () => {
       api.smuStatus().then((s) => alive && setStatus(s)).catch(() => {});
@@ -47,26 +41,7 @@ export function SmuTuning() {
       alive = false;
       clearInterval(id);
     };
-  }, [enabled]);
-
-  // Auto-revert countdown after a CO apply (cosmetic mirror of the Rust watchdog).
-  useEffect(() => {
-    if (pending == null) return;
-    tickRef.current = setInterval(() => {
-      setPending((p) => {
-        if (p == null) return null;
-        if (p <= 1) {
-          setNote({ msg: tf("未确认 —— 已自动撤销 CO", "Unconfirmed — CO auto-reverted"), ok: false });
-          setCoMargin(0);
-          return null;
-        }
-        return p - 1;
-      });
-    }, 1000);
-    return () => {
-      if (tickRef.current) clearInterval(tickRef.current);
-    };
-  }, [pending != null]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   const ready = !!status?.pawnIo && !!status?.loaded;
 
@@ -74,9 +49,12 @@ export function SmuTuning() {
     setBusy(true);
     setNote(null);
     try {
-      const ok = await api.smuApplyCoAll(coMargin, REVERT_SECS);
-      if (ok) setPending(REVERT_SECS);
-      else setNote({ msg: tf("应用失败(SMU 未响应)", "Apply failed (SMU did not respond)"), ok: false });
+      const ok = await api.smuApplyCoAll(coMargin);
+      setNote(
+        ok
+          ? { msg: tf(`已实时应用 CO ${coMargin} · 重启恢复 BIOS 设置`, `Applied CO ${coMargin} live · reboot restores BIOS`), ok: true }
+          : { msg: tf("应用失败(SMU 未响应)", "Apply failed (SMU did not respond)"), ok: false },
+      );
     } catch (e) {
       setNote({ msg: String(e), ok: false });
     } finally {
@@ -84,19 +62,13 @@ export function SmuTuning() {
     }
   }
 
-  async function keep() {
-    await api.smuConfirm().catch(() => {});
-    setPending(null);
-    setNote({ msg: tf(`已保留 CO ${coMargin}`, `Kept CO ${coMargin}`), ok: true });
-  }
-
-  async function revert() {
+  async function forceStock() {
     setBusy(true);
+    setNote(null);
     try {
-      await api.smuRevertCo();
-      setPending(null);
+      await api.smuForceStock();
       setCoMargin(0);
-      setNote({ msg: tf("已撤销 CO(归零)", "Reverted CO to 0"), ok: true });
+      setNote({ msg: tf("已强制归零(stock)· 重启恢复 BIOS 撤压", "Forced stock (0) · reboot restores your BIOS undervolt"), ok: true });
     } finally {
       setBusy(false);
     }
@@ -120,32 +92,12 @@ export function SmuTuning() {
         return;
       }
       await Promise.all(jobs);
-      setNote({ msg: tf("已应用 PBO 限制", "Applied PBO limits"), ok: true });
+      setNote({ msg: tf("已应用 PBO 限制 · 重启恢复 BIOS", "Applied PBO limits · reboot restores BIOS"), ok: true });
     } catch (e) {
       setNote({ msg: String(e), ok: false });
     } finally {
       setBusy(false);
     }
-  }
-
-  // ---- gate: explicit experimental opt-in ----------------------------------
-  if (!enabled) {
-    return (
-      <div className="rounded-2xl border border-danger/30 bg-danger/[0.05] p-4">
-        <div className="mb-1 flex items-center gap-2 text-[12.5px] font-semibold text-danger">
-          <ShieldAlert size={15} /> {tf("SMU 调优(实验性)", "SMU tuning (experimental)")}
-        </div>
-        <p className="mb-3 max-w-2xl text-[11px] leading-relaxed text-danger/80">
-          {tf(
-            "Curve Optimizer 撤压与 PBO 限制是内核级 SMU 写入。设置不当可能导致 WHEA 报错、死机或无法开机。CorePilot 不写入 BIOS —— 任何设置重启即清除,且 CO 应用会在未确认时自动撤销。仅在你了解风险时启用,并从小幅(如 -5)逐核验证。",
-            "Curve Optimizer undervolt and PBO limits are kernel-level SMU writes. A bad value can cause WHEA errors, hard hangs, or failure to boot. CorePilot never writes to BIOS — anything applied is cleared on reboot, and a CO apply auto-reverts unless confirmed. Enable only if you understand the risk, and validate in small steps (e.g. -5).",
-          )}
-        </p>
-        <Button variant="primary" onClick={() => setEnabled(true)}>
-          <ShieldAlert size={14} /> {tf("我了解风险,启用", "I understand the risk, enable")}
-        </Button>
-      </div>
-    );
   }
 
   return (
@@ -166,9 +118,17 @@ export function SmuTuning() {
                 ? tf("SMU 模块未加载", "SMU module not loaded")
                 : tf(`已就绪 · SMU ${status.versionStr}`, `ready · SMU ${status.versionStr}`)}
         </span>
-        <button className="ml-auto text-[11px] font-normal text-dim hover:text-muted" onClick={() => setEnabled(false)}>
-          {tf("收起", "collapse")}
-        </button>
+      </div>
+
+      {/* Always-on warning: CO here is all-core + overrides BIOS; reboot restores. */}
+      <div className="flex items-start gap-2 rounded-xl border border-warn/30 bg-warn/[0.06] px-3 py-2 text-[11.5px] leading-relaxed text-warn">
+        <ShieldAlert size={14} className="mt-0.5 shrink-0" />
+        <span>
+          {tf(
+            "全核 Curve Optimizer 会覆盖 BIOS 的逐核 CO 设置(仅本次开机有效),不写入 BIOS。要恢复你在 BIOS 里调好的撤压,直接重启即可。CorePilot 永不自动归零。",
+            "All-core Curve Optimizer overrides your BIOS per-core CO for this boot only — it is never written to BIOS. To restore the undervolt you set in BIOS, just reboot. CorePilot never auto-zeros.",
+          )}
+        </span>
       </div>
 
       {!ready && (
@@ -192,35 +152,18 @@ export function SmuTuning() {
             max={0}
             step={1}
             value={coMargin}
-            disabled={!ready || busy || pending != null}
+            disabled={!ready || busy}
             onChange={(e) => setCoMargin(parseInt(e.target.value, 10))}
             className="h-1.5 flex-1 cursor-pointer accent-[var(--color-accent)]"
           />
           <span className="w-12 shrink-0 text-right font-mono text-[13px] font-semibold tabular-nums text-ink">{coMargin}</span>
-          <Button onClick={() => void applyCo()} disabled={!ready || busy || pending != null}>
+          <Button onClick={() => void applyCo()} disabled={!ready || busy}>
             {busy ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />} {tf("应用", "Apply")}
           </Button>
-          <Button onClick={() => void revert()} disabled={!ready || busy}>
-            <RotateCcw size={14} /> {tf("撤销", "Revert")}
+          <Button onClick={() => void forceStock()} disabled={!ready || busy} title={tf("覆盖为 stock(0),会盖掉 BIOS;重启恢复", "Override to stock (0); reboot restores BIOS")}>
+            <RotateCcw size={14} /> {tf("强制归零", "Force stock")}
           </Button>
         </div>
-
-        <AnimatePresence>
-          {pending != null && (
-            <motion.div
-              initial={{ opacity: 0, y: -4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              className="flex items-center gap-2 rounded-xl border border-warn/30 bg-warn/[0.06] px-3 py-2 text-[12px] text-warn"
-            >
-              <Loader2 size={13} className="animate-spin" />
-              {tf(`未确认将在 ${pending}s 后自动撤销`, `auto-reverts in ${pending}s unless confirmed`)}
-              <Button variant="primary" onClick={() => void keep()} className="ml-auto">
-                <Check size={13} /> {tf("稳定,保留", "Stable, keep")}
-              </Button>
-            </motion.div>
-          )}
-        </AnimatePresence>
       </div>
 
       {/* PBO limits */}

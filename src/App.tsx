@@ -22,6 +22,7 @@ import { Optimize } from "./tabs/Optimize";
 import { OsdConfig } from "./tabs/OsdConfig";
 import { Settings } from "./tabs/Settings";
 import { TaskManager } from "./tabs/TaskManager";
+import { AmdTuning } from "./tabs/AmdTuning";
 import { Tuning } from "./tabs/Tuning";
 import { useGpuProfiles } from "./store/gpuProfiles";
 import { useFanProfiles } from "./store/fanProfiles";
@@ -50,6 +51,7 @@ const TABS: Record<TabId, () => ReactElement> = {
   fans: FanControl,
   optimize: Optimize,
   tuning: Tuning,
+  amd: AmdTuning,
   settings: Settings,
 };
 

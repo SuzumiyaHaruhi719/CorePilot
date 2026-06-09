@@ -27,6 +27,7 @@ import { Modal } from "../components/ui/Modal";
 import { Segmented } from "../components/ui/Segmented";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
+import { useUi } from "../store/ui";
 import { cn } from "../lib/cn";
 import { useT, useTf } from "../lib/i18n";
 import { api, type NetCheck, type ProcInfo } from "../lib/ipc";
@@ -584,6 +585,17 @@ export function Settings() {
     setAutostartOn(v);
     api.setAutostart(v).catch(() => setAutostartOn(!v));
   };
+  // AMD/SMU tuning master switch (persisted). OFF by default so the dangerous SMU
+  // write controls can't be reached by accident; unlocking reveals the hidden
+  // "AMD 优化" tab. Turning it off while on that tab leaves it for Settings.
+  const amdUnlocked = useUi((s) => s.amdTuningUnlocked);
+  const setAmdUnlocked = useUi((s) => s.setAmdTuningUnlocked);
+  const uiTab = useUi((s) => s.tab);
+  const setUiTab = useUi((s) => s.setTab);
+  const toggleAmdUnlocked = (v: boolean) => {
+    setAmdUnlocked(v);
+    if (!v && uiTab === "amd") setUiTab("settings");
+  };
 
   return (
     <>
@@ -734,6 +746,13 @@ export function Settings() {
             desc="登录 Windows 时自动以管理员身份启动（计划任务方式，不弹 UAC）；配合“关闭后保留到托盘”可在开机后静默后台运行"
           >
             <Toggle checked={autostartOn} onChange={(value) => toggleAutostart(value)} />
+          </SettingRow>
+
+          <SettingRow
+            title="启用 AMD 调优（实验性 · 危险）"
+            desc="解锁「AMD 优化」标签:Ryzen SMU 级 Curve Optimizer 撤压 / PBO 限制。内核级写入,设置不当可能导致 WHEA 报错、死机或无法开机;默认关闭以防误触。开启后侧栏会出现「AMD 优化」标签。"
+          >
+            <Toggle checked={amdUnlocked} onChange={(value) => toggleAmdUnlocked(value)} />
           </SettingRow>
 
           <SettingRow title="语言 / Language">

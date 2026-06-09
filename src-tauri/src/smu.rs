@@ -4,14 +4,12 @@
 //! write host) over the same stdin channel the fan engine uses, and parses the
 //! sidecar's JSON `smuStatus` / `smuReply` lines back out.
 //!
-//! Safety: applying a Curve-Optimizer margin arms an **auto-revert watchdog** —
-//! the value is reset to 0 after `revert_secs` unless the user confirms (keeps)
-//! it first. An unstable undervolt therefore self-heals, and because nothing is
-//! ever written to BIOS, a reboot clears any applied SMU state regardless. All
-//! values are additionally clamped in the sidecar host.
-
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+//! IMPORTANT — no automatic reversions. CorePilot's Curve-Optimizer write is a
+//! deliberate, *live* override; it is NEVER auto-reset. A bad value is cleared by
+//! a **reboot** (which re-applies the user's BIOS Curve-Optimizer offsets, since
+//! CorePilot never writes BIOS). Forcing CO to 0 ("stock") is a separate,
+//! explicit, user-initiated action — never a silent timer — because zeroing would
+//! otherwise wipe a user's existing BIOS undervolt.
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -33,12 +31,6 @@ pub struct SmuStatus {
 }
 
 static STATUS: Lazy<Mutex<SmuStatus>> = Lazy::new(|| Mutex::new(SmuStatus::default()));
-
-/// Bumped on every CO apply; the watchdog only reverts if its token is still the
-/// latest (no newer apply / confirm happened in the meantime).
-static CO_TOKEN: AtomicU64 = AtomicU64::new(0);
-/// Whether the most recent CO apply has been confirmed (kept) by the user.
-static CO_CONFIRMED: AtomicBool = AtomicBool::new(true);
 
 /// Parse an `smuStatus` / `smuReply` line emitted by the sidecar. Called for
 /// every sidecar stdout line; ignores anything that isn't one of ours.
@@ -76,24 +68,19 @@ pub fn status() -> SmuStatus {
     STATUS.lock().clone()
 }
 
-/// Ask the sidecar to emit a fresh `smuStatus` line (the reply arrives async on
-/// the next sidecar read; callers poll `status()`).
+/// Ask the sidecar to emit a fresh `smuStatus` line (arrives async; poll `status`).
 pub fn request_status() {
     send("smu status");
 }
 
-/// Apply a per-core Curve Optimizer margin and arm the auto-revert watchdog.
-pub fn apply_co(ccd: i32, core: i32, margin: i32, revert_secs: u64) -> bool {
-    let ok = send(&format!("smu co {ccd} {core} {margin}"));
-    arm_watchdog(revert_secs);
-    ok
+/// Apply a per-core Curve Optimizer margin (live override; no auto-revert).
+pub fn apply_co(ccd: i32, core: i32, margin: i32) -> bool {
+    send(&format!("smu co {ccd} {core} {margin}"))
 }
 
-/// Apply an all-core Curve Optimizer margin and arm the auto-revert watchdog.
-pub fn apply_co_all(margin: i32, revert_secs: u64) -> bool {
-    let ok = send(&format!("smu coall {margin}"));
-    arm_watchdog(revert_secs);
-    ok
+/// Apply an all-core Curve Optimizer margin (live override; no auto-revert).
+pub fn apply_co_all(margin: i32) -> bool {
+    send(&format!("smu coall {margin}"))
 }
 
 /// Set a PBO limit. `kind` ∈ {ppt, tdc, edc}; `value` in W (PPT) or A (TDC/EDC).
@@ -109,29 +96,9 @@ pub fn set_scalar(scalar: i32) -> bool {
     send(&format!("smu scalar {scalar}"))
 }
 
-/// Mark the current CO apply as accepted — cancels the pending auto-revert.
-pub fn confirm() {
-    CO_CONFIRMED.store(true, Ordering::SeqCst);
-}
-
-/// Immediately revert Curve Optimizer to 0 (removes any undervolt).
-pub fn revert_co() -> bool {
-    CO_CONFIRMED.store(true, Ordering::SeqCst);
+/// Explicit, user-initiated "force stock": set all-core CO to 0. This OVERRIDES
+/// any BIOS Curve-Optimizer offsets for the current boot — to restore the BIOS
+/// undervolt, reboot. Never called automatically.
+pub fn force_stock_co() -> bool {
     send("smu coall 0")
-}
-
-/// Arm a one-shot watchdog: after `revert_secs`, if this remains the latest CO
-/// apply and the user hasn't confirmed, reset CO to 0. `revert_secs == 0` disables.
-fn arm_watchdog(revert_secs: u64) {
-    if revert_secs == 0 {
-        return;
-    }
-    let token = CO_TOKEN.fetch_add(1, Ordering::SeqCst) + 1;
-    CO_CONFIRMED.store(false, Ordering::SeqCst);
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(revert_secs));
-        if CO_TOKEN.load(Ordering::SeqCst) == token && !CO_CONFIRMED.load(Ordering::SeqCst) {
-            let _ = send("smu coall 0");
-        }
-    });
 }
