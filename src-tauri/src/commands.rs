@@ -190,6 +190,52 @@ pub fn get_sensors() -> crate::error::CoreResult<crate::sensors::SensorSample> {
     Ok(crate::sensors::sample())
 }
 
+// --- SMU tuning (Curve Optimizer / PBO) — forwarded to the sensord sidecar -----
+
+/// Latest SMU status (also asks the sidecar to emit a fresh line; poll to refresh).
+#[tauri::command]
+pub fn smu_status() -> crate::smu::SmuStatus {
+    crate::smu::request_status();
+    crate::smu::status()
+}
+
+/// Apply a per-core Curve Optimizer margin (clamped ±50 in the host) and arm the
+/// auto-revert watchdog (reverts to 0 after `revert_secs` unless confirmed).
+#[tauri::command]
+pub fn smu_apply_co(ccd: i32, core: i32, margin: i32, revert_secs: u64) -> bool {
+    crate::smu::apply_co(ccd, core, margin, revert_secs)
+}
+
+/// Apply an all-core Curve Optimizer margin + arm the auto-revert watchdog.
+#[tauri::command]
+pub fn smu_apply_co_all(margin: i32, revert_secs: u64) -> bool {
+    crate::smu::apply_co_all(margin, revert_secs)
+}
+
+/// Set a PBO limit. `kind` ∈ {ppt, tdc, edc}; `value` W (PPT) or A (TDC/EDC).
+#[tauri::command]
+pub fn smu_apply_limit(kind: String, value: f64) -> bool {
+    crate::smu::apply_limit(&kind, value)
+}
+
+/// Set the PBO scalar (1×–10×).
+#[tauri::command]
+pub fn smu_set_scalar(scalar: i32) -> bool {
+    crate::smu::set_scalar(scalar)
+}
+
+/// Confirm (keep) the current Curve Optimizer apply — cancels the auto-revert.
+#[tauri::command]
+pub fn smu_confirm() {
+    crate::smu::confirm()
+}
+
+/// Immediately revert Curve Optimizer to 0.
+#[tauri::command]
+pub fn smu_revert_co() -> bool {
+    crate::smu::revert_co()
+}
+
 /// Reveal a file in Windows Explorer (opens its folder and selects it). Used by
 /// the Task Manager "打开文件位置" context action. Best-effort: `explorer` often
 /// returns a non-zero exit code even on success, so we only fail if it can't be

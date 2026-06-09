@@ -226,6 +226,8 @@ pub fn ensure_sidecar() {
                 // The same line also carries fan / temp / control arrays for
                 // the fan engine; let it parse what it needs.
                 crate::fan::ingest_line(&line);
+                // …and may carry an SMU status / reply for the tuning bridge.
+                crate::smu::ingest_line(&line);
             }
             // Sidecar stopped emitting (crashed or exited): clear readings so
             // the UI shows power/temp as unavailable ("—") rather than stale

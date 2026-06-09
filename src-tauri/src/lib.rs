@@ -17,6 +17,7 @@ pub mod perf_recorder;
 pub mod process;
 pub mod process_icon;
 pub mod sensors;
+pub mod smu;
 pub mod serde_u64;
 pub mod state;
 pub mod sysmon;
@@ -215,6 +216,13 @@ pub fn run() {
             commands::set_window_opacity,
             commands::get_autostart,
             commands::set_autostart,
+            commands::smu_status,
+            commands::smu_apply_co,
+            commands::smu_apply_co_all,
+            commands::smu_apply_limit,
+            commands::smu_set_scalar,
+            commands::smu_confirm,
+            commands::smu_revert_co,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

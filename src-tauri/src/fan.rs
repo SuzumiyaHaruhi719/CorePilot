@@ -243,6 +243,18 @@ fn is_valid_control_id(id: &str) -> bool {
     })
 }
 
+/// Send a raw line to the sidecar stdin (used by the SMU tuning bridge for
+/// `smu …` commands). Returns false if no sidecar is connected. The fan engine
+/// itself uses the private `send` below.
+pub fn send_command(cmd: &str) -> bool {
+    let mut guard = SIDECAR_STDIN.lock();
+    let Some(stdin) = guard.as_mut() else {
+        return false;
+    };
+    let line = format!("{cmd}\n");
+    stdin.write_all(line.as_bytes()).is_ok() && stdin.flush().is_ok()
+}
+
 /// Write a single line command to the sidecar; drop the handle on failure.
 fn send(cmd: &str) {
     let mut guard = SIDECAR_STDIN.lock();
