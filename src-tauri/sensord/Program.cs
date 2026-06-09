@@ -20,8 +20,10 @@
 // is never left pinned if CorePilot exits.
 
 using System.Globalization;
+using System.Runtime.Versioning;
 using System.Text.Json;
 using LibreHardwareMonitor.Hardware;
+using Sensord.Smu;
 
 namespace Sensord;
 
@@ -47,6 +49,7 @@ internal sealed class UpdateVisitor : IVisitor
     public void VisitParameter(IParameter parameter) { }
 }
 
+[SupportedOSPlatform("windows")]
 internal static class Program
 {
     private const int PollIntervalMs = 1000;
@@ -54,6 +57,14 @@ internal static class Program
     /// <summary>Serializes all LibreHardwareMonitor access (poll updates and
     /// control writes happen on different threads).</summary>
     private static readonly object Gate = new();
+
+    /// <summary>Serializes stdout writes (the poll loop + async `smu` replies run
+    /// on different threads), so reply lines never interleave with sample lines.</summary>
+    private static readonly object StdoutGate = new();
+
+    /// <summary>Lazily-loaded SMU write host (Curve Optimizer / PBO). Null until the
+    /// first `smu` command; stays unloaded if PawnIO / the module is unavailable.</summary>
+    private static RyzenSmuHost? _smu;
 
     /// <summary>controlId -> the controllable Control sensor (rebuilt each poll).</summary>
     private static Dictionary<string, ISensor> _controls = new();
@@ -185,8 +196,11 @@ internal static class Program
 
             try
             {
-                stdout.WriteLine(line);
-                stdout.Flush();
+                lock (StdoutGate)
+                {
+                    stdout.WriteLine(line);
+                    stdout.Flush();
+                }
             }
             catch
             {
@@ -282,6 +296,11 @@ internal static class Program
                         }
                         _touched.Clear();
                         break;
+                    // SMU tuning (Curve Optimizer / PBO). Only ever runs on an
+                    // explicit user-opted command; every write is clamped in the host.
+                    case "smu" when parts.Length >= 2:
+                        HandleSmu(parts);
+                        break;
                 }
             }
         }
@@ -343,6 +362,93 @@ internal static class Program
         {
             // ignore — best-effort safety reset
         }
+    }
+
+    // --- SMU tuning (Curve Optimizer / PBO) -----------------------------------
+
+    /// <summary>Lazily load the SMU host. Caller must hold <see cref="Gate"/> so
+    /// SMU traffic is serialized against LHM's polling on the same PawnIO driver.</summary>
+    private static RyzenSmuHost SmuHost() => _smu ??= RyzenSmuHost.TryLoad();
+
+    /// <summary>
+    /// Dispatch one `smu …` command (caller holds <see cref="Gate"/>) and write a
+    /// single JSON reply line. Recognised:
+    ///   smu status                      -> {"smuStatus":{pawnIo,loaded,version,versionStr}}
+    ///   smu co &lt;ccd&gt; &lt;core&gt; &lt;margin&gt;    per-core Curve Optimizer (margin ±50)
+    ///   smu coall &lt;margin&gt;              all-core Curve Optimizer
+    ///   smu ppt|tdc|edc &lt;units&gt;         PBO limit (W / A)
+    ///   smu scalar &lt;1..10&gt;             PBO scalar
+    /// Unknown / malformed commands reply with ok=false and are otherwise ignored.
+    /// </summary>
+    private static void HandleSmu(string[] p)
+    {
+        string sub = p[1].ToLowerInvariant();
+        RyzenSmuHost smu = SmuHost();
+
+        if (sub == "status")
+        {
+            uint ver = smu.GetSmuVersion();
+            WriteJsonLine(JsonSerializer.Serialize(new
+            {
+                smuStatus = new
+                {
+                    pawnIo = RyzenSmuHost.IsPawnIoInstalled,
+                    loaded = smu.IsLoaded,
+                    version = ver,
+                    versionStr = $"{(ver >> 16) & 0xff}.{(ver >> 8) & 0xff}.{ver & 0xff}",
+                },
+            }, JsonOpts));
+            return;
+        }
+
+        SmuResult r;
+        switch (sub)
+        {
+            case "co" when p.Length == 5
+                && int.TryParse(p[2], out int ccd)
+                && int.TryParse(p[3], out int core)
+                && int.TryParse(p[4], out int margin):
+                r = smu.SetCurveOptimizer(ccd, core, margin);
+                break;
+            case "coall" when p.Length == 3 && int.TryParse(p[2], out int allMargin):
+                r = smu.SetCurveOptimizerAll(allMargin);
+                break;
+            case "ppt" when p.Length == 3 && ParseNum(p[2], out double w):
+                r = smu.SetLimit(Zen5.MsgSetPptLimit, w, "PPT", 1000);
+                break;
+            case "tdc" when p.Length == 3 && ParseNum(p[2], out double tdc):
+                r = smu.SetLimit(Zen5.MsgSetTdcLimit, tdc, "TDC", 1000);
+                break;
+            case "edc" when p.Length == 3 && ParseNum(p[2], out double edc):
+                r = smu.SetLimit(Zen5.MsgSetEdcLimit, edc, "EDC", 1000);
+                break;
+            case "scalar" when p.Length == 3 && int.TryParse(p[2], out int sc):
+                r = smu.SetPboScalar(sc);
+                break;
+            default:
+                r = SmuResult.Fail($"bad smu command: {sub}");
+                break;
+        }
+
+        WriteJsonLine(JsonSerializer.Serialize(
+            new { smuReply = new { cmd = sub, ok = r.ok, detail = r.detail } }, JsonOpts));
+    }
+
+    private static bool ParseNum(string s, out double v) =>
+        double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out v);
+
+    /// <summary>Write one JSON line to stdout under <see cref="StdoutGate"/>.</summary>
+    private static void WriteJsonLine(string line)
+    {
+        try
+        {
+            lock (StdoutGate)
+            {
+                Console.Out.WriteLine(line);
+                Console.Out.Flush();
+            }
+        }
+        catch { /* stdout closed (parent exited) */ }
     }
 
     // --- sampling -------------------------------------------------------------
