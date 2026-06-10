@@ -563,6 +563,215 @@ pub fn synthesize_gpu(m: &GpuModel, p_design_g: f32, target_g: f32, floor: f32, 
     GpuSynth { effective_target_g: effective, points, warning }
 }
 
+// --- per-fan duty mapping (spec §5.6/§5.7) ------------------------------------------
+
+use crate::fan::{CalibPoint, CurvePoint, FanCalibration};
+
+/// Which sweep group a fan belongs to.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum Group {
+    Cpu,
+    Case,
+}
+
+/// Port of the store's `dutyForRpmFraction` (fanProfiles.ts): the PWM duty that
+/// achieves `frac` of `max_rpm`, by linear interpolation through the measured
+/// (duty → RPM) samples; clamped to [max(MIN_SAFE_DUTY, min_start_duty), 100].
+pub fn duty_for_rpm_fraction(points: &[CalibPoint], frac: f32, min_start_duty: f32, max_rpm: f32) -> f32 {
+    let f = frac.clamp(0.0, 1.0);
+    let lo = MIN_SAFE_DUTY.max(min_start_duty);
+    if f <= 0.0 || max_rpm <= 0.0 {
+        return lo;
+    }
+    let target = f * max_rpm;
+    let mut usable: Vec<&CalibPoint> = points
+        .iter()
+        .filter(|p| p.duty.is_finite() && p.rpm.is_finite() && p.rpm > 0.0)
+        .collect();
+    usable.sort_by(|a, b| a.duty.total_cmp(&b.duty));
+    if usable.is_empty() {
+        return (f * 100.0).round().clamp(lo, 100.0);
+    }
+    if target <= usable[0].rpm {
+        return usable[0].duty.round().max(lo);
+    }
+    let top = usable[usable.len() - 1];
+    if target >= top.rpm {
+        return 100.0;
+    }
+    for w in usable.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if target >= a.rpm && target <= b.rpm {
+            let span = b.rpm - a.rpm;
+            let duty = if span <= 0.0 {
+                b.duty
+            } else {
+                a.duty + (target - a.rpm) / span * (b.duty - a.duty)
+            };
+            return duty.round().clamp(lo, 100.0);
+        }
+    }
+    100.0
+}
+
+/// Synthesized per-fan output: plain engine curves (+ optional GPU assist).
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TunedFanCurve {
+    pub control_id: String,
+    pub group: Group,
+    pub curve: Vec<CurvePoint>,
+    /// GPU-assist curve (case-group fans only; empty otherwise).
+    pub curve2: Vec<CurvePoint>,
+    pub min_duty: f32,
+    pub spin_up_pct: f32,
+    pub spin_down_pct: f32,
+}
+
+/// Map group-level airflow curves into per-fan duty curves through each fan's
+/// own calibration. `gpu_points` is the case group's assist curve, None when
+/// the GPU axis was skipped.
+pub fn map_group_curves(
+    groups: &[(String, Group)],
+    calibs: &[FanCalibration],
+    cpu_points: &[WPoint],
+    gpu_points: Option<&[(f32, f32)]>,
+) -> Vec<TunedFanCurve> {
+    let mut out = Vec::with_capacity(groups.len());
+    for (id, group) in groups {
+        let Some(cal) = calibs.iter().find(|c| &c.control_id == id) else {
+            continue;
+        };
+        let duty_at = |w: f32| duty_for_rpm_fraction(&cal.points, w, cal.min_start_duty, cal.max_rpm);
+        let mut curve: Vec<CurvePoint> = cpu_points
+            .iter()
+            .map(|p| CurvePoint {
+                temp_c: p.temp_c,
+                duty: duty_at(if *group == Group::Cpu { p.w_cpu } else { p.w_case }),
+            })
+            .collect();
+        for i in 1..curve.len() {
+            curve[i].duty = curve[i].duty.max(curve[i - 1].duty);
+        }
+        let mut curve2: Vec<CurvePoint> = Vec::new();
+        if *group == Group::Case {
+            if let Some(gp) = gpu_points {
+                curve2 = gp
+                    .iter()
+                    .map(|&(temp_c, w)| CurvePoint { temp_c, duty: duty_at(w) })
+                    .collect();
+                for i in 1..curve2.len() {
+                    curve2[i].duty = curve2[i].duty.max(curve2[i - 1].duty);
+                }
+            }
+        }
+        let floor_w = cpu_points
+            .first()
+            .map(|p| if *group == Group::Cpu { p.w_cpu } else { p.w_case })
+            .unwrap_or(0.25);
+        out.push(TunedFanCurve {
+            control_id: id.clone(),
+            group: *group,
+            curve,
+            curve2,
+            min_duty: duty_at(floor_w),
+            // Responsive up, smooth down — damps hunting inside the band.
+            spin_up_pct: 70.0,
+            spin_down_pct: 30.0,
+        });
+    }
+    out
+}
+
+// --- steady-state detection (spec §3 阶段 2) -----------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Steady {
+    Pending,
+    /// Settled: mean of the last 10 samples.
+    Steady(f32),
+    /// Max dwell reached while still moving: best current estimate.
+    Saturated(f32),
+}
+
+/// Sliding-window steady detector: steady when the LSQ slope over the last 25
+/// samples is < 0.05 °C/s AND their range < 0.8 °C, after `min_dwell_s`; gives
+/// up (Saturated) at `max_dwell_s` — important for high-inertia AIO loops.
+/// Feed ~1 Hz samples.
+pub struct SteadyDetector {
+    samples: Vec<(f32, f32)>, // (t_s, value)
+    min_dwell_s: f32,
+    max_dwell_s: f32,
+}
+
+impl SteadyDetector {
+    pub fn new(min_dwell_s: f32, max_dwell_s: f32) -> Self {
+        Self { samples: Vec::new(), min_dwell_s, max_dwell_s }
+    }
+
+    fn tail_mean(&self, n: usize) -> f32 {
+        let k = self.samples.len().min(n).max(1);
+        let s: f32 = self.samples[self.samples.len() - k..].iter().map(|&(_, v)| v).sum();
+        s / k as f32
+    }
+
+    pub fn push(&mut self, t_s: f32, value: f32) -> Steady {
+        self.samples.push((t_s, value));
+        let elapsed = t_s - self.samples[0].0;
+        if elapsed >= self.max_dwell_s {
+            return Steady::Saturated(self.tail_mean(10));
+        }
+        if elapsed < self.min_dwell_s || self.samples.len() < 25 {
+            return Steady::Pending;
+        }
+        let win = &self.samples[self.samples.len() - 25..];
+        let (mut sx, mut sy, mut sxx, mut sxy) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+        for &(x, y) in win {
+            let (x, y) = (x as f64, y as f64);
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            sxy += x * y;
+        }
+        let n = win.len() as f64;
+        let denom = n * sxx - sx * sx;
+        let slope = if denom.abs() < 1e-9 { 0.0 } else { (n * sxy - sx * sy) / denom };
+        let (min, max) = win
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), &(_, v)| (lo.min(v), hi.max(v)));
+        if slope.abs() < 0.05 && (max - min) < 0.8 {
+            Steady::Steady(self.tail_mean(10))
+        } else {
+            Steady::Pending
+        }
+    }
+}
+
+// --- passive-learning math (spec §7) -------------------------------------------------
+
+/// Bounded, safety-asymmetric drift correction from steady-state residuals
+/// (observed − predicted, °C). Returns the t_off delta to apply, or None.
+/// Hot (median > 1.5) corrects immediately; cold needs median < −2.5. The step
+/// is capped at ±0.5 per invocation and the ACCUMULATED drift at ±6 total.
+pub fn passive_correction(residuals: &[f32], accumulated: f32) -> Option<f32> {
+    if residuals.len() < 5 {
+        return None;
+    }
+    let mut v: Vec<f32> = residuals.to_vec();
+    v.sort_by(f32::total_cmp);
+    let median = v[v.len() / 2];
+    let delta = if median > 1.5 {
+        median.min(0.5)
+    } else if median < -2.5 {
+        median.max(-0.5)
+    } else {
+        return None;
+    };
+    let clamped = (accumulated + delta).clamp(-6.0, 6.0) - accumulated;
+    (clamped.abs() > 1e-3).then_some(clamped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -743,6 +952,142 @@ mod tests {
         for p in s.points.iter().filter(|p| p.temp_c < 85.0 + 2.9) {
             assert_eq!((p.w_cpu, p.w_case), (0.25, 0.25), "flat at floor, got {:?}", (p.w_cpu, p.w_case));
         }
+    }
+
+    use crate::fan::{CalibPoint, FanCalibration};
+
+    fn calib(id: &str, max_rpm: f32, nonlinear: bool) -> FanCalibration {
+        // Linear fan: rpm = duty/100 × max. Non-linear fan: rpm saturates early.
+        let duties = [0.0, 8.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0];
+        let points = duties
+            .iter()
+            .map(|&d| CalibPoint {
+                duty: d,
+                rpm: if nonlinear {
+                    max_rpm * (d / 100.0).sqrt() // fast rise, early saturation
+                } else {
+                    max_rpm * d / 100.0
+                },
+            })
+            .collect();
+        FanCalibration {
+            control_id: id.into(),
+            name: id.into(),
+            min_start_duty: 15.0,
+            max_rpm,
+            saturation_duty: 100.0,
+            points,
+            disconnected: false,
+        }
+    }
+
+    #[test]
+    fn duty_inversion_linear_fan_is_identity_ish() {
+        let c = calib("f", 2000.0, false);
+        let d = duty_for_rpm_fraction(&c.points, 0.5, c.min_start_duty, c.max_rpm);
+        assert!((d - 50.0).abs() <= 1.5, "got {d}");
+        // frac=0 → floor = max(MIN_SAFE_DUTY, start duty).
+        assert_eq!(duty_for_rpm_fraction(&c.points, 0.0, c.min_start_duty, c.max_rpm), 20.0);
+        assert_eq!(duty_for_rpm_fraction(&c.points, 1.0, c.min_start_duty, c.max_rpm), 100.0);
+    }
+
+    #[test]
+    fn duty_inversion_nonlinear_fan_picks_lower_duty() {
+        let c = calib("f", 2000.0, true);
+        // 50% airflow on a √-curve fan needs only 25% duty.
+        let d = duty_for_rpm_fraction(&c.points, 0.5, c.min_start_duty, c.max_rpm);
+        assert!((d - 25.0).abs() <= 2.0, "got {d}");
+    }
+
+    #[test]
+    fn map_group_curves_builds_dual_curves_for_case_fans() {
+        let cpu_fan = calib("cpu0", 2200.0, false);
+        let case_fan = calib("case0", 1400.0, true);
+        let cpu_pts = vec![
+            WPoint { temp_c: 20.0, w_cpu: 0.25, w_case: 0.25 },
+            WPoint { temp_c: 77.0, w_cpu: 0.25, w_case: 0.25 },
+            WPoint { temp_c: 85.0, w_cpu: 0.8, w_case: 0.5 },
+            WPoint { temp_c: 91.0, w_cpu: 1.0, w_case: 1.0 },
+        ];
+        let gpu_pts = vec![(20.0_f32, 0.25_f32), (74.0, 0.25), (80.0, 0.6), (86.0, 1.0)];
+        let curves = map_group_curves(
+            &[("cpu0".to_string(), Group::Cpu), ("case0".to_string(), Group::Case)],
+            &[cpu_fan, case_fan],
+            &cpu_pts,
+            Some(&gpu_pts),
+        );
+        assert_eq!(curves.len(), 2);
+        let cpu = curves.iter().find(|c| c.control_id == "cpu0").unwrap();
+        assert!(cpu.curve2.is_empty(), "CPU-group fans never get a GPU curve");
+        assert_eq!(cpu.spin_up_pct, 70.0);
+        assert_eq!(cpu.spin_down_pct, 30.0);
+        let case = curves.iter().find(|c| c.control_id == "case0").unwrap();
+        assert_eq!(case.curve2.len(), gpu_pts.len(), "case fans carry the GPU assist curve");
+        // Curves are duty-valued, monotone non-decreasing, within [20,100]:
+        for c in &curves {
+            for w in c.curve.windows(2) {
+                assert!(w[1].duty >= w[0].duty);
+            }
+            for p in c.curve.iter().chain(c.curve2.iter()) {
+                assert!((MIN_SAFE_DUTY..=100.0).contains(&p.duty));
+            }
+            assert!(c.min_duty >= MIN_SAFE_DUTY);
+        }
+    }
+
+    #[test]
+    fn steady_detector_settles_on_exponential_approach() {
+        // T(t) = 70 − 12·e^(−t/20): slope < 0.05 °C/s from t ≈ 50 s on.
+        let mut det = SteadyDetector::new(35.0, 120.0);
+        let mut result = None;
+        for sec in 0..120 {
+            let t = sec as f32;
+            match det.push(t, 70.0 - 12.0 * (-t / 20.0).exp()) {
+                Steady::Pending => {}
+                other => {
+                    result = Some((t, other));
+                    break;
+                }
+            }
+        }
+        let (when, st) = result.expect("settles");
+        assert!((35.0..=110.0).contains(&when), "settled at {when}s");
+        match st {
+            Steady::Steady(v) => assert!((v - 70.0).abs() < 1.0, "value {v}"),
+            _ => panic!("expected Steady"),
+        }
+    }
+
+    #[test]
+    fn steady_detector_saturates_on_slow_drift() {
+        // Linear 0.1 °C/s forever — never steady, must report Saturated at max dwell.
+        let mut det = SteadyDetector::new(35.0, 120.0);
+        let mut saw = None;
+        for sec in 0..200 {
+            let t = sec as f32;
+            if let Steady::Saturated(_) = det.push(t, 50.0 + 0.1 * t) {
+                saw = Some(t);
+                break;
+            }
+        }
+        let when = saw.expect("saturates");
+        assert!((when - 120.0).abs() <= 2.0, "saturated at {when}s");
+    }
+
+    #[test]
+    fn passive_correction_is_bounded_and_asymmetric() {
+        // Hot residuals: apply, capped at +0.5.
+        assert_eq!(passive_correction(&[2.1, 1.9, 2.4, 2.0, 2.2], 0.0), Some(0.5));
+        // Mildly hot (≤1.5): no action.
+        assert_eq!(passive_correction(&[1.2, 1.0, 1.4, 0.9, 1.3], 0.0), None);
+        // Cold needs >2.5 evidence; −2.0 is ignored…
+        assert_eq!(passive_correction(&[-2.0, -1.8, -2.2, -2.1, -1.9], 0.0), None);
+        // …−3.0 acts, capped at −0.5.
+        assert_eq!(passive_correction(&[-3.0, -3.2, -2.8, -3.1, -2.9], 0.0), Some(-0.5));
+        // Total drift clamp ±6: already at +6 → hot correction suppressed.
+        assert_eq!(passive_correction(&[2.1, 2.0, 2.2, 2.3, 2.1], 6.0), None);
+        // Fewer than 5 samples → never act.
+        assert_eq!(passive_correction(&[3.0, 3.0], 0.0), None);
     }
 
     #[test]
