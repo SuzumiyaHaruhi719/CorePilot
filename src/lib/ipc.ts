@@ -243,6 +243,9 @@ export interface FanChannelConfig {
   spinUpPct?: number;
   /** Curve-mode ramp-down smoothing: 0 = Smooth, 100 = Immediate (instant). */
   spinDownPct?: number;
+  /** Optional SECOND temp source + curve (GPU assist); duty = max(curve, curve2). */
+  tempSourceId2?: string | null;
+  curve2?: FanCurvePoint[];
 }
 
 /** One measured (duty %, RPM) sample from an AI calibration sweep. */
@@ -273,6 +276,180 @@ export interface FanCalibProgress {
   fanTotal: number;
   duty: number;
   rpm: number | null;
+}
+
+// --- fan auto-tune (spec: docs/superpowers/specs/2026-06-10-fan-autotune-design.md) ---
+
+export type FanGroup = "cpu" | "case";
+
+export interface AutoTuneParams {
+  targetTempC: number;
+  targetGpuTempC: number;
+  quietFloorPct: number;
+  noiseCeilPct: number;
+  groups: Record<string, FanGroup>;
+  reuseCalibration?: FanCalibration[] | null;
+}
+
+export interface ThermalModel {
+  alpha: number;
+  tOff: number;
+  rInf: number;
+  kC: number;
+  kX: number;
+  rmse: number;
+  conservativeShift: number;
+}
+
+export interface GpuModel {
+  tOffG: number;
+  rG: number;
+  kG: number;
+  rmse: number;
+  conservativeShift: number;
+}
+
+export interface TuneWarning {
+  kind: string;
+  messageZh: string;
+  messageEn: string;
+  achievableC?: number | null;
+}
+
+export interface WPoint {
+  tempC: number;
+  wCpu: number;
+  wCase: number;
+}
+
+export interface TunedFanCurve {
+  controlId: string;
+  group: FanGroup;
+  curve: FanCurvePoint[];
+  curve2: FanCurvePoint[];
+  minDuty: number;
+  spinUpPct: number;
+  spinDownPct: number;
+}
+
+export interface AutoTuneProgress {
+  phase: string;
+  step: number;
+  stepTotal: number;
+  cpuTemp?: number | null;
+  cpuPower?: number | null;
+  gpuTemp?: number | null;
+  gpuPower?: number | null;
+  wCpu?: number | null;
+  wCase?: number | null;
+  etaS?: number | null;
+  note?: string | null;
+}
+
+export interface TuneGridPoint {
+  wCpu: number;
+  wCase: number;
+  tSs: number;
+  pAvg: number;
+  saturated: boolean;
+  skipped: boolean;
+}
+
+export interface TuneGpuGridPoint {
+  wCase: number;
+  tGpuSs: number;
+  pGpuAvg: number;
+  tCpu: number;
+}
+
+export interface TuneBaseline {
+  tIdle: number;
+  pIdle: number;
+  tGpuIdle?: number | null;
+  pGpuIdle?: number | null;
+}
+
+export interface TuneValidation {
+  tV: number;
+  iterations: number;
+  oscillationFixed: boolean;
+  converged: boolean;
+  combinedTCpu?: number | null;
+  combinedTGpu?: number | null;
+}
+
+export interface AutoTuneResult {
+  params: AutoTuneParams;
+  calibrations: FanCalibration[];
+  baseline: TuneBaseline;
+  grid: TuneGridPoint[];
+  gpuGrid: TuneGpuGridPoint[];
+  model: ThermalModel;
+  modelGpu?: GpuModel | null;
+  pDesign: number;
+  pDesignGpu?: number | null;
+  effectiveTarget: number;
+  effectiveTargetGpu?: number | null;
+  gpuCpuCouplingC?: number | null;
+  wPoints: WPoint[];
+  gpuWPoints?: [number, number][] | null;
+  curves: TunedFanCurve[];
+  cpuSourceId?: string | null;
+  gpuSourceId?: string | null;
+  validation: TuneValidation;
+  warnings: TuneWarning[];
+  finishedAtMs: number;
+}
+
+export interface ResynthRequest {
+  params: AutoTuneParams;
+  model: ThermalModel;
+  modelGpu?: GpuModel | null;
+  calibrations: FanCalibration[];
+  pDesign: number;
+  pDesignGpu?: number | null;
+}
+
+export interface ResynthResponse {
+  curves: TunedFanCurve[];
+  wPoints: WPoint[];
+  gpuWPoints?: [number, number][] | null;
+  effectiveTarget: number;
+  effectiveTargetGpu?: number | null;
+  warnings: TuneWarning[];
+}
+
+export interface PassiveConfig {
+  enabled: boolean;
+  params: AutoTuneParams;
+  model: ThermalModel;
+  modelGpu?: GpuModel | null;
+  calibrations: FanCalibration[];
+  pDesign: number;
+  pDesignGpu?: number | null;
+}
+
+export interface PassiveStatus {
+  enabled: boolean;
+  cpuSamples: number;
+  gpuSamples: number;
+  accumulatedCpuC: number;
+  accumulatedGpuC: number;
+}
+
+/** Payload of the `fan-autotune-passive` event. */
+export interface PassiveAdjustment {
+  axis: "cpu" | "gpu";
+  deltaC: number;
+  medianResidualC: number;
+  curves: TunedFanCurve[];
+}
+
+/** Payload of the `fan-autotune-aborted` event. */
+export interface AutoTuneAbortInfo {
+  phase: string;
+  reasonZh: string;
+  reasonEn: string;
 }
 
 export interface ServiceItem {
@@ -404,6 +581,13 @@ export const api = {
    *  measure RPM, and return each fan's start/stop/saturation envelope. Emits
    *  `fan-calib-progress` events during the (multi-second) sweep. */
   fanCalibrate: (controlIds: string[]) => invoke<FanCalibration[]>("fan_calibrate", { controlIds }),
+  /** Run the closed-loop auto-tune: measure this machine's thermal response under
+   *  built-in load and synthesize per-fan curves. Emits `fan-autotune-progress`. */
+  fanAutotuneStart: (params: AutoTuneParams) => invoke<AutoTuneResult>("fan_autotune_start", { params }),
+  fanAutotuneAbort: () => invoke<boolean>("fan_autotune_abort"),
+  fanAutotuneResynth: (req: ResynthRequest) => invoke<ResynthResponse>("fan_autotune_resynth", { req }),
+  fanPassiveConfigure: (config: PassiveConfig | null) => invoke<void>("fan_passive_configure", { config }),
+  fanPassiveStatus: () => invoke<PassiveStatus>("fan_passive_status"),
   /** Apply a reversible system optimization tweak by id (深度优化). Returns a JSON
    *  snapshot of the pre-apply state; persist it and pass it back to `tweakRevert`
    *  to restore the EXACT prior values (empty string when nothing was captured). */

@@ -15,6 +15,9 @@ export interface FanConfig {
   spinUpPct: number;
   /** Curve-mode ramp-down smoothing: 0 = Smooth, 100 = Immediate. */
   spinDownPct: number;
+  /** GPU-assist second source + curve (auto-tune output). */
+  tempSourceId2?: string | null;
+  curve2?: FanCurvePoint[];
 }
 
 /**
@@ -231,7 +234,7 @@ function uid(): string {
 function cloneConfigs(src: Record<string, FanConfig>): Record<string, FanConfig> {
   const out: Record<string, FanConfig> = {};
   for (const [k, v] of Object.entries(src)) {
-    out[k] = { ...v, curve: v.curve.map((p) => ({ ...p })) };
+    out[k] = { ...v, curve: v.curve.map((p) => ({ ...p })), curve2: v.curve2?.map((p) => ({ ...p })) };
   }
   return out;
 }
@@ -248,6 +251,8 @@ function toBackend(configs: Record<string, FanConfig>): FanChannelConfig[] {
     // instantly (100 = Immediate = today's behavior).
     spinUpPct: c.spinUpPct ?? 100,
     spinDownPct: c.spinDownPct ?? 100,
+    tempSourceId2: c.tempSourceId2 ?? null,
+    curve2: c.curve2 ?? [],
   }));
 }
 
