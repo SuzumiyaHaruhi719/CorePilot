@@ -332,6 +332,42 @@ export function FanControl() {
     useFanProfiles();
   const autotune = useFanAutotune();
   const [showTuneWizard, setShowTuneWizard] = useState(false);
+  const [resynthBusy, setResynthBusy] = useState(false);
+
+  // Re-solve curves from the STORED model (seconds, no re-measurement) and
+  // apply — the upgrade path after synthesis-algorithm fixes.
+  async function resynthNow() {
+    const s = useFanAutotune.getState();
+    const r = s.result;
+    if (!r) return;
+    setResynthBusy(true);
+    try {
+      const resp = await api.fanAutotuneResynth({
+        params: r.params,
+        model: r.model,
+        modelGpu: r.modelGpu ?? null,
+        calibrations: r.calibrations,
+        pDesign: r.pDesign,
+        pDesignGpu: r.pDesignGpu ?? null,
+      });
+      const next = {
+        ...r,
+        curves: resp.curves,
+        wPoints: resp.wPoints,
+        gpuWPoints: resp.gpuWPoints ?? null,
+        effectiveTarget: resp.effectiveTarget,
+        effectiveTargetGpu: resp.effectiveTargetGpu ?? null,
+        warnings: resp.warnings,
+      };
+      s.setResult(next);
+      s.applyTuned(next.curves, next.cpuSourceId ?? null, next.gpuSourceId ?? null);
+      s.configurePassive();
+    } catch {
+      // apply failures surface via the fan store's lastError banner
+    } finally {
+      setResynthBusy(false);
+    }
+  }
   const [delProfile, setDelProfile] = useState<{ id: string; name: string } | null>(null);
   const [info, setInfo] = useState<FanInfo | null>(null);
   // Control ids that have shown a valid (>0) RPM at least once — PERSISTED in the
@@ -686,6 +722,15 @@ export function FanControl() {
                 {" · "}
                 {tf("满载实测", "validated")} <span className="nums text-ink">{Math.round(autotune.result.validation.tV * 10) / 10}°C</span>
               </span>
+              <button
+                type="button"
+                onClick={() => void resynthNow()}
+                disabled={resynthBusy}
+                title={tf("从已存模型秒级重算并应用曲线(无需重新测量;算法更新后用这个)", "Re-solve curves from the stored model in seconds (no re-measurement; use after algorithm updates)")}
+                className="no-drag flex cursor-pointer items-center gap-1 text-[11px] text-dim transition-colors hover:text-muted disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <RefreshCw size={11} className={resynthBusy ? "animate-spin" : ""} /> {tf("重算曲线", "Re-solve")}
+              </button>
               <label className="ml-auto flex cursor-pointer items-center gap-2">
                 {tf("被动学习", "Passive learning")}
                 {autotune.passivePaused && <span className="text-[10px] text-warn">{tf("(已暂停:检测到手动修改)", "(paused: hand-edit detected)")}</span>}

@@ -473,15 +473,41 @@ pub fn synthesize_cpu(inp: &SynthInput, band_c: f32) -> CpuSynth {
     let w_req = solve_iso(m, inp.p_design, effective_target, floor, ceil, inp.g, inp.has_case)
         .unwrap_or((ceil, ceil));
 
-    // 3. Proportional band: P_knee where floor airflow lands at target − B.
+    // 2b. Degenerate-fit honesty (field lesson, 2026-06-10): when the measured
+    // grid is nearly flat the fit truthfully reports tiny fan authority — say
+    // so, because the resulting near-flat curve looks "lazy" without context.
+    let fan_authority = m.predict(inp.p_design, floor, wx_of(floor))
+        - m.predict(inp.p_design, 1.0, wx_of(1.0));
+    if warning.is_none() && fan_authority < 3.0 {
+        warning = Some(TuneWarning {
+            kind: "fansBarelyMatter".into(),
+            message_zh: format!(
+                "实测风扇转速对 CPU 满载温度影响很小(底线→全速仅 ≈{fan_authority:.1}°C),曲线因此接近平坦 —— 这是测量数据的诚实结论(散热器强/功耗低/后台噪声大都会如此)。若与预期不符,建议空闲时重新调优"
+            ),
+            message_en: format!(
+                "Measured fan authority over CPU temp is tiny (≈{fan_authority:.1}°C floor→full), so the curve is nearly flat — the honest reading of the data. Re-tune on an idle system if this seems wrong"
+            ),
+            achievable_c: None,
+        });
+    }
+
+    // 3. Proportional band: needed only when the quiet floor canNOT hold the
+    // target at design power. Anchoring this on the TARGET (not t_low) is what
+    // keeps a strong-cooler/low-power machine on a flat, quiet curve instead
+    // of a pointless ramp through its normal operating temperatures.
     let t_low = effective_target - band_c;
-    let r_floor = m.r_at(floor, wx_of(floor));
-    let p_knee = ((t_low - m.t_off) / r_floor).max(0.0);
+    let floor_holds = m.predict(inp.p_design, floor, wx_of(floor)) <= effective_target;
 
     let mut points: Vec<WPoint> = vec![WPoint { temp_c: 20.0, w_cpu: floor, w_case: floor }];
     points.push(WPoint { temp_c: t_low, w_cpu: floor, w_case: floor });
 
-    if p_knee < inp.p_design {
+    if floor_holds {
+        // Flat curve: hold the (≈floor) full-load solution at the target so
+        // interpolation stays at the floor across the whole band.
+        points.push(WPoint { temp_c: effective_target, w_cpu: w_req.0, w_case: w_req.1 });
+    } else {
+        let r_floor = m.r_at(floor, wx_of(floor));
+        let p_knee = ((t_low - m.t_off) / r_floor).max(0.0).min(inp.p_design);
         // Power schedule across the band: equilibrium temps ease toward the
         // target as power approaches P_design (spec §5.4).
         let mut prev_t = t_low;
@@ -489,22 +515,24 @@ pub fn synthesize_cpu(inp: &SynthInput, band_c: f32) -> CpuSynth {
             let f = j as f32 / 5.0;
             let p_j = p_knee + (inp.p_design - p_knee) * f;
             let mut t_j = t_low + band_c * f.powf(1.5);
-            // Clamp into the feasibility envelope — but only when the envelope
-            // itself sits below the (possibly capped) target; on infeasible
-            // machines the envelope is above the cap and would drag the
-            // schedule back out of the representable range.
-            let t_env = m.predict(p_j, ceil, wx_of(ceil)) + 0.3;
-            if t_env < effective_target {
-                t_j = t_j.max(t_env);
-            }
-            t_j = t_j.max(prev_t + 0.2);
+            // Lift the scheduled temp clear of the feasibility envelope (with a
+            // real margin — hugging it forces near-max airflow), but never past
+            // the (possibly capped) target.
+            let t_env = (m.predict(p_j, ceil, wx_of(ceil)) + 1.0).min(effective_target);
+            t_j = t_j.max(t_env).max(prev_t + 0.2);
             prev_t = t_j;
             let (wc, wx) =
                 solve_iso(m, p_j, t_j, floor, ceil, inp.g, inp.has_case).unwrap_or(w_req);
-            points.push(WPoint { temp_c: t_j, w_cpu: wc, w_case: wx });
+            // A band point must never be louder than the full-load anchor —
+            // otherwise monotonicity drags the whole curve up to one
+            // pathological early point (the field "cliff at 60°C" bug).
+            points.push(WPoint {
+                temp_c: t_j,
+                w_cpu: wc.min(w_req.0),
+                w_case: wx.min(w_req.1),
+            });
         }
     }
-    // else: the floor holds everything — flat curve + emergency ramp only.
 
     // 4. Emergency ramp above target: ceiling at +3, full (ignore ceiling) at +6.
     points.push(WPoint {
@@ -574,6 +602,28 @@ pub fn synthesize_gpu(m: &GpuModel, p_design_g: f32, target_g: f32, floor: f32, 
     } else {
         phi_inv(s / m.k_g, GPU_ALPHA).clamp(floor, ceil)
     };
+    // Degenerate-fit honesty: when case airflow measurably does almost nothing
+    // for the GPU (its own cooler dominates completely), surging the case fans
+    // above the target would be pure noise for no cooling — keep the assist
+    // flat and say why.
+    let assist_authority = m.predict(p_design_g, floor) - m.predict(p_design_g, ceil);
+    if assist_authority < 2.0 {
+        if warning.is_none() {
+            warning = Some(TuneWarning {
+                kind: "caseBarelyHelpsGpu".into(),
+                message_zh: format!(
+                    "实测机箱风量对 GPU 温度影响很小(≈{assist_authority:.1}°C),GPU 辅助曲线保持平坦(显卡自身风扇足以胜任)"
+                ),
+                message_en: format!(
+                    "Measured case-airflow authority over the GPU is tiny (≈{assist_authority:.1}°C); the assist curve stays flat (the GPU's own cooler dominates)"
+                ),
+                achievable_c: None,
+            });
+        }
+        let w_flat = w_req.min(floor.max(w_req));
+        let points = vec![(20.0, floor), (effective + 6.0, w_flat.max(floor))];
+        return GpuSynth { effective_target_g: effective, points, warning };
+    }
     let mut points = vec![
         (20.0, floor),
         (effective - 6.0, floor),
@@ -1138,6 +1188,59 @@ mod tests {
         assert_eq!(passive_correction(&[2.1, 2.0, 2.2, 2.3, 2.1], 6.0), None);
         // Fewer than 5 samples → never act.
         assert_eq!(passive_correction(&[3.0, 3.0], 0.0), None);
+    }
+
+    #[test]
+    fn degenerate_flat_fit_yields_flat_quiet_curve() {
+        // REGRESSION — real field data (9950X3D, busy-system tune, 2026-06-10):
+        // the grid was nearly flat (62-67°C across the whole airflow range), the
+        // fit honestly said "fans barely matter" (k_c≈0.005), and the floor
+        // already held the 69°C target at design power. The synthesizer instead
+        // produced a 30%→100% cliff at 60°C (band scheduled BELOW idle temp,
+        // solve_iso hugged the envelope, monotonicity dragged every later point
+        // up). The honest optimum is a flat floor curve.
+        let m = ThermalModel {
+            alpha: 0.6,
+            t_off: 48.58,
+            r_inf: 0.1087,
+            k_c: 0.00504,
+            k_x: 0.01295,
+            rmse: 1.4,
+            conservative_shift: 2.1,
+        };
+        let g = GroupRpm { cpu_max_rpm_sum: 2922.0, case_max_rpm_sum: 9000.0 };
+        let s = synthesize_cpu(
+            &SynthInput { model: &m, p_design: 135.1, target: 69.0, floor: 0.30, ceil: 1.0, g: &g, has_case: true },
+            8.0,
+        );
+        assert_eq!(s.effective_target, 69.0);
+        // Every point at/below the target stays at the quiet floor:
+        for p in s.points.iter().filter(|p| p.temp_c <= 69.0 + 0.01) {
+            assert!(
+                p.w_cpu <= 0.31 && p.w_case <= 0.31,
+                "expected flat floor below target, got {:?} at {}°C",
+                (p.w_cpu, p.w_case),
+                p.temp_c
+            );
+        }
+        // And the result says WHY it is flat:
+        assert_eq!(s.warning.as_ref().map(|w| w.kind.as_str()), Some("fansBarelyMatter"));
+        for w in s.points.windows(2) {
+            assert!(w[1].temp_c > w[0].temp_c && w[1].w_cpu >= w[0].w_cpu);
+        }
+    }
+
+    #[test]
+    fn gpu_assist_flattens_when_case_barely_helps() {
+        // Same field tune, GPU axis: r_g fitted to 0, k_g tiny — case airflow
+        // moves the GPU well under 2°C end to end. Surging case fans above the
+        // GPU target would be pure noise for nothing; the assist must stay flat.
+        let g = GpuModel { t_off_g: 54.14, r_g: 0.0, k_g: 0.00646, rmse: 1.34, conservative_shift: 2.3 };
+        let s = synthesize_gpu(&g, 104.0, 70.0, 0.30, 1.0);
+        for &(temp, w) in &s.points {
+            assert!(w <= 0.31, "expected flat assist, got {w} at {temp}°C");
+        }
+        assert_eq!(s.warning.as_ref().map(|w| w.kind.as_str()), Some("caseBarelyHelpsGpu"));
     }
 
     #[test]
