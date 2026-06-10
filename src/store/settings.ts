@@ -60,6 +60,9 @@ interface SettingsState {
   gameNotify: boolean;
   /** True once the CCD-cluster notice has shown & auto-dismissed (first run only). */
   ccdNoticeSeen: boolean;
+  /** Fan auto-tune: allow tuning while background load is present. The wizard's
+   *  quiescence precheck then warns about accuracy instead of refusing to run. */
+  tuneAllowBusy: boolean;
   update: (patch: Partial<Omit<SettingsState, "update" | "togglePerfCard">>) => void;
   togglePerfCard: (card: PerfCard) => void;
 }
@@ -86,6 +89,7 @@ export const useSettings = create<SettingsState>()(
       autoShowReport: true,
       gameNotify: true,
       ccdNoticeSeen: false,
+      tuneAllowBusy: false,
       update: (patch) => set(patch),
       togglePerfCard: (card) =>
         set((s) => ({ perfCards: { ...s.perfCards, [card]: !s.perfCards[card] } })),

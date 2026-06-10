@@ -183,7 +183,9 @@ impl TuneIo for FakeIo {
     }
     fn cpu_load_pct(&self) -> Option<f32> {
         if self.busy_background {
-            Some(55.0)
+            // A background hog eats 55% at idle; the synthetic load still
+            // saturates the rest of the cores (realistic combined ≈ 99%).
+            Some(if self.cpu_on { 99.0 } else { 55.0 })
         } else {
             Some(if self.cpu_on { 99.0 } else { 3.0 })
         }
@@ -231,6 +233,7 @@ fn params() -> AutoTuneParams {
         noise_ceil_pct: 100.0,
         groups,
         reuse_calibration: None,
+        allow_background_load: false,
     }
 }
 
@@ -347,4 +350,21 @@ fn busy_system_fails_precheck() {
         AutoTuneOutcome::Aborted(a) => assert_eq!(a.phase, "precheck"),
         AutoTuneOutcome::Done(_) => panic!("should have aborted in precheck"),
     }
+}
+
+#[test]
+fn busy_system_override_completes_with_warning() {
+    // The user's settings toggle: a busy system may tune anyway — the
+    // quiescence gate downgrades from abort to an honest accuracy warning,
+    // while every safety net (runaway line, load verify, validation) stays.
+    let mut io = FakeIo::new(Plant::desktop());
+    io.busy_background = true;
+    let mut p = params();
+    p.allow_background_load = true;
+    let r = expect_done(run_tune(&mut io, &p));
+    assert!(
+        r.warnings.iter().any(|w| w.kind == "busySystem"),
+        "expected a busySystem accuracy warning"
+    );
+    assert!(r.validation.converged, "t_v {}", r.validation.t_v);
 }

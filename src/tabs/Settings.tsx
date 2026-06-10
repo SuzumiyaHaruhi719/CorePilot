@@ -766,6 +766,13 @@ export function Settings() {
             <Toggle checked={amdUnlocked} onChange={(value) => toggleAmdUnlocked(value)} />
           </SettingRow>
 
+          <SettingRow
+            title="智能调优:允许后台负载"
+            desc="风扇智能调优默认要求系统空闲(后台占用会污染怠速基线)。开启后即使有后台负载也可开始调优 — 结果会标注实测后台占用并提示精度可能下降;91°C 失控保护与满载验证不受影响。常驻监控/挂机软件挡住调优时用这个。"
+          >
+            <Toggle checked={settings.tuneAllowBusy} onChange={(value) => settings.update({ tuneAllowBusy: value })} />
+          </SettingRow>
+
           <SettingRow title="语言 / Language">
             <Segmented
               id="lang"

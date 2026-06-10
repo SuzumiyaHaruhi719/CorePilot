@@ -365,11 +365,29 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
         }
     }
     if n > 0 && (sum / n as f32 >= 10.0 || peak >= 25.0) {
-        return Err(abort(
-            "precheck",
-            "系统不空闲:请先关闭后台负载再开始调优",
-            "system busy: close background workloads before tuning",
-        ));
+        let (avg, pk) = (sum / n as f32, peak);
+        if t.params.allow_background_load {
+            // Settings override: proceed, but record the accuracy caveat. The
+            // model uses MEASURED power so a steady background load mostly
+            // self-corrects; a fluctuating one shows up as longer settling and
+            // possibly an unconverged-validation warning — all honest outcomes.
+            t.warnings.push(TuneWarning {
+                kind: "busySystem".into(),
+                message_zh: format!(
+                    "标定期间系统有后台负载(均值 {avg:.0}%,峰值 {pk:.0}%),基线与精度可能受影响;若结果偏差大,建议在空闲时重新调优"
+                ),
+                message_en: format!(
+                    "Background load present during tuning (avg {avg:.0}%, peak {pk:.0}%); baseline accuracy may suffer — re-tune on an idle system if results drift"
+                ),
+                achievable_c: None,
+            });
+        } else {
+            return Err(abort(
+                "precheck",
+                "系统不空闲:请先关闭后台负载再开始调优(或在 设置 中开启「允许后台负载时调优」)",
+                "system busy: close background workloads first (or enable \"tune with background load\" in Settings)",
+            ));
+        }
     }
 
     // --- FanCalib (spec §3 阶段 1) --------------------------------------------

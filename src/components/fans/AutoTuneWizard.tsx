@@ -14,6 +14,7 @@ import {
   type TuneWarning,
 } from "../../lib/ipc";
 import { useFanAutotune } from "../../store/fanAutotune";
+import { useSettings } from "../../store/settings";
 import { Button } from "../ui/Button";
 import { Modal } from "../ui/Modal";
 import { Segmented } from "../ui/Segmented";
@@ -84,7 +85,10 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
     for (const [id, a] of Object.entries(assign)) {
       if (a === "cpu" || a === "case") groups[id] = a;
     }
-    const params = clampTuneParams({ ...draft, groups });
+    // Settings toggle: a busy system tunes anyway (precheck downgrades its
+    // abort to an accuracy warning in the result).
+    const allowBackgroundLoad = useSettings.getState().tuneAllowBusy;
+    const params = clampTuneParams({ ...draft, groups, allowBackgroundLoad });
     store.setParams(params);
     setStep("running");
     setProgress(null);

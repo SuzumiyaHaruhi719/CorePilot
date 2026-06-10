@@ -18,7 +18,14 @@ export interface PassiveLogEntry {
 }
 
 export function defaultTuneParams(): AutoTuneParams {
-  return { targetTempC: 85, targetGpuTempC: 80, quietFloorPct: 25, noiseCeilPct: 100, groups: {} };
+  return {
+    targetTempC: 85,
+    targetGpuTempC: 80,
+    quietFloorPct: 25,
+    noiseCeilPct: 100,
+    groups: {},
+    allowBackgroundLoad: false,
+  };
 }
 
 interface FanAutotuneState {

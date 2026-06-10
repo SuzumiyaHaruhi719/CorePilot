@@ -24,6 +24,11 @@ pub struct AutoTuneParams {
     /// Reuse a recent calibration instead of re-sweeping (spec §3 阶段 1).
     #[serde(default)]
     pub reuse_calibration: Option<Vec<FanCalibration>>,
+    /// Settings toggle: tune even when the system has background load. The
+    /// quiescence precheck downgrades from an abort to an accuracy warning;
+    /// all safety nets stay armed. Defaults off (old callers unchanged).
+    #[serde(default)]
+    pub allow_background_load: bool,
 }
 
 impl AutoTuneParams {

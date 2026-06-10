@@ -289,6 +289,8 @@ export interface AutoTuneParams {
   noiseCeilPct: number;
   groups: Record<string, FanGroup>;
   reuseCalibration?: FanCalibration[] | null;
+  /** Settings toggle: tune even with background load (precheck warns instead of aborting). */
+  allowBackgroundLoad?: boolean;
 }
 
 export interface ThermalModel {
