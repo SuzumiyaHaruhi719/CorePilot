@@ -282,6 +282,287 @@ pub fn fit_gpu_model(samples: &[GpuFitSample]) -> Option<GpuModel> {
     Some(g)
 }
 
+// --- noise objective & iso-thermal solver (spec §4/§5) -----------------------------
+
+/// Σ maxRpm per group — the noise weights (spec §4: N = Σ (w·maxRpm/1000)²).
+#[derive(Clone, Copy, Debug)]
+pub struct GroupRpm {
+    pub cpu_max_rpm_sum: f32,
+    pub case_max_rpm_sum: f32,
+}
+
+/// Quadratic noise proxy: penalizes high speeds so the optimizer spreads
+/// airflow onto whichever group is still quiet instead of maxing one out.
+pub fn noise(w_cpu: f32, w_case: f32, g: &GroupRpm) -> f32 {
+    let a = w_cpu * g.cpu_max_rpm_sum / 1000.0;
+    let b = w_case * g.case_max_rpm_sum / 1000.0;
+    a * a + b * b
+}
+
+/// A user-facing feasibility warning (bilingual; `kind` is machine-readable:
+/// "ceilingInsufficient" | "coolerInsufficient" | "caseCantHelpGpu" |
+/// "gpuAxisSkipped" | "validationUnconverged" | "combinedOverTarget" |
+/// "fanDisconnected").
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TuneWarning {
+    pub kind: String,
+    pub message_zh: String,
+    pub message_en: String,
+    /// Optional achievable temperature attached to infeasibility warnings.
+    pub achievable_c: Option<f32>,
+}
+
+/// Quietest (w_cpu, w_case) holding `T_model(p, w) ≤ t` with equality where
+/// possible, inside [floor, ceil]². 1-D scan over w_cpu (0.01 steps), w_case
+/// solved analytically from the isotherm (spec §5 step 3). None ⇔ infeasible
+/// even at (ceil, ceil).
+pub fn solve_iso(
+    m: &ThermalModel,
+    p: f32,
+    t: f32,
+    floor: f32,
+    ceil: f32,
+    g: &GroupRpm,
+    has_case: bool,
+) -> Option<(f32, f32)> {
+    if p <= 0.0 {
+        return Some((floor, floor));
+    }
+    if m.predict(p, ceil, if has_case { ceil } else { 0.0 }) > t + 0.05 {
+        return None; // infeasible even fully open within the ceiling
+    }
+    // Required total φ budget: s = (t − T_off)/P − R∞ = k_c·φc + k_x·φx.
+    let s = (t - m.t_off) / p - m.r_inf;
+
+    if !has_case || m.k_x <= 1e-6 {
+        // 1-D: solve k_c·φ(w) = s.
+        let w = if m.k_c <= 1e-6 {
+            floor // airflow doesn't matter per the model — stay quiet
+        } else if s <= 0.0 {
+            return None; // even infinite airflow can't reach t (r_inf too big)
+        } else {
+            phi_inv(s / m.k_c, m.alpha)
+        };
+        let w = w.clamp(floor, ceil);
+        return (m.predict(p, w, 0.0) <= t + 0.05).then_some((w, floor));
+    }
+
+    let mut best: Option<(f32, f32, f32)> = None; // (noise, wc, wx)
+    let steps = ((ceil - floor) / 0.01).round() as i32;
+    for i in 0..=steps.max(0) {
+        let wc = floor + i as f32 * 0.01;
+        let rem = s - m.k_c * phi(wc, m.alpha);
+        let wx = if rem <= 0.0 {
+            // This much CPU airflow alone overshoots the budget — case at floor.
+            floor
+        } else {
+            let need = rem / m.k_x;
+            let w = phi_inv(need, m.alpha);
+            if w > ceil + 1e-4 {
+                continue; // infeasible at this wc
+            }
+            w.clamp(floor, ceil)
+        };
+        if m.predict(p, wc, wx) > t + 0.05 {
+            continue;
+        }
+        let n = noise(wc, wx, g);
+        if best.map(|(bn, _, _)| n < bn).unwrap_or(true) {
+            best = Some((n, wc, wx));
+        }
+    }
+    best.map(|(_, wc, wx)| (wc, wx))
+}
+
+// --- curve synthesis (spec §5) ------------------------------------------------------
+
+/// One point of a group-level airflow curve: at `temp_c`, run the CPU group at
+/// `w_cpu` and the case group at `w_case` (fractions of each fan's max RPM).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WPoint {
+    pub temp_c: f32,
+    pub w_cpu: f32,
+    pub w_case: f32,
+}
+
+pub struct SynthInput<'a> {
+    pub model: &'a ThermalModel,
+    pub p_design: f32,
+    pub target: f32,
+    pub floor: f32,
+    pub ceil: f32,
+    pub g: &'a GroupRpm,
+    pub has_case: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct CpuSynth {
+    pub effective_target: f32,
+    pub points: Vec<WPoint>,
+    pub warning: Option<TuneWarning>,
+    pub band_c: f32,
+}
+
+/// Spec §5: feasibility verdict → proportional-band schedule → quietest combo
+/// per scheduled equilibrium → emergency ramp. Output is strictly increasing in
+/// temperature and non-decreasing in airflow, so the engine curve is single-
+/// valued with finite slope (no oscillation-inducing vertical jump at target).
+pub fn synthesize_cpu(inp: &SynthInput, band_c: f32) -> CpuSynth {
+    let m = inp.model;
+    let (floor, ceil) = (inp.floor, inp.ceil);
+    let wx_of = |w: f32| if inp.has_case { w } else { 0.0 };
+
+    // 1. Feasibility & effective target.
+    let t_at_ceil = m.predict(inp.p_design, ceil, wx_of(ceil));
+    let t_at_full = m.predict(inp.p_design, 1.0, wx_of(1.0));
+    let mut warning = None;
+    let effective_target = if t_at_ceil <= inp.target {
+        inp.target
+    } else if t_at_full > inp.target {
+        let achievable = t_at_full;
+        warning = Some(TuneWarning {
+            kind: "coolerInsufficient".into(),
+            message_zh: format!(
+                "散热器能力不足:满载即使风扇全速也只能压到约 {achievable:.1}°C,曲线已锚定全速"
+            ),
+            message_en: format!(
+                "Cooler insufficient: even at 100% fans full load only reaches ≈{achievable:.1}°C; curve anchored at full speed"
+            ),
+            achievable_c: Some(achievable),
+        });
+        achievable + 1.0
+    } else {
+        let achievable = t_at_ceil;
+        warning = Some(TuneWarning {
+            kind: "ceilingInsufficient".into(),
+            message_zh: format!(
+                "噪音上限 {:.0}% 内满载最低只能压到约 {achievable:.1}°C(目标 {:.0}°C)",
+                ceil * 100.0,
+                inp.target
+            ),
+            message_en: format!(
+                "Within the {:.0}% noise ceiling full load only reaches ≈{achievable:.1}°C (target {:.0}°C)",
+                ceil * 100.0,
+                inp.target
+            ),
+            achievable_c: Some(achievable),
+        });
+        achievable + 0.5
+    };
+
+    // 2. Full-load anchor (quietest combo pinning effective_target at P_design).
+    let w_req = solve_iso(m, inp.p_design, effective_target, floor, ceil, inp.g, inp.has_case)
+        .unwrap_or((ceil, ceil));
+
+    // 3. Proportional band: P_knee where floor airflow lands at target − B.
+    let t_low = effective_target - band_c;
+    let r_floor = m.r_at(floor, wx_of(floor));
+    let p_knee = ((t_low - m.t_off) / r_floor).max(0.0);
+
+    let mut points: Vec<WPoint> = vec![WPoint { temp_c: 20.0, w_cpu: floor, w_case: floor }];
+    points.push(WPoint { temp_c: t_low, w_cpu: floor, w_case: floor });
+
+    if p_knee < inp.p_design {
+        // Power schedule across the band: equilibrium temps ease toward the
+        // target as power approaches P_design (spec §5.4).
+        let mut prev_t = t_low;
+        for j in 1..=5 {
+            let f = j as f32 / 5.0;
+            let p_j = p_knee + (inp.p_design - p_knee) * f;
+            let mut t_j = t_low + band_c * f.powf(1.5);
+            // Clamp into the feasibility envelope, then keep strictly increasing.
+            let t_env = m.predict(p_j, ceil, wx_of(ceil)) + 0.3;
+            t_j = t_j.max(t_env).max(prev_t + 0.2);
+            prev_t = t_j;
+            let (wc, wx) =
+                solve_iso(m, p_j, t_j, floor, ceil, inp.g, inp.has_case).unwrap_or(w_req);
+            points.push(WPoint { temp_c: t_j, w_cpu: wc, w_case: wx });
+        }
+    }
+    // else: the floor holds everything — flat curve + emergency ramp only.
+
+    // 4. Emergency ramp above target: ceiling at +3, full (ignore ceiling) at +6.
+    points.push(WPoint {
+        temp_c: effective_target + 3.0,
+        w_cpu: ceil,
+        w_case: if inp.has_case { ceil } else { floor },
+    });
+    points.push(WPoint {
+        temp_c: effective_target + 6.0,
+        w_cpu: 1.0,
+        w_case: if inp.has_case { 1.0 } else { floor },
+    });
+
+    // 5. Enforce monotonicity (strict temp, non-decreasing airflow).
+    points.sort_by(|a, b| a.temp_c.total_cmp(&b.temp_c));
+    points.dedup_by(|b, a| {
+        if b.temp_c - a.temp_c < 0.15 {
+            a.w_cpu = a.w_cpu.max(b.w_cpu);
+            a.w_case = a.w_case.max(b.w_case);
+            true
+        } else {
+            false
+        }
+    });
+    for i in 1..points.len() {
+        points[i].w_cpu = points[i].w_cpu.max(points[i - 1].w_cpu);
+        points[i].w_case = points[i].w_case.max(points[i - 1].w_case);
+    }
+
+    CpuSynth { effective_target, points, warning, band_c }
+}
+
+#[derive(Clone, Debug)]
+pub struct GpuSynth {
+    pub effective_target_g: f32,
+    /// (temp_c, w_case) — the case group's GPU-assist curve.
+    pub points: Vec<(f32, f32)>,
+    pub warning: Option<TuneWarning>,
+}
+
+/// Spec §5.7: 1-D assist curve for the case group keyed to GPU temperature.
+/// Honest framing: the GPU's own cooler dominates; case airflow assists.
+pub fn synthesize_gpu(m: &GpuModel, p_design_g: f32, target_g: f32, floor: f32, ceil: f32) -> GpuSynth {
+    let t_at_ceil = m.predict(p_design_g, ceil);
+    let mut warning = None;
+    let effective = if t_at_ceil <= target_g {
+        target_g
+    } else {
+        warning = Some(TuneWarning {
+            kind: "caseCantHelpGpu".into(),
+            message_zh: format!(
+                "机箱风量帮不动 GPU:上限内 GPU 满载最低约 {t_at_ceil:.1}°C(显卡自身风扇为主,机箱只能辅助)"
+            ),
+            message_en: format!(
+                "Case airflow can't hold the GPU: ≈{t_at_ceil:.1}°C minimum at full GPU load within the ceiling (the GPU's own cooler dominates)"
+            ),
+            achievable_c: Some(t_at_ceil),
+        });
+        t_at_ceil + 0.5
+    };
+    // Analytic w_req: k_g·φ(w) = (t − t_off_g)/P − r_g.
+    let s = (effective - m.t_off_g) / p_design_g - m.r_g;
+    let w_req = if m.k_g <= 1e-6 || s <= 0.0 {
+        ceil
+    } else {
+        phi_inv(s / m.k_g, GPU_ALPHA).clamp(floor, ceil)
+    };
+    let mut points = vec![
+        (20.0, floor),
+        (effective - 6.0, floor),
+        (effective, w_req),
+        (effective + 3.0, ceil),
+        (effective + 6.0, 1.0),
+    ];
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for i in 1..points.len() {
+        points[i].1 = points[i].1.max(points[i - 1].1);
+    }
+    GpuSynth { effective_target_g: effective, points, warning }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +656,113 @@ mod tests {
         assert!(fit_cpu_model(&[], true).is_none());
         let one = vec![FitSample { p: 100.0, w_cpu: 1.0, w_case: 1.0, t: 60.0 }];
         assert!(fit_cpu_model(&one, true).is_none());
+    }
+
+    fn rpm_groups() -> GroupRpm {
+        GroupRpm { cpu_max_rpm_sum: 3600.0, case_max_rpm_sum: 5200.0 }
+    }
+
+    #[test]
+    fn solve_iso_finds_quietest_combo_on_isotherm() {
+        let m = truth();
+        let g = rpm_groups();
+        let (wc, wx) = solve_iso(&m, 200.0, 78.0, 0.25, 1.0, &g, true).expect("feasible");
+        // On the isotherm (or overcooled at the floor) and within bounds:
+        assert!(m.predict(200.0, wc, wx) <= 78.0 + 0.1);
+        assert!((0.25..=1.0).contains(&wc) && (0.25..=1.0).contains(&wx));
+        // It must beat the trivial "both maxed" solution on noise:
+        assert!(noise(wc, wx, &g) <= noise(1.0, 1.0, &g));
+    }
+
+    #[test]
+    fn solve_iso_respects_ceiling_infeasibility() {
+        let m = truth();
+        // Demand an impossible temp under a tight ceiling:
+        assert!(solve_iso(&m, 220.0, 40.0, 0.25, 0.5, &rpm_groups(), true).is_none());
+    }
+
+    fn synth_input<'a>(m: &'a ThermalModel, g: &'a GroupRpm, target: f32, ceil: f32) -> SynthInput<'a> {
+        SynthInput { model: m, p_design: 210.0, target, floor: 0.25, ceil, g, has_case: true }
+    }
+
+    #[test]
+    fn synthesize_cpu_happy_path_monotone_and_anchored() {
+        let m = truth();
+        let g = rpm_groups();
+        let s = synthesize_cpu(&synth_input(&m, &g, 85.0, 1.0), 8.0);
+        assert!(s.warning.is_none());
+        assert_eq!(s.effective_target, 85.0);
+        let pts = &s.points;
+        assert!(pts.len() >= 6 && pts.len() <= 9, "{}", pts.len());
+        for w in pts.windows(2) {
+            assert!(w[1].temp_c > w[0].temp_c, "temps strictly increase");
+            assert!(w[1].w_cpu >= w[0].w_cpu && w[1].w_case >= w[0].w_case, "w non-decreasing");
+        }
+        assert_eq!(pts[0].w_cpu, 0.25, "starts at the quiet floor");
+        let last = pts.last().unwrap();
+        assert_eq!((last.w_cpu, last.w_case), (1.0, 1.0), "emergency tops at 100%");
+        // The point AT the target must hold the design power at/below target:
+        let at = pts.iter().find(|p| (p.temp_c - 85.0).abs() < 0.01).expect("target anchor");
+        assert!(m.predict(210.0, at.w_cpu, at.w_case) <= 85.0 + 0.1);
+    }
+
+    #[test]
+    fn synthesize_cpu_warns_when_ceiling_cannot_hold_target() {
+        let m = truth();
+        let g = rpm_groups();
+        // truth() at P=210 W reaches ≈80.4°C at full airflow, ≈104°C at 40%.
+        // Target 82°C is feasible at 100% but NOT inside a 40% ceiling → the
+        // verdict must blame the ceiling, not the cooler.
+        let s = synthesize_cpu(&synth_input(&m, &g, 82.0, 0.4), 8.0);
+        let w = s.warning.expect("warning expected");
+        assert_eq!(w.kind, "ceilingInsufficient");
+        assert!(s.effective_target > 82.0);
+    }
+
+    #[test]
+    fn synthesize_cpu_warns_when_cooler_is_insufficient() {
+        // Hopeless cooler: huge residual resistance.
+        let m = ThermalModel { r_inf: 0.5, ..truth() };
+        let g = rpm_groups();
+        let s = synthesize_cpu(&synth_input(&m, &g, 70.0, 1.0), 8.0);
+        let w = s.warning.expect("warning expected");
+        assert_eq!(w.kind, "coolerInsufficient");
+        assert!(s.effective_target > 70.0);
+        let last = s.points.last().unwrap();
+        assert_eq!((last.w_cpu, last.w_case), (1.0, 1.0));
+    }
+
+    #[test]
+    fn synthesize_cpu_flat_floor_when_floor_holds_everything() {
+        // Monster cooler: floor airflow already pins design power below target.
+        let m = ThermalModel { r_inf: 0.02, k_c: 0.02, k_x: 0.01, t_off: 25.0, ..truth() };
+        let g = rpm_groups();
+        let s = synthesize_cpu(&synth_input(&m, &g, 85.0, 1.0), 8.0);
+        assert!(s.warning.is_none());
+        // All pre-emergency points sit at the floor:
+        for p in s.points.iter().filter(|p| p.temp_c < 85.0 + 2.9) {
+            assert_eq!((p.w_cpu, p.w_case), (0.25, 0.25), "flat at floor, got {:?}", (p.w_cpu, p.w_case));
+        }
+    }
+
+    #[test]
+    fn synthesize_gpu_assist_anchors_and_warns() {
+        let g = GpuModel { t_off_g: 30.0, r_g: 0.09, k_g: 0.03, rmse: 0.0, conservative_shift: 0.0 };
+        let ok = synthesize_gpu(&g, 330.0, 80.0, 0.25, 1.0);
+        assert!(ok.warning.is_none());
+        for w in ok.points.windows(2) {
+            assert!(w[1].0 > w[0].0 && w[1].1 >= w[0].1);
+        }
+        let anchor = ok
+            .points
+            .iter()
+            .find(|p| (p.0 - ok.effective_target_g).abs() < 0.01)
+            .expect("target anchor");
+        assert!(g.predict(330.0, anchor.1) <= ok.effective_target_g + 0.1);
+        // Case fans can't do much for a hot GPU → honest warning:
+        let weak = GpuModel { r_g: 0.2, k_g: 0.005, ..g };
+        let bad = synthesize_gpu(&weak, 330.0, 70.0, 0.25, 1.0);
+        assert_eq!(bad.warning.expect("warn").kind, "caseCantHelpGpu");
+        assert!(bad.effective_target_g > 70.0);
     }
 }
