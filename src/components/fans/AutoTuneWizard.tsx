@@ -8,9 +8,11 @@ import {
   type AutoTuneParams,
   type AutoTuneProgress,
   type AutoTuneResult,
+  type FanCalibProgress,
   type FanChannel,
   type FanGroup,
   type FanTempSource,
+  type Sensors,
   type TuneWarning,
 } from "../../lib/ipc";
 import { useFanAutotune } from "../../store/fanAutotune";
@@ -52,6 +54,10 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
   const [assign, setAssign] = useState<Record<string, Assignment>>({});
   const [draft, setDraft] = useState<AutoTuneParams>(store.params);
   const [progress, setProgress] = useState<AutoTuneProgress | null>(null);
+  // Live sensors polled at 1 Hz while running — the tune only emits progress
+  // at step boundaries (settles can be 35-120 s apart), which read as frozen.
+  const [live, setLive] = useState<Sensors | null>(null);
+  const [calib, setCalib] = useState<FanCalibProgress | null>(null);
   const [tempHistory, setTempHistory] = useState<number[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AutoTuneResult | null>(null);
@@ -80,6 +86,42 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
   const cpuCount = Object.values(assign).filter((a) => a === "cpu").length;
   const startBlocked = cpuCount === 0 || controllable.length === 0;
 
+  // 1 Hz live readouts + per-step calibration detail while the tune runs.
+  // The sidecar samples at 1 Hz, so polling faster buys nothing.
+  useEffect(() => {
+    if (step !== "running") return;
+    let alive = true;
+    const tick = () =>
+      api
+        .getSensors()
+        .then((s) => {
+          if (!alive) return;
+          setLive(s);
+          if (s.cpuTemp != null) {
+            setTempHistory((h) => [...h.slice(-299), s.cpuTemp as number]);
+          }
+        })
+        .catch(() => undefined);
+    void tick();
+    const id = setInterval(tick, 1000);
+    let unlistenCalib: (() => void) | undefined;
+    void listen<FanCalibProgress>("fan-calib-progress", (e) => {
+      if (alive) setCalib(e.payload);
+    }).then((u) => {
+      unlistenCalib = u;
+    });
+    return () => {
+      alive = false;
+      clearInterval(id);
+      unlistenCalib?.();
+    };
+  }, [step]);
+
+  // Calibration detail is only meaningful inside the fanCalib phase.
+  useEffect(() => {
+    if (progress && progress.phase !== "fanCalib") setCalib(null);
+  }, [progress]);
+
   async function start() {
     const groups: Record<string, FanGroup> = {};
     for (const [id, a] of Object.entries(assign)) {
@@ -97,11 +139,10 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
     runningRef.current = true;
     let unlisten: (() => void) | undefined;
     try {
+      // Readouts + temp history come from the 1 Hz poll; this event only
+      // drives the phase/step labels.
       unlisten = await listen<AutoTuneProgress>("fan-autotune-progress", (e) => {
         setProgress(e.payload);
-        if (e.payload.cpuTemp != null) {
-          setTempHistory((h) => [...h.slice(-299), e.payload.cpuTemp as number]);
-        }
       });
       const r = await api.fanAutotuneStart(params);
       store.setResult(r);
@@ -278,6 +319,12 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
               </span>
             )}
             {progress?.note && <span className="text-[10.5px] text-dim">{progress.note}</span>}
+            {progress?.phase === "fanCalib" && calib && (
+              <span className="nums ml-auto text-[10.5px] text-dim">
+                {(labels[calib.controlId] ?? calib.name)} ({calib.fanIndex + 1}/{calib.fanTotal}) ·{" "}
+                {Math.round(calib.duty)}% → {calib.rpm != null ? Math.round(calib.rpm) : "—"} RPM
+              </span>
+            )}
           </div>
           <div className="h-1 overflow-hidden rounded-full bg-surface3">
             <div
@@ -286,10 +333,10 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
             />
           </div>
           <div className="grid grid-cols-2 gap-2 text-[11.5px]">
-            <Readout label="CPU" value={progress?.cpuTemp} unit="°C" warn={(progress?.cpuTemp ?? 0) >= 85} />
-            <Readout label={tf("CPU 功耗", "CPU power")} value={progress?.cpuPower} unit="W" />
-            <Readout label="GPU" value={progress?.gpuTemp} unit="°C" warn={(progress?.gpuTemp ?? 0) >= 88} />
-            <Readout label={tf("GPU 功耗", "GPU power")} value={progress?.gpuPower} unit="W" />
+            <Readout label="CPU" value={live?.cpuTemp ?? progress?.cpuTemp} unit="°C" warn={((live?.cpuTemp ?? progress?.cpuTemp) ?? 0) >= 85} />
+            <Readout label={tf("CPU 功耗", "CPU power")} value={live?.cpuPower ?? progress?.cpuPower} unit="W" />
+            <Readout label="GPU" value={live?.gpuTemp ?? progress?.gpuTemp} unit="°C" warn={((live?.gpuTemp ?? progress?.gpuTemp) ?? 0) >= 88} />
+            <Readout label={tf("GPU 功耗", "GPU power")} value={live?.gpuPower ?? progress?.gpuPower} unit="W" />
             <Readout label={tf("CPU 组风量", "CPU airflow")} value={progress?.wCpu != null ? progress.wCpu * 100 : null} unit="%" />
             <Readout label={tf("机箱组风量", "Case airflow")} value={progress?.wCase != null ? progress.wCase * 100 : null} unit="%" />
           </div>
