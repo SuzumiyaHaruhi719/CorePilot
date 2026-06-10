@@ -62,6 +62,15 @@ export const useFanAutotune = create<FanAutotuneState>()(
       applyTuned: (curves, cpuSourceId, gpuSourceId) => {
         const fp = useFanProfiles.getState();
         for (const c of curves) {
+          // The GPU's own fans are NEVER curve-driven by the tune (spec §3) —
+          // results saved before this guard may still carry them: hand those
+          // headers back to the driver instead of applying.
+          if (c.controlId.startsWith("/gpu")) {
+            if (fp.configs[c.controlId]?.mode === "curve") {
+              fp.setConfig(c.controlId, { mode: "auto" });
+            }
+            continue;
+          }
           fp.setConfig(c.controlId, {
             mode: "curve",
             curve: c.curve.map((p) => ({ ...p })),

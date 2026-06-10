@@ -65,7 +65,13 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
   const [resynthBusy, setResynthBusy] = useState(false);
   const runningRef = useRef(false);
 
-  const controllable = channels.filter((c) => c.controllable);
+  // Spec §3 阶段 0: the GPU's OWN fans never appear in the grouping list —
+  // they belong to the GPU driver. Curve-driving them can undercool the card
+  // (field incident: GPU fans tuned into the case group sat at the quiet
+  // floor during gaming).
+  const controllable = channels.filter(
+    (c) => c.controllable && !/nvidia|geforce|radeon|\bgpu\b/i.test(c.hw) && !c.id.startsWith("/gpu"),
+  );
   const gpuPresent = temps.some((t) => /gpu/i.test(t.name));
 
   // Seed group assignments whenever the wizard opens.

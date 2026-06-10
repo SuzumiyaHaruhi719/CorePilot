@@ -73,10 +73,34 @@ pub fn run() {
         .try_init();
 
     // Record panics into the same log stream (so a crash is captured in the debug
-    // export) while preserving the default panic output.
+    // export) while preserving the default panic output. Panics ALSO append to
+    // a persistent crash.log next to the store: a main-thread panic kills the
+    // app with no WER entry, no dump, no event-log record — without this file a
+    // field crash leaves literally zero trace (learned 2026-06-11).
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         tracing::error!("PANIC: {info}");
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let bt = std::backtrace::Backtrace::force_capture();
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let dir = std::path::Path::new(&appdata).join("com.corepilot.app");
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("crash.log"))
+            {
+                use std::io::Write;
+                let _ = writeln!(
+                    f,
+                    "[epoch {epoch}] CorePilot {} PANIC: {info}\n{bt}\n---",
+                    env!("CARGO_PKG_VERSION")
+                );
+            }
+        }
         default_hook(info);
     }));
 
