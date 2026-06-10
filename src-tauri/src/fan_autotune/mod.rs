@@ -819,3 +819,158 @@ pub(crate) fn build_curves(
     }
     curves
 }
+
+// --- Tauri commands (spec §8) ------------------------------------------------------
+
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
+/// Abort flag for the currently-running tune (None = no tune running).
+static TUNE_ABORT: Lazy<Mutex<Option<Arc<AtomicBool>>>> = Lazy::new(|| Mutex::new(None));
+
+fn now_wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Run the full auto-tune. Takes engine exclusivity for the whole duration;
+/// restores the previous fan config on abort, leaves the synthesized curves
+/// to be applied by the frontend on success (spec §6).
+#[tauri::command]
+pub async fn fan_autotune_start(
+    app: tauri::AppHandle,
+    params: io::AutoTuneParams,
+) -> crate::error::CoreResult<io::AutoTuneResult> {
+    crate::sensors::ensure_sidecar();
+    if !crate::fan::exclusive_begin() {
+        return Err(crate::error::CoreError::from(
+            "已有校准/调优在运行".to_string(),
+        ));
+    }
+    let abort_flag = Arc::new(AtomicBool::new(false));
+    *TUNE_ABORT.lock() = Some(Arc::clone(&abort_flag));
+    let snapshot = crate::fan::config_snapshot();
+
+    let outcome = tauri::async_runtime::spawn_blocking({
+        let app = app.clone();
+        move || {
+            let mut real = io::RealIo::new(app, abort_flag);
+            run_tune(&mut real, &params)
+        }
+    })
+    .await;
+
+    *TUNE_ABORT.lock() = None;
+
+    match outcome {
+        Ok(io::AutoTuneOutcome::Done(mut result)) => {
+            let (cpu_src, gpu_src) = crate::fan::resolve_source_ids();
+            result.cpu_source_id = cpu_src;
+            result.gpu_source_id = gpu_src;
+            result.finished_at_ms = now_wall_ms();
+            // Success: exclusivity ends; the engine re-applies the OLD config for
+            // at most one tick until the frontend pushes the new curves (spec §6).
+            crate::fan::exclusive_end();
+            Ok(*result)
+        }
+        Ok(io::AutoTuneOutcome::Aborted(info)) => {
+            crate::fan::config_restore(snapshot);
+            crate::fan::exclusive_end();
+            use tauri::Emitter;
+            let _ = app.emit("fan-autotune-aborted", info.clone());
+            Err(crate::error::CoreError::from(format!(
+                "[{}] {} / {}",
+                info.phase, info.reason_zh, info.reason_en
+            )))
+        }
+        Err(e) => {
+            crate::fan::config_restore(snapshot);
+            crate::fan::exclusive_end();
+            Err(crate::error::CoreError::from(format!("调优线程失败: {e}")))
+        }
+    }
+}
+
+/// Ask the running tune to stop (it aborts at the next 1 Hz safety tick).
+#[tauri::command]
+pub fn fan_autotune_abort() -> bool {
+    match TUNE_ABORT.lock().as_ref() {
+        Some(flag) => {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Re-solve curves from a stored model with new user parameters — seconds, no
+/// re-measurement (spec §5 / 成功标准). Pure: nothing is applied here.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResynthRequest {
+    pub params: io::AutoTuneParams,
+    pub model: ThermalModel,
+    pub model_gpu: Option<GpuModel>,
+    pub calibrations: Vec<crate::fan::FanCalibration>,
+    pub p_design: f32,
+    pub p_design_gpu: Option<f32>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResynthResponse {
+    pub curves: Vec<TunedFanCurve>,
+    pub w_points: Vec<WPoint>,
+    pub gpu_w_points: Option<Vec<(f32, f32)>>,
+    pub effective_target: f32,
+    pub effective_target_gpu: Option<f32>,
+    pub warnings: Vec<TuneWarning>,
+}
+
+#[tauri::command]
+pub fn fan_autotune_resynth(req: ResynthRequest) -> crate::error::CoreResult<ResynthResponse> {
+    let params = req.params.sanitized().map_err(crate::error::CoreError::from)?;
+    let fans: Vec<(String, Group)> = params.groups.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let has_case = fans.iter().any(|(_, g)| *g == Group::Case);
+    let g_rpm = group_rpm(&fans, &req.calibrations);
+    let cpu = synth_cpu(
+        &req.model,
+        BAND_C,
+        req.p_design,
+        &params,
+        params.quiet_floor_pct / 100.0,
+        params.noise_ceil_pct / 100.0,
+        &g_rpm,
+        has_case,
+    );
+    let gpu = match (&req.model_gpu, req.p_design_gpu) {
+        (Some(mg), Some(pg)) if has_case => Some(synthesize_gpu(
+            mg,
+            pg,
+            params.target_gpu_temp_c,
+            params.quiet_floor_pct / 100.0,
+            params.noise_ceil_pct / 100.0,
+        )),
+        _ => None,
+    };
+    let curves = build_curves(&fans, &req.calibrations, &cpu, gpu.as_ref(), 30.0);
+    let mut warnings = Vec::new();
+    if let Some(w) = cpu.warning.clone() {
+        warnings.push(w);
+    }
+    if let Some(w) = gpu.as_ref().and_then(|g| g.warning.clone()) {
+        warnings.push(w);
+    }
+    Ok(ResynthResponse {
+        curves,
+        w_points: cpu.points.clone(),
+        gpu_w_points: gpu.as_ref().map(|g| g.points.clone()),
+        effective_target: cpu.effective_target,
+        effective_target_gpu: gpu.as_ref().map(|g| g.effective_target_g),
+        warnings,
+    })
+}
