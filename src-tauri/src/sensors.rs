@@ -311,6 +311,13 @@ pub fn cpu_sensors() -> Vec<CpuSensor> {
     CPU_SENSORS.lock().clone()
 }
 
+/// Latest sidecar power/temperature readings as (cpu_temp, cpu_power, gpu_temp,
+/// gpu_power). All `None` until the sidecar produces them.
+pub fn latest_readings() -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
+    let s = SIDECAR.lock();
+    (s.cpu_temp, s.cpu_power, s.gpu_temp, s.gpu_power)
+}
+
 /// Persistent sampler state.
 struct Sampler {
     /// PDH query; `None` if PDH failed to initialize (then all PDH fields stay None).

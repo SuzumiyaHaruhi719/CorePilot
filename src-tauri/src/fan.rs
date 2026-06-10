@@ -67,6 +67,59 @@ static ENGINE_STARTED: AtomicBool = AtomicBool::new(false);
 /// not fight the sweep's manual duty writes.
 static CALIBRATING: AtomicBool = AtomicBool::new(false);
 
+/// Try to take exclusive manual control of the fans (pauses the engine).
+/// Returns false if a calibration/tune already holds it.
+pub(crate) fn exclusive_begin() -> bool {
+    !CALIBRATING.swap(true, Ordering::SeqCst)
+}
+
+/// Release exclusivity and force the engine to re-apply the user's config
+/// (mirrors the tail of `fan_calibrate`).
+pub(crate) fn exclusive_end() {
+    CALIBRATING.store(false, Ordering::SeqCst);
+    LAST.lock().clear();
+    CURVE_DUTY.lock().clear();
+    apply_once();
+}
+
+/// Snapshot / restore the engine's per-fan configuration (tune abort path).
+pub(crate) fn config_snapshot() -> Vec<FanChannelConfig> {
+    FAN_CONFIG.lock().clone()
+}
+pub(crate) fn config_restore(cfgs: Vec<FanChannelConfig>) {
+    *FAN_CONFIG.lock() = cfgs;
+}
+
+/// Latest temperature readings by sensor id (curve sources).
+pub(crate) fn temps_by_id() -> HashMap<String, f32> {
+    SNAP.lock()
+        .temps
+        .iter()
+        .filter_map(|(id, _, v)| v.map(|x| (id.clone(), x)))
+        .collect()
+}
+
+/// Resolve the preferred CPU (Tctl/Tdie-ish) and GPU temperature sensor ids
+/// from the live snapshot, for binding synthesized curves.
+pub(crate) fn resolve_source_ids() -> (Option<String>, Option<String>) {
+    let raw = SNAP.lock();
+    let find = |pats: &[&str]| -> Option<String> {
+        for pat in pats {
+            if let Some((id, _, _)) = raw
+                .temps
+                .iter()
+                .find(|(_, name, v)| v.is_some() && name.to_lowercase().contains(pat))
+            {
+                return Some(id.clone());
+            }
+        }
+        None
+    };
+    let cpu = find(&["tctl", "tdie", "cpu package", "package", "cpu"]);
+    let gpu = find(&["gpu core", "gpu"]);
+    (cpu, gpu)
+}
+
 // --- shapes sent to / received from the frontend -------------------------------
 
 /// One controllable fan header: its control plus the best-matched RPM reading.
@@ -274,7 +327,7 @@ fn send(cmd: &str) {
     }
 }
 
-fn send_set(id: &str, pct: f32) {
+pub(crate) fn send_set(id: &str, pct: f32) {
     // Never forward an id that could inject extra tokens/commands into the
     // sidecar's line-oriented stdin protocol.
     if !is_valid_control_id(id) {
@@ -390,13 +443,7 @@ fn apply_once() {
     }
 
     // Snapshot temps by id for curve sources.
-    let temps: HashMap<String, f32> = {
-        let raw = SNAP.lock();
-        raw.temps
-            .iter()
-            .filter_map(|(id, _, v)| v.map(|x| (id.clone(), x)))
-            .collect()
-    };
+    let temps: HashMap<String, f32> = temps_by_id();
 
     let mut last = LAST.lock();
     let mut curve_duty = CURVE_DUTY.lock();
@@ -644,7 +691,7 @@ fn clamp_finite(v: f32, lo: f32, hi: f32) -> f32 {
 /// The set of control ids that are currently software-controllable, taken from
 /// the latest sidecar snapshot. A config whose `control_id` is not in this set
 /// is dropped — IPC may not name an unknown or non-controllable header.
-fn controllable_ids() -> std::collections::HashSet<String> {
+pub(crate) fn controllable_ids() -> std::collections::HashSet<String> {
     SNAP.lock()
         .controls
         .iter()
@@ -740,7 +787,7 @@ struct CalibProgress {
 
 /// RPM currently paired to `control_id` in the latest snapshot (same chip prefix
 /// + channel index as [`build_state`]). `None` if unread / unpaired.
-fn paired_rpm(control_id: &str) -> Option<f32> {
+pub(crate) fn paired_rpm(control_id: &str) -> Option<f32> {
     let raw = SNAP.lock();
     let (cprefix, cidx) = split_id(control_id, "/control/")?;
     raw.fans.iter().find_map(|(fid, _, frpm)| match split_id(fid, "/fan/") {
@@ -825,6 +872,18 @@ fn calibrate_one(
     }
 }
 
+/// Sweep the given headers in sequence (caller must already hold calibration
+/// exclusivity — i.e. `CALIBRATING` is true). Shared by the `fan_calibrate`
+/// command and the auto-tune state machine.
+pub(crate) fn calibrate_headers(app: &tauri::AppHandle, targets: &[String]) -> Vec<FanCalibration> {
+    let total = targets.len();
+    let mut out = Vec::with_capacity(total);
+    for (i, id) in targets.iter().enumerate() {
+        out.push(calibrate_one(app, id, i, total));
+    }
+    out
+}
+
 /// Run an AI calibration sweep over the given controllable headers (or all of
 /// them when the list is empty). Pauses the engine for the duration, steps each
 /// fan's PWM across [`CALIB_STEPS`], and returns the per-fan calibration. Emits a
@@ -858,15 +917,7 @@ pub async fn fan_calibrate(
         ));
     }
 
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let total = targets.len();
-        let mut out = Vec::with_capacity(total);
-        for (i, id) in targets.iter().enumerate() {
-            out.push(calibrate_one(&app, id, i, total));
-        }
-        out
-    })
-    .await;
+    let result = tauri::async_runtime::spawn_blocking(move || calibrate_headers(&app, &targets)).await;
 
     CALIBRATING.store(false, Ordering::SeqCst);
     // Force the engine to re-apply the user's real config now (LAST is stale after
