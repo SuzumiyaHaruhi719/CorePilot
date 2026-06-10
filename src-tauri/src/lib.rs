@@ -199,6 +199,8 @@ pub fn run() {
             fan_autotune::fan_autotune_start,
             fan_autotune::fan_autotune_abort,
             fan_autotune::fan_autotune_resynth,
+            fan_autotune::passive::fan_passive_configure,
+            fan_autotune::passive::fan_passive_status,
             tweaks::tweak_apply,
             tweaks::tweak_revert,
             tweaks::create_restore_point,

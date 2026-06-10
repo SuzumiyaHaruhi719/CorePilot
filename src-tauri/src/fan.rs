@@ -82,6 +82,11 @@ pub(crate) fn exclusive_end() {
     apply_once();
 }
 
+/// Last duty the engine applied to a control (manual or curve), if any.
+pub(crate) fn last_applied_duty(control_id: &str) -> Option<f32> {
+    LAST.lock().get(control_id).map(|(_, d)| *d as f32)
+}
+
 /// Snapshot / restore the engine's per-fan configuration (tune abort path).
 pub(crate) fn config_snapshot() -> Vec<FanChannelConfig> {
     FAN_CONFIG.lock().clone()
@@ -544,6 +549,7 @@ pub fn start_engine() {
         .name("fan-engine".into())
         .spawn(|| loop {
             apply_once();
+            crate::fan_autotune::passive::tick();
             std::thread::sleep(Duration::from_millis(2000));
         })
         .ok();

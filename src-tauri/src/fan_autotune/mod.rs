@@ -7,6 +7,7 @@
 
 pub mod io;
 pub mod model;
+pub mod passive;
 #[cfg(test)]
 mod sim_tests;
 
@@ -763,9 +764,10 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
 }
 
 /// `synthesize_cpu` with the call-site plumbing flattened (free function so the
-/// validation loop can re-synthesize while `Tune` is mutably borrowed).
+/// validation loop can re-synthesize while `Tune` is mutably borrowed, and so
+/// passive learning can re-solve from a corrected model — spec §7).
 #[allow(clippy::too_many_arguments)]
-fn synth_cpu(
+pub(crate) fn synth_cpu(
     model: &ThermalModel,
     band: f32,
     p_design: f32,
