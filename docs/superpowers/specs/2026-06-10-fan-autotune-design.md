@@ -183,6 +183,11 @@ T_gpu(P_gpu, w_case) = T_off_g + P_gpu · [ R_g + k_g·φ(w_case) ],  α 固定 
      - 否则警告 **ceiling-insufficient**:「上限 X% 内满载最低只能压到 Y °C」+ 一键选项
        (a) 放宽上限重算 (b) 接受 `effectiveTarget = Y + 0.5` 重算。
    - 否则 `effectiveTarget = target`。
+   - **锚点钳制**:`effectiveTarget` 最终钳到 ≤ 90 °C(GPU 侧 ≤ 95 °C)。弱散热/低上限机器的模型
+     可能外推出 120 °C+ 的"可达温度",若直接拿去锚定曲线,引擎的 `MAX_CURVE_TEMP_C=120` 消毒
+     会把整条曲线压扁成 120 °C 处一个悬崖 —— 真实温区内风扇反而停在底线。钳到 90(略高于
+     Zen5 TjMax)保证被压在温度墙上的 CPU 仍落在比例带顶部、拿到(近)上限风量;**警告里
+     报告的可达温度不钳制**,诚实性不受影响。
 3. **满载锚点**:`w_req = argmin N(w)` s.t. `T_model(P_design, w) = effectiveTarget`,
    `w ∈ [floor, ceil]²`。解法:w_cpu 以 0.01 步长扫 [floor, ceil],由等式解出 w_case
    (φ 可解析求逆),越界跳过,取 N 最小。case 组为空时直接一维解。

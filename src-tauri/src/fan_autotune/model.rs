@@ -299,6 +299,19 @@ pub fn noise(w_cpu: f32, w_case: f32, g: &GroupRpm) -> f32 {
     a * a + b * b
 }
 
+/// Hard ceiling for the CURVE-ANCHORING effective target (°C). On a machine
+/// whose model extrapolates an absurd achievable temp (weak cooler / tight
+/// ceiling → 120 °C+), anchoring the curve there would let `fan.rs`'s
+/// MAX_CURVE_TEMP_C=120 sanitizer collapse every point onto one 120 °C cliff —
+/// fans would idle at the floor across the entire REAL temperature range.
+/// 90 °C sits just above Zen5's TjMax (89), so an under-cooled CPU pinned at
+/// its throttle point still lands near the top of the proportional band and
+/// gets (near-)ceiling airflow. Warnings keep reporting the TRUE achievable
+/// temperature — only the curve anchor is capped.
+pub const MAX_EFFECTIVE_TARGET_C: f32 = 90.0;
+/// Same idea for the GPU assist anchor (GPU cores throttle well below 95).
+pub const MAX_EFFECTIVE_GPU_TARGET_C: f32 = 95.0;
+
 /// A user-facing feasibility warning (bilingual; `kind` is machine-readable:
 /// "ceilingInsufficient" | "coolerInsufficient" | "caseCantHelpGpu" |
 /// "gpuAxisSkipped" | "validationUnconverged" | "combinedOverTarget" |
@@ -451,6 +464,10 @@ pub fn synthesize_cpu(inp: &SynthInput, band_c: f32) -> CpuSynth {
         });
         achievable + 0.5
     };
+    // Cap the ANCHOR (not the reported achievable temp): see
+    // MAX_EFFECTIVE_TARGET_C — an uncapped 120 °C+ anchor would be flattened by
+    // the engine's curve sanitizer into a useless cliff.
+    let effective_target = effective_target.min(MAX_EFFECTIVE_TARGET_C);
 
     // 2. Full-load anchor (quietest combo pinning effective_target at P_design).
     let w_req = solve_iso(m, inp.p_design, effective_target, floor, ceil, inp.g, inp.has_case)
@@ -472,9 +489,15 @@ pub fn synthesize_cpu(inp: &SynthInput, band_c: f32) -> CpuSynth {
             let f = j as f32 / 5.0;
             let p_j = p_knee + (inp.p_design - p_knee) * f;
             let mut t_j = t_low + band_c * f.powf(1.5);
-            // Clamp into the feasibility envelope, then keep strictly increasing.
+            // Clamp into the feasibility envelope — but only when the envelope
+            // itself sits below the (possibly capped) target; on infeasible
+            // machines the envelope is above the cap and would drag the
+            // schedule back out of the representable range.
             let t_env = m.predict(p_j, ceil, wx_of(ceil)) + 0.3;
-            t_j = t_j.max(t_env).max(prev_t + 0.2);
+            if t_env < effective_target {
+                t_j = t_j.max(t_env);
+            }
+            t_j = t_j.max(prev_t + 0.2);
             prev_t = t_j;
             let (wc, wx) =
                 solve_iso(m, p_j, t_j, floor, ceil, inp.g, inp.has_case).unwrap_or(w_req);
@@ -542,6 +565,8 @@ pub fn synthesize_gpu(m: &GpuModel, p_design_g: f32, target_g: f32, floor: f32, 
         });
         t_at_ceil + 0.5
     };
+    // Cap the anchor like the CPU side (see MAX_EFFECTIVE_TARGET_C rationale).
+    let effective = effective.min(MAX_EFFECTIVE_GPU_TARGET_C);
     // Analytic w_req: k_g·φ(w) = (t − t_off_g)/P − r_g.
     let s = (effective - m.t_off_g) / p_design_g - m.r_g;
     let w_req = if m.k_g <= 1e-6 || s <= 0.0 {
@@ -939,6 +964,31 @@ mod tests {
         assert!(s.effective_target > 70.0);
         let last = s.points.last().unwrap();
         assert_eq!((last.w_cpu, last.w_case), (1.0, 1.0));
+    }
+
+    #[test]
+    fn synthesize_cpu_infeasible_anchor_stays_in_real_temp_range() {
+        // Pathological extrapolation: achievable ≈ 160 °C. The curve anchor
+        // must be capped so the engine's 120 °C curve sanitizer can never
+        // flatten the curve into a useless cliff, and (near-)ceiling airflow
+        // must arrive by ~90 °C where real silicon actually operates.
+        let m = ThermalModel { r_inf: 0.5, ..truth() };
+        let g = rpm_groups();
+        let s = synthesize_cpu(&synth_input(&m, &g, 70.0, 1.0), 8.0);
+        assert!(s.effective_target <= MAX_EFFECTIVE_TARGET_C + 1e-3);
+        let max_t = s.points.iter().map(|p| p.temp_c).fold(f32::MIN, f32::max);
+        assert!(max_t <= 96.1, "max curve temp {max_t} must stay well below the 120 °C clamp");
+        // Honesty: the warning still reports the TRUE achievable temperature.
+        let w = s.warning.expect("cooler warning");
+        assert!(w.achievable_c.unwrap() > 120.0, "true achievable must not be masked by the cap");
+        // Airflow must be at/near ceiling by 90 °C (the real operating region).
+        let at_90 = s
+            .points
+            .iter()
+            .filter(|p| p.temp_c <= 90.0 + 1e-3)
+            .map(|p| p.w_cpu)
+            .fold(0.0_f32, f32::max);
+        assert!(at_90 >= 0.99, "w_cpu by 90 °C = {at_90}, expected ≈ ceiling");
     }
 
     #[test]
