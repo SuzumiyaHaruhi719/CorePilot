@@ -3,6 +3,7 @@ pub mod commands;
 pub mod debug_log;
 pub mod error;
 pub mod fan;
+pub mod fan_autotune;
 pub mod fps;
 pub mod game_library;
 pub mod gpu;
