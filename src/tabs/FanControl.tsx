@@ -2,6 +2,7 @@ import { AlertTriangle, Check, Eye, EyeOff, Fan, Gauge, Info, Layers, Loader2, M
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { AutoTuneWizard } from "../components/fans/AutoTuneWizard";
 import { FanCurveEditor } from "../components/fans/FanCurveEditor";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
@@ -9,11 +10,13 @@ import { Segmented } from "../components/ui/Segmented";
 import { Slider } from "../components/ui/Slider";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
+import { curvesDiverge } from "../lib/autotuneUtils";
 import { cn } from "../lib/cn";
 import { hueColor, isLightTheme } from "../lib/colors";
 import { useT, useTf } from "../lib/i18n";
 import { hoverPop } from "../lib/motion";
-import { api, type FanCalibProgress, type FanCalibration, type FanChannel, type FanCurvePoint, type FanInfo, type FanMode, type FanTempSource } from "../lib/ipc";
+import { api, type FanCalibProgress, type FanCalibration, type FanChannel, type FanCurvePoint, type FanInfo, type FanMode, type FanTempSource, type PassiveAdjustment } from "../lib/ipc";
+import { useFanAutotune } from "../store/fanAutotune";
 import { useSettings } from "../store/settings";
 import { defaultConfig, FAN_PRESETS, MIN_SAFE_DUTY, useFanProfiles, type FanConfig } from "../store/fanProfiles";
 
@@ -80,6 +83,9 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
   // backend on every pointer-move; commit once on release.
   const [draftCurve, setDraftCurve] = useState<FanCurvePoint[] | null>(null);
   const effectiveCurve = draftCurve ?? config.curve;
+  // Case fans tuned with a GPU-assist curve carry a second curve (curve2) driven
+  // by the GPU temp source; toggle which one the editor below edits.
+  const [activeCurve, setActiveCurve] = useState<"primary" | "gpu">("primary");
 
   function startEdit() {
     setDraft(label ?? "");
@@ -94,6 +100,8 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
   const liveTemp = source?.c ?? null;
   const liveDuty =
     liveTemp != null ? Math.max(config.minDuty, interpCurve(effectiveCurve, liveTemp)) : null;
+  const gpuSource = temps.find((t) => t.id === config.tempSourceId2) ?? null;
+  const gpuLiveTemp = gpuSource?.c ?? null;
 
   function setMode(mode: FanMode) {
     if (mode === "curve" && !config.tempSourceId) {
@@ -232,16 +240,42 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
                 )}
               </div>
 
-              <FanCurveEditor
-                points={effectiveCurve}
-                onChange={setDraftCurve}
-                onCommit={(curve) => {
-                  setDraftCurve(null);
-                  onChange({ curve });
-                }}
-                minDuty={config.minDuty}
-                live={liveTemp != null && liveDuty != null ? { tempC: liveTemp, duty: liveDuty } : null}
-              />
+              {config.curve2 && config.curve2.length > 0 && (
+                <Segmented
+                  id={`fan-curvesel-${channel.id}`}
+                  value={activeCurve}
+                  options={[
+                    { value: "primary", label: tf("CPU 源", "CPU source") },
+                    { value: "gpu", label: tf("GPU 辅助", "GPU assist") },
+                  ]}
+                  onChange={(v) => setActiveCurve(v as "primary" | "gpu")}
+                />
+              )}
+
+              {activeCurve === "primary" || !config.curve2?.length ? (
+                <FanCurveEditor
+                  points={effectiveCurve}
+                  onChange={setDraftCurve}
+                  onCommit={(curve) => {
+                    setDraftCurve(null);
+                    onChange({ curve });
+                  }}
+                  minDuty={config.minDuty}
+                  live={liveTemp != null && liveDuty != null ? { tempC: liveTemp, duty: liveDuty } : null}
+                />
+              ) : (
+                <FanCurveEditor
+                  points={config.curve2 ?? []}
+                  onChange={() => undefined}
+                  onCommit={(curve2) => onChange({ curve2 })}
+                  minDuty={config.minDuty}
+                  live={
+                    gpuLiveTemp != null
+                      ? { tempC: gpuLiveTemp, duty: Math.max(config.minDuty, interpCurve(config.curve2 ?? [], gpuLiveTemp)) }
+                      : null
+                  }
+                />
+              )}
 
               <Slider
                 label="最低转速下限（风扇不会低于此值）"
@@ -296,6 +330,8 @@ export function FanControl() {
   const pollMs = useSettings((s) => s.pollMs);
   const { configs, labels, spunFans, markSpun, applyOnStartup, setConfig, setApplyOnStartup, setLabel, profiles, activeProfileId, pendingProfileId, saveProfile, updateActiveProfile, applyProfile, applyPreset, applyCalibration, resetToDefault, deleteProfile, lastError, clearError } =
     useFanProfiles();
+  const autotune = useFanAutotune();
+  const [showTuneWizard, setShowTuneWizard] = useState(false);
   const [delProfile, setDelProfile] = useState<{ id: string; name: string } | null>(null);
   const [info, setInfo] = useState<FanInfo | null>(null);
   // Control ids that have shown a valid (>0) RPM at least once — PERSISTED in the
@@ -351,6 +387,42 @@ export function FanControl() {
       clearInterval(id);
     };
   }, [pollMs]);
+
+  // Passive-learning adjustments arrive from the backend: apply + log.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<PassiveAdjustment>("fan-autotune-passive", (e) => {
+      const s = useFanAutotune.getState();
+      if (!s.passiveEnabled || s.passivePaused || !s.result) return;
+      s.applyTuned(e.payload.curves, s.result.cpuSourceId ?? null, s.result.gpuSourceId ?? null);
+      s.setResult({ ...s.result, curves: e.payload.curves });
+      s.addPassiveLog({ atMs: Date.now(), axis: e.payload.axis, deltaC: e.payload.deltaC, medianResidualC: e.payload.medianResidualC });
+    }).then((u) => {
+      unlisten = u;
+    });
+    return () => unlisten?.();
+  }, []);
+
+  // Hand-edit detection: configs diverging from the tuned curves pause passive
+  // learning (spec §7 — never overwrite the user's manual work).
+  useEffect(() => {
+    const s = useFanAutotune.getState();
+    if (!s.result || s.passivePaused || !s.passiveEnabled) return;
+    if (curvesDiverge(configs, s.result.curves)) {
+      s.setPassivePaused(true);
+    }
+  }, [configs]);
+
+  // Re-arm passive learning on startup (the backend forgets across restarts).
+  useEffect(() => {
+    const p = useFanAutotune.persist;
+    const run = () => useFanAutotune.getState().configurePassive();
+    if (p.hasHydrated()) {
+      run();
+      return;
+    }
+    return p.onFinishHydration(run);
+  }, []);
 
   const channels = info?.channels ?? [];
   // Presets apply only to software-controllable headers; curve presets need a
@@ -448,6 +520,14 @@ export function FanControl() {
                 {profiles.length > 0 && <span className="nums text-[10px] text-dim">· {profiles.length}</span>}
               </div>
               <div className="flex items-center gap-2">
+                <Button
+                  variant="primary"
+                  onClick={() => setShowTuneWizard(true)}
+                  disabled={calibrating || controllableIds.length === 0}
+                  title={tf("实测本机散热系统,自动调出最优温度曲线(约 25–32 分钟)", "Measure this machine's cooling and auto-tune optimal curves (≈25–32 min)")}
+                >
+                  <Sparkles size={13} /> {tf("智能调优", "Smart Tune")}
+                </Button>
                 <Button
                   onClick={() => setShowCalibConfirm(true)}
                   disabled={calibrating || controllableIds.length === 0}
@@ -594,6 +674,32 @@ export function FanControl() {
               </div>
             )}
           </div>
+
+          {autotune.result && (
+            <div className="glass hairline flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl px-3.5 py-2 text-[11px] text-muted">
+              <span>
+                {tf("上次智能调优", "Last smart tune")}:{" "}
+                <span className="nums text-ink">{new Date(autotune.result.finishedAtMs).toLocaleString()}</span>
+              </span>
+              <span>
+                {tf("目标", "Target")} <span className="nums text-ink">{Math.round(autotune.result.effectiveTarget)}°C</span>
+                {" · "}
+                {tf("满载实测", "validated")} <span className="nums text-ink">{Math.round(autotune.result.validation.tV * 10) / 10}°C</span>
+              </span>
+              <label className="ml-auto flex cursor-pointer items-center gap-2">
+                {tf("被动学习", "Passive learning")}
+                {autotune.passivePaused && <span className="text-[10px] text-warn">{tf("(已暂停:检测到手动修改)", "(paused: hand-edit detected)")}</span>}
+                <Toggle checked={autotune.passiveEnabled && !autotune.passivePaused} onChange={(v) => {
+                  if (autotune.passivePaused && v) {
+                    // Re-enabling after a hand-edit re-applies the tuned curves.
+                    autotune.applyTuned(autotune.result!.curves, autotune.result!.cpuSourceId ?? null, autotune.result!.gpuSourceId ?? null);
+                  }
+                  autotune.setPassiveEnabled(v);
+                  autotune.setPassivePaused(false);
+                }} />
+              </label>
+            </div>
+          )}
 
           {/* Surface a failed backend apply so a profile never looks "active"
               while nothing was actually applied. Click to dismiss. */}
@@ -838,6 +944,14 @@ export function FanControl() {
           </>
         )}
       </Modal>
+
+      <AutoTuneWizard
+        open={showTuneWizard}
+        onClose={() => setShowTuneWizard(false)}
+        channels={channels}
+        labels={labels}
+        temps={info?.temps ?? []}
+      />
     </>
   );
 }
