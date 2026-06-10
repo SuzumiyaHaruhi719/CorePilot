@@ -8,6 +8,7 @@ pub mod fps;
 pub mod game_library;
 pub mod gpu;
 pub mod inject;
+pub mod load_gen;
 pub mod netfix;
 pub mod nvapi_oc;
 pub mod optimize;
