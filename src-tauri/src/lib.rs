@@ -7,6 +7,7 @@ pub mod fan_autotune;
 pub mod fps;
 pub mod game_library;
 pub mod gpu;
+pub mod gpu_load;
 pub mod inject;
 pub mod load_gen;
 pub mod netfix;
