@@ -16,6 +16,7 @@ import {
   type TuneWarning,
 } from "../../lib/ipc";
 import { useFanAutotune } from "../../store/fanAutotune";
+import { useFanProfiles } from "../../store/fanProfiles";
 import { useSettings } from "../../store/settings";
 import { Button } from "../ui/Button";
 import { Modal } from "../ui/Modal";
@@ -148,6 +149,11 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
       store.setResult(r);
       store.applyTuned(r.curves, r.cpuSourceId ?? null, r.gpuSourceId ?? null);
       store.configurePassive();
+      // Spec §6: snapshot the tuned configs as a named profile so the user can
+      // one-click switch between the tuned curves and the built-in presets.
+      const d = new Date(r.finishedAtMs);
+      const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      useFanProfiles.getState().saveProfile(tf(`智能调优 ${stamp}`, `Smart Tune ${stamp}`));
       setResult(r);
       setStep("result");
     } catch (e) {
