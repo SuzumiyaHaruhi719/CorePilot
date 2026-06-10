@@ -347,8 +347,9 @@ fn send_auto(id: &str) {
 
 /// Linear interpolation of a temperature→duty curve. Points are sorted by
 /// temperature; below the first point clamps to its duty, above the last clamps
-/// to its duty. Returns 0 for an empty curve.
-fn interp(curve: &[CurvePoint], temp: f32) -> f32 {
+/// to its duty. Returns 0 for an empty curve. Crate-visible: the auto-tune
+/// validation drive reuses the exact engine interpolation.
+pub(crate) fn interp(curve: &[CurvePoint], temp: f32) -> f32 {
     if curve.is_empty() {
         return 0.0;
     }
