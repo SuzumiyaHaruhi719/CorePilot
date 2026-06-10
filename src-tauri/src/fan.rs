@@ -750,7 +750,7 @@ pub fn fan_set_config(configs: Vec<FanChannelConfig>) -> crate::error::CoreResul
 
 /// One measured (duty %, RPM) sample from a calibration sweep.
 /// Round-trips over IPC (auto-tune results store + re-ingest calibrations).
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct CalibPoint {
     pub duty: f32,
@@ -758,7 +758,7 @@ pub struct CalibPoint {
 }
 
 /// The result of calibrating one fan header.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct FanCalibration {
     pub control_id: String,
