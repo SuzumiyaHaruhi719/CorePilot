@@ -439,21 +439,68 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
     if !t.io.start_cpu_load() {
         return Err(abort("gridSweep", "无法启动 CPU 负载", "failed to start the CPU load"));
     }
+    // Verify the load took. The power check accepts a RATIO rise (quiet idle)
+    // or an ABSOLUTE rise (busy idle): with a background hog the baseline can
+    // sit so high that PPT-capped full load can never reach 1.5×p_idle — the
+    // exact field failure the busy-override exposed — while a +20 W delta is
+    // still far above package-power noise on any desktop part.
     let mut ok = false;
+    let (mut saw_load, mut peak_load, mut last_p) = (false, 0.0_f32, 0.0_f32);
     let mut misses = 0u32;
     for _ in 0..15 {
         t.io.sleep_s(1.0);
         t.safety_tick(Some(RUNAWAY_ABORT_C), &mut misses)?;
-        let load_ok = t.io.cpu_load_pct().map(|l| l >= 95.0).unwrap_or(false);
-        let power_ok = t.io.cpu_power().map(|p| p >= 1.5 * baseline.p_idle).unwrap_or(false);
-        if load_ok && power_ok {
+        if let Some(l) = t.io.cpu_load_pct() {
+            peak_load = peak_load.max(l);
+            if l >= 95.0 {
+                saw_load = true;
+            }
+        }
+        let power_ok = t
+            .io
+            .cpu_power()
+            .map(|p| {
+                last_p = p;
+                p >= 1.5 * baseline.p_idle || p >= baseline.p_idle + 20.0
+            })
+            .unwrap_or(false);
+        if saw_load && power_ok {
             ok = true;
             break;
         }
     }
     if !ok {
-        t.io.stop_cpu_load();
-        return Err(abort("gridSweep", "负载未生效(占用或功耗未达标)", "the synthetic load did not take effect"));
+        if t.params.allow_background_load && saw_load {
+            // Busy-override + saturated load but no power rise: the system was
+            // already at/near its power cap before our load. The grid measures
+            // real (P, w, T) either way — proceed, but say so.
+            t.warnings.push(TuneWarning {
+                kind: "busyPowerPlateau".into(),
+                message_zh: format!(
+                    "后台负载已接近功耗上限(基线 {:.0} W,满载 {last_p:.0} W),合成负载叠加有限;网格按系统实际满载测量",
+                    baseline.p_idle
+                ),
+                message_en: format!(
+                    "Background load already near the power cap (baseline {:.0} W, loaded {last_p:.0} W); the grid measures the system's real full load",
+                    baseline.p_idle
+                ),
+                achievable_c: None,
+            });
+        } else {
+            t.io.stop_cpu_load();
+            return Err(Abort {
+                phase: "gridSweep",
+                reason_zh: format!(
+                    "负载未生效:占用峰值 {peak_load:.0}%(需 ≥95),功耗 {last_p:.0} W(基线 {:.0} W)",
+                    baseline.p_idle
+                ),
+                reason_en: format!(
+                    "the synthetic load did not take effect: peak load {peak_load:.0}% (need ≥95), power {last_p:.0} W (baseline {:.0} W)",
+                    baseline.p_idle
+                ),
+                emergency: false,
+            });
+        }
     }
 
     let case_axis: &[f32] = if t.has_case { &GRID_WCASE } else { &[0.0] };
@@ -511,14 +558,24 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
                 achievable_c: None,
             });
         } else {
-            // Verify the load took (gpuPower ≥ 1.5 × idle, fallback ≥ 60 W).
-            let p_gate = baseline.p_gpu_idle.map(|p| 1.5 * p).unwrap_or(60.0);
+            // Verify the load took: ratio rise OR absolute +40 W rise (same
+            // inflated-idle robustness as the CPU gate — e.g. a video playing
+            // in the background lifts GPU idle power), fallback ≥ 60 W when
+            // there is no idle anchor at all.
             let mut ok = false;
             let mut misses = 0u32;
             for _ in 0..20 {
                 t.io.sleep_s(1.0);
                 t.safety_tick(Some(RUNAWAY_ABORT_C), &mut misses)?;
-                if t.io.gpu_power().map(|p| p >= p_gate).unwrap_or(false) {
+                let gate_ok = t
+                    .io
+                    .gpu_power()
+                    .map(|p| match baseline.p_gpu_idle {
+                        Some(idle) => p >= 1.5 * idle || p >= idle + 40.0,
+                        None => p >= 60.0,
+                    })
+                    .unwrap_or(false);
+                if gate_ok {
                     ok = true;
                     break;
                 }

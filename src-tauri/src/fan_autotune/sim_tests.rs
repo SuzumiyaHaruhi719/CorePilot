@@ -125,7 +125,12 @@ impl FakeIo {
         let w_case = self.group_w(Group::Case);
         // TjMax governor: PROCHOT on real silicon is effectively instantaneous
         // and strong — power snaps down so the die settles just above 89.
-        let p_target = if self.cpu_on { self.plant.p_load } else { self.plant.p_idle };
+        // A real background hog BURNS POWER, not just utilization: idle package
+        // power sits far above quiet idle, while full load stays PPT-capped.
+        // This is exactly the regime that broke the 1.5×p_idle verify gate in
+        // the field (inflated idle ⇒ ratio unreachable under the power cap).
+        let idle_p = if self.busy_background { 150.0 } else { self.plant.p_idle };
+        let p_target = if self.cpu_on { self.plant.p_load } else { idle_p };
         self.p_cpu_now = if self.plant.throttle && self.t_cpu > 89.0 {
             (p_target * (1.0 - 0.25 * (self.t_cpu - 89.0))).max(0.3 * p_target)
         } else {
