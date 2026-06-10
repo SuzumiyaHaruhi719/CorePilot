@@ -104,7 +104,7 @@ pub struct FanState {
 }
 
 /// One point of a fan curve: at `temp_c` °C, run at `duty` %.
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CurvePoint {
     pub temp_c: f32,
@@ -144,6 +144,13 @@ pub struct FanChannelConfig {
     /// the applied duty may fall toward the curve target each tick.
     #[serde(default = "default_spin_pct")]
     pub spin_down_pct: f32,
+    /// Optional SECOND temperature source (e.g. GPU core) for dual-source curves.
+    /// The applied duty is max(curve@source, curve2@source2). Defaults keep old
+    /// configs byte-identical in behavior.
+    #[serde(default)]
+    pub temp_source_id2: Option<String>,
+    #[serde(default)]
+    pub curve2: Vec<CurvePoint>,
 }
 
 // --- wiring from sensors.rs (the sidecar owner) --------------------------------
@@ -316,6 +323,18 @@ fn interp(curve: &[CurvePoint], temp: f32) -> f32 {
     last.duty
 }
 
+/// Curve-mode duty target: primary curve at `t1`, optionally raised by the
+/// secondary curve at `t2` (dual-source, e.g. case fans assisting the GPU).
+/// A missing secondary reading silently degrades to the primary alone — a
+/// sleeping/removed GPU must never destabilize a case fan.
+fn combined_target(c: &FanChannelConfig, t1: f32, t2: Option<f32>) -> f32 {
+    let base = interp(&c.curve, t1);
+    match (c.curve2.is_empty(), t2) {
+        (false, Some(t)) => base.max(interp(&c.curve2, t)),
+        _ => base,
+    }
+}
+
 // --- curve ramp smoothing -------------------------------------------------------
 
 /// Smallest per-tick duty step at the "Smooth" extreme (spinPct = 0), in duty %.
@@ -415,7 +434,11 @@ fn apply_once() {
                     curve_duty.remove(&c.control_id);
                     continue;
                 };
-                let target = interp(&c.curve, t).clamp(floor, 100.0);
+                let t2 = c
+                    .temp_source_id2
+                    .as_ref()
+                    .and_then(|src| temps.get(src).copied());
+                let target = combined_target(c, t, t2).clamp(floor, 100.0);
                 // Smooth the approach to the target. Seed the per-channel applied
                 // duty on first entry (or after a mode change away from curve)
                 // from the last known curve duty, else straight to the target so
@@ -580,6 +603,17 @@ fn sanitize_config(c: &FanChannelConfig) -> Option<FanChannelConfig> {
         })
         .collect();
 
+    // The secondary (GPU-assist) curve gets the same bounds as the primary.
+    let curve2: Vec<CurvePoint> = c
+        .curve2
+        .iter()
+        .take(MAX_CURVE_POINTS)
+        .map(|p| CurvePoint {
+            temp_c: clamp_finite(p.temp_c, 0.0, MAX_CURVE_TEMP_C),
+            duty: clamp_finite(p.duty, 0.0, 100.0),
+        })
+        .collect();
+
     Some(FanChannelConfig {
         control_id: c.control_id.clone(),
         mode: mode.to_string(),
@@ -592,6 +626,8 @@ fn sanitize_config(c: &FanChannelConfig) -> Option<FanChannelConfig> {
         // fields are defaulted to 100 = Immediate by serde before we get here.
         spin_up_pct: clamp_finite(c.spin_up_pct, 0.0, 100.0),
         spin_down_pct: clamp_finite(c.spin_down_pct, 0.0, 100.0),
+        temp_source_id2: c.temp_source_id2.clone(),
+        curve2,
     })
 }
 
@@ -666,7 +702,8 @@ pub fn fan_set_config(configs: Vec<FanChannelConfig>) -> crate::error::CoreResul
 // Implementation is our own (no third-party fan-control code).
 
 /// One measured (duty %, RPM) sample from a calibration sweep.
-#[derive(Serialize, Clone)]
+/// Round-trips over IPC (auto-tune results store + re-ingest calibrations).
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CalibPoint {
     pub duty: f32,
@@ -674,7 +711,7 @@ pub struct CalibPoint {
 }
 
 /// The result of calibrating one fan header.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FanCalibration {
     pub control_id: String,
@@ -845,5 +882,72 @@ pub async fn fan_calibrate(
         Err(e) => Err(crate::error::CoreError::from(format!(
             "calibration task failed: {e}"
         ))),
+    }
+}
+
+// --- tests ----------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(curve: Vec<CurvePoint>, curve2: Vec<CurvePoint>) -> FanChannelConfig {
+        FanChannelConfig {
+            control_id: "lpc/nct/0/control/0".into(),
+            mode: "curve".into(),
+            manual_pct: 0.0,
+            temp_source_id: Some("t1".into()),
+            curve,
+            min_duty: 0.0,
+            spin_up_pct: 100.0,
+            spin_down_pct: 100.0,
+            temp_source_id2: Some("t2".into()),
+            curve2,
+        }
+    }
+
+    fn pts(v: &[(f32, f32)]) -> Vec<CurvePoint> {
+        v.iter().map(|&(temp_c, duty)| CurvePoint { temp_c, duty }).collect()
+    }
+
+    #[test]
+    fn combined_target_takes_max_of_both_curves() {
+        let c = cfg(pts(&[(30.0, 20.0), (80.0, 100.0)]), pts(&[(30.0, 30.0), (80.0, 90.0)]));
+        // Primary says 20% at 30°C; secondary at 60°C → 66% — secondary wins.
+        assert_eq!(combined_target(&c, 30.0, Some(60.0)).round(), 66.0);
+        // Secondary reading missing → primary alone.
+        assert_eq!(combined_target(&c, 30.0, None).round(), 20.0);
+    }
+
+    #[test]
+    fn combined_target_without_curve2_matches_primary_exactly() {
+        let mut c = cfg(pts(&[(30.0, 20.0), (80.0, 100.0)]), Vec::new());
+        c.temp_source_id2 = None;
+        for t in [25.0_f32, 42.5, 80.0, 95.0] {
+            assert_eq!(combined_target(&c, t, Some(70.0)), interp(&c.curve, t));
+        }
+    }
+
+    #[test]
+    fn sanitize_clamps_curve2_like_curve() {
+        let mut c = cfg(
+            pts(&[(30.0, 20.0)]),
+            pts(&[(f32::NAN, 250.0), (200.0, -5.0)]),
+        );
+        c.curve2.extend((0..40).map(|i| CurvePoint { temp_c: i as f32, duty: 50.0 }));
+        let s = sanitize_config(&c).expect("curve mode is valid");
+        assert!(s.curve2.len() <= MAX_CURVE_POINTS);
+        for p in &s.curve2 {
+            assert!((0.0..=MAX_CURVE_TEMP_C).contains(&p.temp_c));
+            assert!((0.0..=100.0).contains(&p.duty));
+        }
+    }
+
+    #[test]
+    fn legacy_config_json_without_dual_source_fields_deserializes() {
+        let j = r#"{"controlId":"a/control/0","mode":"curve","curve":[{"tempC":30,"duty":20}]}"#;
+        let c: FanChannelConfig = serde_json::from_str(j).expect("legacy shape parses");
+        assert!(c.temp_source_id2.is_none());
+        assert!(c.curve2.is_empty());
     }
 }
