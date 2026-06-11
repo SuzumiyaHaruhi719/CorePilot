@@ -23,6 +23,53 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const OSD_LABEL: &str = "osd";
 
+/// Recycle the OSD window when this process's GDI object count reaches this.
+/// Upstream bug (tauri-apps/tauri#11525): the transparent overlay window's
+/// host slowly leaks GDI objects (~32/min measured on this machine, source in
+/// tao/wry/WebView2 — every CorePilot GDI call site audits clean). At the
+/// 10,000 per-process cap `CreateDIBSection` fails and softbuffer panics the
+/// MAIN thread — a silent app death after ~5 h, twice in the field. 6,000
+/// leaves generous headroom and recycles roughly every 3 h.
+const GDI_RECYCLE_THRESHOLD: u32 = 6_000;
+
+/// Watchdog for the upstream GDI leak: poll our own GDI count once a minute
+/// and, near the cap, destroy + recreate the OSD window on the main thread.
+/// Destroying the window releases every leaked object (measured: 186 → 19).
+/// The recreate is invisible while the overlay is parked off-screen and at
+/// worst a one-frame blink in-game.
+pub fn start_gdi_guard(app: AppHandle) {
+    std::thread::Builder::new()
+        .name("gdi-guard".into())
+        .spawn(move || {
+            use windows::Win32::System::Threading::{
+                GetCurrentProcess, GetGuiResources, GR_GDIOBJECTS,
+            };
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                let gdi = unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
+                if gdi < GDI_RECYCLE_THRESHOLD {
+                    continue;
+                }
+                tracing::warn!(
+                    gdi,
+                    "GDI handles nearing the 10k cap (upstream transparent-window leak, tauri#11525) — recycling the OSD window"
+                );
+                let handle = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if let Some(win) = handle.get_webview_window(OSD_LABEL) {
+                        // destroy() skips the close-request path (the window is
+                        // marked non-closable for the user).
+                        let _ = win.destroy();
+                    }
+                    if let Err(e) = osd_set_visible(handle.clone(), true) {
+                        tracing::warn!("OSD recreate after GDI recycle failed: {e}");
+                    }
+                });
+            }
+        })
+        .ok();
+}
+
 /// Last logical size pushed to the overlay window, packed as `w << 32 | h`
 /// (rounded). Lets [`osd_set_bounds`] skip the costly resize + click-through
 /// re-assert on pure position moves — the per-frame churn that made the

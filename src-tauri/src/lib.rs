@@ -147,6 +147,11 @@ pub fn run() {
             // The overlay parks itself off-screen when there is nothing to show.
             let _ = osd::osd_set_visible(app.handle().clone(), true);
 
+            // GDI watchdog: survive the upstream transparent-window GDI leak
+            // (tauri#11525) by recycling the OSD window before the 10k cap —
+            // without it the app silently dies after ~5 hours (see osd.rs).
+            osd::start_gdi_guard(app.handle().clone());
+
             // Start the in-game OSD sampler. This creates the ONE long-lived
             // shared-memory writer (kept alive for the whole app lifetime so the
             // injected overlay DLL never loses the mapping) and loops at ~3 Hz,
