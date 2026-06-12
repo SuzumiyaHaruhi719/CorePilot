@@ -620,11 +620,19 @@ fn build_state() -> FanState {
 // --- Tauri commands ------------------------------------------------------------
 
 /// Live fan headers + temperature sources for the Fan Control page.
+///
+/// Async + blocking-pool: the snapshot read is µs, but `ensure_sidecar` takes
+/// the sidecar respawn path whenever the sidecar has died — a CreateProcess
+/// (hundreds of ms under Defender/load) that must not run on the main thread
+/// at this command's ~1 Hz poll cadence.
 #[tauri::command]
-pub fn fan_info() -> FanState {
-    // Guarantee the sidecar is up the moment the Fan page asks for data.
-    crate::sensors::ensure_sidecar();
-    build_state()
+pub async fn fan_info() -> FanState {
+    crate::commands::run_blocking_default("fan_info", || {
+        // Guarantee the sidecar is up the moment the Fan page asks for data.
+        crate::sensors::ensure_sidecar();
+        build_state()
+    })
+    .await
 }
 
 /// Maximum number of points we accept in a single fan curve.

@@ -11,7 +11,7 @@ use crate::sysmon::{self, Metrics};
 use crate::topology::CpuTopology;
 use serde::Serialize;
 use sysinfo::System;
-use tauri::State;
+use tauri::{Manager, State};
 
 /// Retained no-op for the "亚克力模糊" toggle. The acrylic effect is rendered
 /// IN-APP as layered CSS frosted glass (see `[data-acrylic]` in `index.css`):
@@ -66,7 +66,7 @@ pub fn set_window_opacity(window: tauri::WebviewWindow, percent: u8) -> Result<(
     Ok(())
 }
 
-#[derive(Serialize)]
+#[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Overview {
     pub cpu_name: String,
@@ -94,37 +94,61 @@ pub fn get_topology(state: State<AppState>) -> CpuTopology {
     state.topo.clone()
 }
 
+/// Async + blocking-pool (see `run_blocking_default`): waits on the shared
+/// `sys` mutex, which `list_processes` can hold for seconds under load — as a
+/// sync command that wait happened on the main thread.
 #[tauri::command]
-pub fn get_overview(state: State<AppState>) -> Overview {
-    let sys = state.sys.lock();
-    let cpu_name = sys
-        .cpus()
-        .first()
-        .map(|c| c.brand().trim().to_string())
-        .unwrap_or_else(|| "Unknown CPU".into());
-    Overview {
-        cpu_name,
-        physical_cores: state.topo.physical_cores,
-        logical_cpus: state.topo.logical_count,
-        ram_total: sys.total_memory(),
-        os: System::long_os_version().unwrap_or_default(),
-        vcache_ccd: state.topo.vcache_ccd,
-        detection: state.topo.detection.clone(),
-    }
+pub async fn get_overview(app: tauri::AppHandle) -> Overview {
+    run_blocking_default("get_overview", move || {
+        let state = app.state::<AppState>();
+        let sys = state.sys.lock();
+        let cpu_name = sys
+            .cpus()
+            .first()
+            .map(|c| c.brand().trim().to_string())
+            .unwrap_or_else(|| "Unknown CPU".into());
+        Overview {
+            cpu_name,
+            physical_cores: state.topo.physical_cores,
+            logical_cpus: state.topo.logical_count,
+            ram_total: sys.total_memory(),
+            os: System::long_os_version().unwrap_or_default(),
+            vcache_ccd: state.topo.vcache_ccd,
+            detection: state.topo.detection.clone(),
+        }
+    })
+    .await
 }
 
+/// Async + blocking-pool: a full pass is a system-wide process refresh, a
+/// Toolhelp thread snapshot, and TWO PDH GPU wildcard reads (engine utilization
+/// + per-process VRAM, the latter on a freshly-opened query) — measured at
+/// seconds on a loaded box (~800 processes / ~1400 GPU-engine instances). The
+/// affinity enforcer polls this every 8 s and the process page every poll tick,
+/// so as a sync command it froze the window into "未响应" on that exact cadence.
 #[tauri::command]
-pub fn list_processes(state: State<AppState>) -> Vec<ProcInfo> {
-    let logical = state.topo.logical_count.max(1) as f32;
-    let threads = process::thread_counts().unwrap_or_default();
-    let mut sys = state.sys.lock();
-    process::list(&mut sys, &threads, logical)
+pub async fn list_processes(app: tauri::AppHandle) -> Vec<ProcInfo> {
+    run_blocking_default("list_processes", move || {
+        let state = app.state::<AppState>();
+        let logical = state.topo.logical_count.max(1) as f32;
+        let threads = process::thread_counts().unwrap_or_default();
+        let mut sys = state.sys.lock();
+        process::list(&mut sys, &threads, logical)
+    })
+    .await
 }
 
+/// Async + blocking-pool: the refresh itself is cheap, but it shares the `sys`
+/// mutex with `list_processes` (see above) — a sync command blocked the main
+/// thread for that whole hold.
 #[tauri::command]
-pub fn get_metrics(state: State<AppState>) -> Metrics {
-    let mut sys = state.sys.lock();
-    sysmon::sample(&mut sys)
+pub async fn get_metrics(app: tauri::AppHandle) -> Metrics {
+    run_blocking_default("get_metrics", move || {
+        let state = app.state::<AppState>();
+        let mut sys = state.sys.lock();
+        sysmon::sample(&mut sys)
+    })
+    .await
 }
 
 /// Pin a process to a logical-CPU mask. The mask arrives as a decimal string
@@ -175,6 +199,44 @@ where
         .map_err(|e| CoreError::Msg(format!("blocking task failed: {e}")))?
 }
 
+/// Duration above which a blocking-capable command body logs a warning. The
+/// recurring "未响应" freezes were sync commands stalling the main thread for
+/// seconds; now that they run on the blocking pool, this keeps naming the slow
+/// ones (with measured durations) in the session log so any recurrence of the
+/// stall class stays attributable in the field.
+const SLOW_COMMAND_WARN_MS: u128 = 100;
+
+/// Run a command body, logging its name + duration when it exceeds
+/// [`SLOW_COMMAND_WARN_MS`]. Zero-cost beyond one `Instant` when fast.
+pub(crate) fn warn_slow<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
+    let started = std::time::Instant::now();
+    let out = f();
+    let ms = started.elapsed().as_millis();
+    if ms > SLOW_COMMAND_WARN_MS {
+        tracing::warn!("slow command body: {name} took {ms} ms (off the main thread)");
+    }
+    out
+}
+
+/// Like [`run_blocking`], for commands whose IPC shape is a plain (infallible)
+/// value rather than a `CoreResult`. Sync Tauri commands execute on the MAIN
+/// thread — the window's message pump — and several polled reads here can stall
+/// for seconds under system load (PDH `\GPU Engine(*)` wildcard collection
+/// scales with process count, NVML re-inits per call, storefront re-scans spawn
+/// `reg.exe`), which froze the window into "未响应" on every poll tick. Running
+/// the body on the blocking pool keeps the UI painting; a panicked body
+/// degrades to `T::default()` ("no data"), matching these commands' existing
+/// fail-soft, never-fabricate contract.
+pub(crate) async fn run_blocking_default<T, F>(name: &'static str, f: F) -> T
+where
+    T: Send + Default + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || warn_slow(name, f))
+        .await
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 pub async fn free_working_sets() -> CoreResult<()> {
     run_blocking(optimize::free_working_sets).await
@@ -201,9 +263,15 @@ pub fn end_task(pid: u32) -> CoreResult<()> {
     process::kill(pid)
 }
 
+/// Async + blocking-pool: `sample()` runs a PDH collect whose `\GPU Engine(*)`
+/// wildcard scales with the number of GPU-touching processes (measured: 1374
+/// instances / seconds per collect at ~800 processes under load) plus a
+/// per-call NVML init/read. Polled at ~1 Hz by the shared telemetry poller AND
+/// the OSD overlay window, this was the primary repeated main-thread stall
+/// behind the recurring "未响应" (same bug class as cfd1ec0's 一键优化 freeze).
 #[tauri::command]
-pub fn get_sensors() -> crate::error::CoreResult<crate::sensors::SensorSample> {
-    Ok(crate::sensors::sample())
+pub async fn get_sensors() -> crate::error::CoreResult<crate::sensors::SensorSample> {
+    run_blocking(|| Ok(warn_slow("get_sensors", crate::sensors::sample))).await
 }
 
 // --- SMU tuning (Curve Optimizer / PBO) — forwarded to the sensord sidecar -----

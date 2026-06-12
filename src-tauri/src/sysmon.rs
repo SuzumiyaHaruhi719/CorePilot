@@ -3,7 +3,7 @@
 use serde::Serialize;
 use sysinfo::System;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Metrics {
     pub cpu_overall: f32,

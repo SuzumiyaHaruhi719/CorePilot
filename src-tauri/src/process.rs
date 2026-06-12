@@ -488,8 +488,18 @@ fn open_gpu_engine_query() -> Option<GpuEngineQuery> {
 /// and clamped to 0..100 — e.g. `{"3D": 87.0, "Copy": 1.0, "Video Encode": 0.0}`.
 /// Mirrors the Windows Task Manager GPU engine graphs. Empty on the priming
 /// sample or when PDH is unavailable.
+///
+/// Async + blocking-pool: the `\GPU Engine(*)` wildcard collect scales with the
+/// process count (seconds on a loaded box) — as a sync command this stalled the
+/// main thread on every Performance-view poll tick (the "未响应" stall class).
 #[tauri::command]
-pub fn gpu_engine_loads() -> HashMap<String, f64> {
+pub async fn gpu_engine_loads() -> HashMap<String, f64> {
+    crate::commands::run_blocking_default("gpu_engine_loads", gpu_engine_loads_now).await
+}
+
+/// Synchronous body of [`gpu_engine_loads`], for callers already off the main
+/// thread (the CLI probe).
+pub fn gpu_engine_loads_now() -> HashMap<String, f64> {
     let mut totals: HashMap<String, f64> = HashMap::new();
     let guard = GPU_ENGINE_QUERY.lock();
     let Some(q) = guard.as_ref() else {

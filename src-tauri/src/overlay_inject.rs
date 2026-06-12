@@ -184,7 +184,7 @@ fn publish_metrics(writer: &OsdShared, app: &AppHandle, pid: u32, flags: u32, ro
     // --- telemetry sidecar + PDH (temps/power/clock/disk/net/vram fallback) ---
     let sensors = crate::sensors::sample();
     // --- NVML GPU snapshot (preferred for GPU util/temp/power/clocks/VRAM) ---
-    let gpu = crate::gpu::gpu_oc_info();
+    let gpu = crate::gpu::gpu_oc_info_snapshot();
     // --- frame pacing for THIS pid (not the foreground) ---
     let fps = crate::fps::stats_for_pid(pid);
 

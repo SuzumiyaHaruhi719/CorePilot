@@ -77,14 +77,21 @@ pub fn is_game_path(exe_path_lower: &str) -> bool {
 
 /// Tauri command: the discovered installed games (for a read-only list in the OSD
 /// settings). Empty when nothing is found or no storefront is installed.
+///
+/// Async + blocking-pool: a stale cache makes `ensure_fresh` re-scan the
+/// storefronts (`reg.exe` child processes + disk walks, seconds under load) —
+/// as a sync command that froze the main thread when the OSD settings opened.
 #[tauri::command]
-pub fn game_library_list() -> Vec<GameEntry> {
-    ensure_fresh();
-    CACHE
-        .lock()
-        .ok()
-        .map(|c| c.games.clone())
-        .unwrap_or_default()
+pub async fn game_library_list() -> Vec<GameEntry> {
+    crate::commands::run_blocking_default("game_library_list", || {
+        ensure_fresh();
+        CACHE
+            .lock()
+            .ok()
+            .map(|c| c.games.clone())
+            .unwrap_or_default()
+    })
+    .await
 }
 
 /// True if `exe` is inside the directory `root` (prefix match on a path boundary,

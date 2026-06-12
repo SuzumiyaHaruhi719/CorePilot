@@ -190,7 +190,7 @@ fn cpu_name(app: &AppHandle) -> Option<String> {
 /// Resolve the GPU name from NVML (same source as the frontend's `gpuOcInfo().name`).
 /// `None` when NVML is unavailable or the name is empty.
 fn gpu_name() -> Option<String> {
-    let g = crate::gpu::gpu_oc_info();
+    let g = crate::gpu::gpu_oc_info_snapshot();
     if g.available && !g.name.is_empty() {
         Some(g.name)
     } else {
@@ -231,7 +231,7 @@ fn build_sample(app: &AppHandle, session: &ActiveSession, pid: u32) -> PerfSampl
     // Telemetry sidecar + PDH (temps/power/clock/disk/net/vram fallback).
     let sensors = crate::sensors::sample();
     // NVML GPU snapshot (preferred for GPU util/temp/power/clocks/VRAM).
-    let gpu = crate::gpu::gpu_oc_info();
+    let gpu = crate::gpu::gpu_oc_info_snapshot();
     // Frame pacing for THIS pid (the recorded game, not the foreground).
     let fps = crate::fps::stats_for_pid(pid);
 
@@ -358,7 +358,7 @@ fn start(app: &AppHandle, exe: &str, pid: u32) -> ActiveSession {
 ///
 /// `active` is the recorder thread's single owned session slot.
 fn tick(app: &AppHandle, active: &mut Option<ActiveSession>) {
-    let fg = crate::fps::foreground_info();
+    let fg = crate::fps::foreground_info_now();
     let (enabled, white, black, osd_white) = {
         let cfg = CONFIG.lock();
         (

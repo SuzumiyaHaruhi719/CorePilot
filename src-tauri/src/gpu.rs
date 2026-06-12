@@ -241,8 +241,19 @@ fn max_graphics_clock(device: &Device) -> u32 {
 
 /// Query the current GPU tuning snapshot. Never fails: if NVML is unavailable
 /// or no NVIDIA GPU exists, returns `GpuOcInfo { available: false, .. }`.
+///
+/// Async + blocking-pool: each call re-inits NVML and issues ~15 driver reads —
+/// tens to hundreds of ms under system load. Polled at ~1 Hz by the GPU pages
+/// AND the OSD overlay (whenever a gpu.* metric is shown), so as a sync command
+/// it contributed to the recurring main-thread "未响应" stalls.
 #[tauri::command]
-pub fn gpu_oc_info() -> GpuOcInfo {
+pub async fn gpu_oc_info() -> GpuOcInfo {
+    crate::commands::run_blocking_default("gpu_oc_info", gpu_oc_info_snapshot).await
+}
+
+/// Synchronous body of [`gpu_oc_info`], for callers already off the main thread
+/// (overlay sampler, perf recorder, CLI).
+pub fn gpu_oc_info_snapshot() -> GpuOcInfo {
     let handle = match GpuHandle::init() {
         Ok(h) => h,
         Err(_) => return GpuOcInfo::default(),

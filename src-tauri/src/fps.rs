@@ -388,7 +388,9 @@ pub fn foreground_process() -> Option<String> {
 }
 
 /// Foreground app snapshot for OSD targeting + the perf-session recorder.
-#[derive(Serialize)]
+/// `Default` is the "no foreground window" value (exe None / pid 0 / not a
+/// game), matching the explicit `None` arm below.
+#[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForegroundInfo {
     /// Lowercased exe name (e.g. "subnautica2-win64-shipping.exe"); null when unresolved.
@@ -483,8 +485,20 @@ fn d3d_fullscreen_active() -> bool {
     }
 }
 
+/// Async + blocking-pool: usually µs of window/process queries, but the
+/// `is_game_path` check re-scans the storefront library when its 5-minute cache
+/// expires — `reg.exe` child processes + VDF/manifest disk walks, i.e. an
+/// occasional seconds-long stall. The OSD overlay polls this at ~1 Hz, so as a
+/// sync command that rescan landed on the main thread every ~5 minutes (one of
+/// the recurring "未响应" sources).
 #[tauri::command]
-pub fn foreground_info() -> ForegroundInfo {
+pub async fn foreground_info() -> ForegroundInfo {
+    crate::commands::run_blocking_default("foreground_info", foreground_info_now).await
+}
+
+/// Synchronous body of [`foreground_info`], for callers already off the main
+/// thread (the perf recorder).
+pub fn foreground_info_now() -> ForegroundInfo {
     match foreground_pid() {
         Some(pid) => {
             // One process query; derive both the lowercased name and full path.

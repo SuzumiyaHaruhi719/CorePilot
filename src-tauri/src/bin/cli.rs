@@ -22,7 +22,7 @@ fn main() {
     let cmd = args.get(1).map(String::as_str).unwrap_or("help");
 
     match cmd {
-        "gpu-info" => print_json(&gpu::gpu_oc_info()),
+        "gpu-info" => print_json(&gpu::gpu_oc_info_snapshot()),
         "gpu-apply" => {
             let raw = args.get(2).cloned().unwrap_or_default();
             match serde_json::from_str::<gpu::GpuOcSettings>(&raw) {
@@ -34,9 +34,9 @@ fn main() {
         "gpu-temp-probe" => print_json(&gpu::gpu_temp_probe()),
         "gpu-engines" => {
             // PDH rate counters need two samples; prime, wait, then read.
-            let _ = process::gpu_engine_loads();
+            let _ = process::gpu_engine_loads_now();
             std::thread::sleep(Duration::from_millis(600));
-            print_json(&process::gpu_engine_loads());
+            print_json(&process::gpu_engine_loads_now());
         }
         "topology" => print_json(&topology::detect()),
         "sensors" => print_json(&sensors::sample()),
