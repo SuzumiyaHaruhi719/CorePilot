@@ -76,7 +76,6 @@ struct PdhQuery {
     disk_read: PDH_HCOUNTER,
     disk_write: PDH_HCOUNTER,
     disk_time: PDH_HCOUNTER,
-    gpu_util: PDH_HCOUNTER,      // wildcard array: \GPU Engine(*)\Utilization Percentage
     gpu_mem: Option<PDH_HCOUNTER>, // wildcard array: \GPU Adapter Memory(*)\Dedicated Usage
     // Live CPU clock: `% Processor Performance` is the % of the CPU's nominal/base
     // frequency and exceeds 100% under turbo/boost. Like the disk rate counters it
@@ -387,10 +386,9 @@ impl PdhQuery {
             let disk_read = add(r"\PhysicalDisk(_Total)\Disk Read Bytes/sec");
             let disk_write = add(r"\PhysicalDisk(_Total)\Disk Write Bytes/sec");
             let disk_time = add(r"\PhysicalDisk(_Total)\% Disk Time");
-            let gpu_util = add(r"\GPU Engine(*)\Utilization Percentage");
 
-            let (Some(disk_read), Some(disk_write), Some(disk_time), Some(gpu_util)) =
-                (disk_read, disk_write, disk_time, gpu_util)
+            let (Some(disk_read), Some(disk_write), Some(disk_time)) =
+                (disk_read, disk_write, disk_time)
             else {
                 // Essential counters missing: close the query we opened above so
                 // its handle isn't leaked, then report PDH as unavailable.
@@ -415,7 +413,6 @@ impl PdhQuery {
                 disk_read,
                 disk_write,
                 disk_time,
-                gpu_util,
                 gpu_mem,
                 cpu_perf,
                 cpu_freq,
@@ -617,15 +614,6 @@ pub fn sample() -> SensorSample {
                 out.disk_pct =
                     read_scalar(pdh.disk_time).map(|v| (v.max(0.0) as f32).min(100.0));
 
-                // GPU utilization: PDH exposes one instance per engine/queue. We
-                // sum the per-instance utilization (each is a 0..100 percentage
-                // of that engine) and clamp to 100, i.e. min(100, sum). This
-                // reflects "is the GPU busy" without over-counting past 100.
-                if let Some(values) = read_array(pdh.gpu_util) {
-                    let sum: f64 = values.iter().filter(|v| v.is_finite()).sum();
-                    out.gpu_pct = Some((sum as f32).clamp(0.0, 100.0));
-                }
-
                 // VRAM used: sum dedicated usage across adapter-memory instances.
                 if let Some(mem) = pdh.gpu_mem {
                     if let Some(values) = read_array(mem) {
@@ -651,6 +639,11 @@ pub fn sample() -> SensorSample {
             }
         }
     }
+
+    // Whole-GPU utilization now comes from the background telemetry collector (one
+    // shared \GPU Engine(*) collect), not this request's PDH query — that collect
+    // is what used to stall get_sensors. Independent of the local PDH query above.
+    out.gpu_pct = crate::telemetry::gpu_snapshot().engine.aggregate;
 
     // Apply the once-resolved base MHz and compute the live clock. Done outside
     // the `s.pdh` borrow above (which is immutable) so we can mutate the cache.

@@ -24,6 +24,7 @@ pub mod smu;
 pub mod serde_u64;
 pub mod state;
 pub mod sysmon;
+pub mod telemetry;
 pub mod topology;
 pub mod tray;
 pub mod tweaks;
@@ -132,6 +133,12 @@ pub fn run() {
         .manage(AppState::new())
         .manage(tray::TrayPrefs::default())
         .setup(|app| {
+            // Start the background GPU-engine telemetry collector first (the ONE
+            // shared \GPU Engine(*) collect feeding sensors / process list /
+            // gpu_engine_loads). It self-starts on first read too, but start it
+            // eagerly so the first UI poll already has data.
+            crate::telemetry::start();
+
             // A tray failure must never crash startup; log and continue. The
             // close handler below only hides to the tray when the tray exists,
             // so a missing tray degrades to a normal (exit-on-close) window.

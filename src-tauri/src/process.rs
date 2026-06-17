@@ -329,9 +329,43 @@ fn dominant_key<K: Clone>(sums: &HashMap<K, f32>) -> Option<K> {
 ///   `ProcInfo.gpu`).
 /// * `attribution` — dominant `(engine label, adapter name)` per PID, only for
 ///   PIDs whose total utilization clears [`GPU_ATTRIBUTION_THRESHOLD`].
-struct GpuSnapshot {
-    util: HashMap<u32, f32>,
-    attribution: HashMap<u32, (String, Option<String>)>,
+pub(crate) struct GpuSnapshot {
+    pub(crate) util: HashMap<u32, f32>,
+    pub(crate) attribution: HashMap<u32, (String, Option<String>)>,
+    /// Whole-GPU utilization (sum of all engine instances, clamped 0..100). `None`
+    /// when PDH is unavailable / on the priming sample — mirrors the old gpu_util
+    /// behaviour in `sensors::sample` so `gpuPct` stays null-when-unavailable.
+    pub(crate) aggregate: Option<f32>,
+    /// Per-engine-type totals (e.g. `{"3D": 87.0}`), clamped 0..100 — the
+    /// `gpu_engine_loads` payload, derived from the SAME collect.
+    pub(crate) per_engine: HashMap<String, f64>,
+}
+
+/// Everything the single background GPU collect produces: per-PID engine data
+/// (+ aggregate + per-engine totals) plus per-PID dedicated VRAM.
+pub(crate) struct GpuFullSnapshot {
+    pub(crate) engine: GpuSnapshot,
+    pub(crate) vram: HashMap<u32, u64>,
+}
+
+impl Default for GpuFullSnapshot {
+    fn default() -> Self {
+        GpuFullSnapshot {
+            engine: empty_engine_snapshot(),
+            vram: HashMap::new(),
+        }
+    }
+}
+
+/// An empty engine snapshot (PDH unavailable / priming sample): no per-PID data
+/// and a `None` aggregate so `gpuPct` reads as unavailable rather than 0.
+fn empty_engine_snapshot() -> GpuSnapshot {
+    GpuSnapshot {
+        util: HashMap::new(),
+        attribution: HashMap::new(),
+        aggregate: None,
+        per_engine: HashMap::new(),
+    }
 }
 
 /// Collect the GPU-engine utilization counter and aggregate it per PID.
@@ -342,26 +376,23 @@ struct GpuSnapshot {
 /// a flat total (→ `gpu`), per-engtype, and per-LUID. The dominant engtype/LUID
 /// then yield the engine label and adapter name. Returns empty maps if PDH is
 /// unavailable or this is the first (priming) sample.
-fn gpu_map() -> GpuSnapshot {
+pub(crate) fn gpu_map() -> GpuSnapshot {
     let mut util: HashMap<u32, f32> = HashMap::new();
     // Per-PID utilization grouped by engtype and by parsed LUID.
     let mut by_engtype: HashMap<u32, HashMap<String, f32>> = HashMap::new();
     let mut by_luid: HashMap<u32, HashMap<(u32, u32), f32>> = HashMap::new();
+    // Whole-GPU total (sum of every instance) to mirror the old `sensors` gpu_util
+    // aggregate (sum of all instances, then clamp 100) exactly.
+    let mut raw_total: f64 = 0.0;
 
     let guard = GPU_QUERY.lock();
     let Some(gpu) = guard.as_ref() else {
-        return GpuSnapshot {
-            util,
-            attribution: HashMap::new(),
-        };
+        return empty_engine_snapshot();
     };
 
     unsafe {
         if PdhCollectQueryData(gpu.query) != PDH_SUCCESS {
-            return GpuSnapshot {
-                util,
-                attribution: HashMap::new(),
-            };
+            return empty_engine_snapshot();
         }
 
         // First call: ask for the required buffer size.
@@ -369,10 +400,7 @@ fn gpu_map() -> GpuSnapshot {
         let mut count: u32 = 0;
         let rc = PdhGetFormattedCounterArrayW(gpu.util, PDH_FMT_DOUBLE, &mut size, &mut count, None);
         if rc != PDH_MORE_DATA || size == 0 {
-            return GpuSnapshot {
-                util,
-                attribution: HashMap::new(),
-            };
+            return empty_engine_snapshot();
         }
 
         // Allocate the requested bytes and reinterpret as an item array.
@@ -386,10 +414,7 @@ fn gpu_map() -> GpuSnapshot {
             Some(items_ptr),
         );
         if rc != PDH_SUCCESS {
-            return GpuSnapshot {
-                util,
-                attribution: HashMap::new(),
-            };
+            return empty_engine_snapshot();
         }
 
         let items = std::slice::from_raw_parts(items_ptr, count as usize);
@@ -401,6 +426,9 @@ fn gpu_map() -> GpuSnapshot {
             if !value.is_finite() || value <= 0.0 {
                 continue;
             }
+            // Count every positive instance toward the whole-GPU aggregate, even
+            // ones whose name has no parseable PID (matches the old gpu_util sum).
+            raw_total += value;
             let Ok(name) = item.szName.to_string() else {
                 continue;
             };
@@ -427,6 +455,21 @@ fn gpu_map() -> GpuSnapshot {
         *v = v.clamp(0.0, 100.0);
     }
 
+    // Per-engine-type totals (summed across PIDs, same labels as the GPU tab) and
+    // the whole-GPU aggregate — both derived from THIS one collect, so the
+    // background collector feeds the process list, sensors, AND gpu_engine_loads
+    // without any extra \GPU Engine(*) collects.
+    let mut per_engine: HashMap<String, f64> = HashMap::new();
+    for engmap in by_engtype.values() {
+        for (engtype, v) in engmap {
+            *per_engine.entry(engine_label(engtype)).or_insert(0.0) += *v as f64;
+        }
+    }
+    for v in per_engine.values_mut() {
+        *v = v.clamp(0.0, 100.0);
+    }
+    let aggregate = Some((raw_total as f32).clamp(0.0, 100.0));
+
     // Derive dominant engine + adapter for PIDs with meaningful GPU usage.
     let mut attribution: HashMap<u32, (String, Option<String>)> = HashMap::new();
     for (&pid, &total) in &util {
@@ -447,7 +490,18 @@ fn gpu_map() -> GpuSnapshot {
         attribution.insert(pid, (engine, adapter));
     }
 
-    GpuSnapshot { util, attribution }
+    GpuSnapshot { util, attribution, aggregate, per_engine }
+}
+
+/// One full GPU sample for the background telemetry collector: the per-PID +
+/// aggregate + per-engine snapshot (one `\GPU Engine(*)` collect) plus per-PID
+/// dedicated VRAM (one `\GPU Process Memory(*)` collect). This is the ONLY place
+/// these two wildcard collects run now; every command reads the published snapshot.
+pub(crate) fn collect_gpu() -> GpuFullSnapshot {
+    GpuFullSnapshot {
+        engine: gpu_map(),
+        vram: gpu_vram_map(),
+    }
 }
 
 /// Whole-GPU per-engine utilization query, kept separate from [`GPU_QUERY`] so
@@ -494,7 +548,10 @@ fn open_gpu_engine_query() -> Option<GpuEngineQuery> {
 /// main thread on every Performance-view poll tick (the "未响应" stall class).
 #[tauri::command]
 pub async fn gpu_engine_loads() -> HashMap<String, f64> {
-    crate::commands::run_blocking_default("gpu_engine_loads", gpu_engine_loads_now).await
+    // Hot path (Performance-view poll): O(1) read of the background snapshot's
+    // per-engine totals — no PDH collect, no blocking-pool hop. The direct
+    // `gpu_engine_loads_now()` body is kept below for the CLI probe.
+    crate::telemetry::gpu_snapshot().engine.per_engine.clone()
 }
 
 /// Synchronous body of [`gpu_engine_loads`], for callers already off the main
@@ -572,7 +629,7 @@ pub fn thread_counts() -> CoreResult<HashMap<u32, u32>> {
 /// GPUs, so PDH is the portable path. Dedicated Usage is a raw gauge (not a rate),
 /// so a single collection suffices; we open + close a short-lived query per
 /// snapshot. Returns an empty map on any failure (the column then shows "—").
-fn gpu_vram_map() -> HashMap<u32, u64> {
+pub(crate) fn gpu_vram_map() -> HashMap<u32, u64> {
     let mut map: HashMap<u32, u64> = HashMap::new();
     unsafe {
         let mut query = PDH_HQUERY::default();
@@ -628,12 +685,13 @@ fn gpu_vram_map() -> HashMap<u32, u64> {
 /// used to normalize sysinfo's per-core CPU% into a Task-Manager-style total%.
 pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<ProcInfo> {
     sys.refresh_processes(ProcessesToUpdate::All, true);
-    // Per-process GPU utilization + engine/adapter attribution, collected once
-    // for this snapshot.
-    let gpu = gpu_map();
-    // Per-process dedicated VRAM via PDH (\GPU Process Memory) — same source as
-    // Windows Task Manager; NVML doesn't expose it on consumer WDDM GPUs.
-    let gpu_vram = gpu_vram_map();
+    // Per-process GPU utilization/attribution + dedicated VRAM come from the
+    // background telemetry collector (ONE shared collect), not a per-call PDH
+    // collect under the sys lock — that multi-second collect is what used to
+    // freeze the process list (and, via the shared blocking pool, everything else).
+    let snap = crate::telemetry::gpu_snapshot();
+    let gpu = &snap.engine;
+    let gpu_vram = &snap.vram;
     // PIDs seen this refresh, used afterwards to prune the detail cache.
     let mut live_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let out: Vec<ProcInfo> = sys
