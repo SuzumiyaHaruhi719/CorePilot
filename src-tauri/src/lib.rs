@@ -126,6 +126,19 @@ pub fn run() {
     std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", WEBVIEW_ARGS);
 
     tauri::Builder::default()
+        // MUST be the first plugin. A second launch hands its argv to THIS running
+        // instance — we focus the existing main window — and then exits, instead of
+        // spawning a parallel instance. Parallel instances are what produced the
+        // zombie processes fighting over the fixed `CorePilot-FPS` ETW session
+        // (game detection broke → OSD never showed) and multiplied the expensive
+        // \GPU Engine(*) collects.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
