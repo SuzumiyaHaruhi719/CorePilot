@@ -155,7 +155,13 @@ export function OsdOverlay() {
   // game gaining focus brings the overlay up on the next tick.
   useEffect(() => {
     let alive = true;
+    let inFlight = false;
     const tick = async () => {
+      // Backpressure: never overlap polls. If the previous tick's invokes haven't
+      // resolved (slow/wedged backend), skip this one instead of piling up.
+      if (inFlight) return;
+      inFlight = true;
+      try {
       // Idle short-circuit: when the OSD can NEVER show — master switch off,
       // desktop mode off, and no whitelist force-show entries — `resolveOsd`
       // returns null for every possible foreground, so polling the backend is
@@ -210,6 +216,9 @@ export function OsdOverlay() {
           metrics.some((k) => k.startsWith("fps")),
         );
         if (alive) setData(d);
+      }
+      } finally {
+        inFlight = false;
       }
     };
     void tick();

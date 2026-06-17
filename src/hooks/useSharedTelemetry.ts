@@ -15,17 +15,24 @@ function makePoller<T>(fetcher: () => Promise<T>) {
   let value: T | null = null;
   let timer: number | null = null;
   let intervalMs = 1500;
+  let inFlight = false; // skip a tick if the previous fetch hasn't resolved
   const subs = new Set<() => void>();
 
   const emit = () => {
     for (const cb of subs) cb();
   };
   const tick = async () => {
+    // Backpressure: never pile up invokes on a slow backend. If the previous
+    // fetch is still outstanding, skip this tick instead of queuing another.
+    if (inFlight) return;
+    inFlight = true;
     try {
       value = await fetcher();
       emit();
     } catch {
       /* backend not ready / transient — keep last value */
+    } finally {
+      inFlight = false;
     }
   };
   const start = () => {
