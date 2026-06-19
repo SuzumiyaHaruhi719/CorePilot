@@ -657,6 +657,12 @@ pub fn sample() -> SensorSample {
         }
     }
 
+    // Release SAMPLER before any GPU/driver call: NVML reads must NEVER run while
+    // holding the telemetry lock, or a slow NVML call (e.g. under Armoury Crate /
+    // AURA contention) would stall every other get_sensors behind this one. `s` is
+    // unused from here on, so this only makes the existing drop explicit + earlier.
+    drop(s);
+
     // CPU power/temperature come from the `sensord` sidecar (LibreHardwareMonitor
     // reading MSRs); NVML can't read those. GPU power/temperature prefer NVML so
     // the Monitor/StatusBar stay consistent with the GPU tab and nvidia-smi

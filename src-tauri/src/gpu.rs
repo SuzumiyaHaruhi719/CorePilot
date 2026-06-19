@@ -4,12 +4,12 @@
 //! adapters, so the RTX 4090 is index 0 even with an AMD iGPU present). The
 //! AMD iGPU is invisible to NVML and unaffected.
 //!
-//! Every command initializes NVML per-call (`Nvml::init()`). This avoids the
-//! `Send`/`Sync`/`'static` headaches of caching an `Nvml`/`Device` in a global
-//! (the `Device` borrows the `Nvml`), and init is cheap enough for the
-//! interactive cadence these commands run at. Nothing here may panic: NVML or
-//! device acquisition failures map to `Err(String)` for the apply/reset
-//! commands, or to a struct with `available: false` for the info command.
+//! NVML is initialised **once** into a process-wide shared handle
+//! ([`SHARED_NVML`]) and every command borrows it; see that static for why
+//! per-call `Nvml::init()` was a multi-second stall under GPU-tool contention.
+//! Nothing here may panic: NVML or device acquisition failures map to
+//! `Err(String)` for the apply/reset commands, or to a struct with
+//! `available: false` for the info command.
 //!
 //! SAFETY: NVML clamps requests to firmware-enforced limits and cannot
 //! overvolt or otherwise damage hardware. We additionally clamp every value to
@@ -157,27 +157,42 @@ fn is_unsupported(err: &NvmlError) -> bool {
     matches!(err, NvmlError::NotSupported)
 }
 
-/// Owns the per-call `Nvml` handle and hands out a borrowed [`Device`] through a
-/// closure. This replaces the previous `transmute`-to-`'static` trick: a `Device`
-/// borrows its `Nvml`, and laundering that borrow to `'static` is unsound if the
-/// two are ever separated. Here the `Nvml` lives in the struct and every `Device`
-/// is created *inside* [`with_device`], so the borrow is genuinely tied to `&self`
-/// and the `Device` cannot outlive its `Nvml` — the compiler enforces drop order
-/// for us, no `unsafe` required.
+/// Process-wide NVML handle, initialised **exactly once**.
+///
+/// `Nvml::init()` enumerates GPU adapters through a DXGKRNL kernel query
+/// (`NtGdiDdDDIQueryAdapterInfo`) that costs ~1.8 s while other GPU tools (Armoury
+/// Crate / AURA / the NVIDIA overlay) are hammering the adapter. Doing it *per
+/// call* — as every GPU read used to — turned each `gpu_temp_power` /
+/// `gpu_oc_info_snapshot` into a multi-second stall: it pinned `get_sensors` under
+/// the `SAMPLER` lock and let the 5 Hz perf-recorder peg a whole core in NVML init
+/// (diagnosed 2026-06-19). Initialising once and sharing the handle amortises that
+/// cost to a single startup hit; every later call only does the cheap device read.
+///
+/// `Nvml` is `Send + Sync` (NVML is documented thread-safe), so handing out a
+/// `&'static Nvml` to concurrent callers is sound. `None` when no NVIDIA GPU /
+/// NVML is present, in which case every GPU read degrades to `None` as before.
+static SHARED_NVML: Lazy<Option<Nvml>> = Lazy::new(|| Nvml::init().ok());
+
+/// A cheap accessor over the shared [`SHARED_NVML`] handle that hands out a
+/// borrowed [`Device`] through a closure — same API as before, but no per-call
+/// `Nvml::init()`. A `Device` borrows its `Nvml`; here it borrows the `'static`
+/// shared handle and is created *inside* [`with_device`], so it never escapes.
 struct GpuHandle {
-    nvml: Nvml,
+    nvml: &'static Nvml,
 }
 
 impl GpuHandle {
-    /// Initialise NVML for this call. Cheap enough for the interactive cadence
-    /// these commands run at (the previous design also re-init'd per call).
+    /// Get a handle over the shared NVML instance (initialising NVML once, on the
+    /// first call process-wide). `Err` when NVML/NVIDIA is unavailable.
     fn init() -> Result<Self, String> {
-        let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
-        Ok(Self { nvml })
+        SHARED_NVML
+            .as_ref()
+            .map(|nvml| GpuHandle { nvml })
+            .ok_or_else(|| "NVML unavailable".to_string())
     }
 
     /// Run `f` with the primary NVIDIA device (index 0). The `Device` is created
-    /// here and dropped when `f` returns, so its borrow of `self.nvml` never
+    /// here and dropped when `f` returns, so its borrow of the shared `nvml` never
     /// escapes. `f` gets `&mut Device` so it can call both the read (`&self`) and
     /// the mutating (`&mut self`) NVML methods. Returns the device-acquisition
     /// error as a human-readable string if index 0 can't be opened.
@@ -190,9 +205,9 @@ impl GpuHandle {
     }
 }
 
-/// Cached "is there an NVIDIA GPU" probe so the telemetry sampler doesn't retry
-/// NVML init every poll on non-NVIDIA systems.
-static NVML_PRESENT: Lazy<bool> = Lazy::new(|| Nvml::init().is_ok());
+/// Cached "is there an NVIDIA GPU" probe. Reuses the one shared handle rather than
+/// running a second `Nvml::init()`.
+static NVML_PRESENT: Lazy<bool> = Lazy::new(|| SHARED_NVML.is_some());
 
 /// Lightweight GPU temperature (°C) and power (W) read for the telemetry sampler.
 /// Using NVML here keeps the Monitor/StatusBar consistent with the GPU tab and
