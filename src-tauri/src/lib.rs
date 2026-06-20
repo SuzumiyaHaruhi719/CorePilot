@@ -28,6 +28,7 @@ pub mod telemetry;
 pub mod topology;
 pub mod tray;
 pub mod tweaks;
+pub mod watchdog;
 pub mod winsvc;
 
 use state::AppState;
@@ -58,6 +59,13 @@ pub const WEBVIEW_ARGS: &str = "--disable-background-timer-throttling \
      --no-proxy-server \
      --disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling";
 
+/// CRITICAL-PATH INVARIANT (see docs/superpowers/specs/2026-06-21-critical-path-isolation-design.md):
+/// Tauri v2 runs the event loop AND routes every window's IPC on the MAIN thread.
+/// Therefore no main-thread `#[tauri::command]` (a non-`async` command), no
+/// `run_on_main_thread` closure, and no holder of a read-path lock (`SAMPLER`,
+/// `state.sys`) may perform an operation that can block more than a few ms — doing
+/// so freezes ALL readings in ALL windows. Slow/blocking work goes on `async`
+/// commands via `spawn_blocking`, or on a dedicated background thread.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Full-granularity logging captured since launch. The TeeWriter mirrors every
@@ -146,6 +154,10 @@ pub fn run() {
         .manage(AppState::new())
         .manage(tray::TrayPrefs::default())
         .setup(|app| {
+            // Critical-path tripwire: log loudly if the main thread (the IPC router)
+            // ever stalls. Observability only; see crate::watchdog.
+            crate::watchdog::start(app.handle().clone());
+
             // Start the background GPU-engine telemetry collector first (the ONE
             // shared \GPU Engine(*) collect feeding sensors / process list /
             // gpu_engine_loads). It self-starts on first read too, but start it
