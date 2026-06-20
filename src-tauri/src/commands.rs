@@ -367,9 +367,12 @@ pub fn list_services() -> CoreResult<Vec<crate::winsvc::ServiceItem>> {
     crate::winsvc::list_services()
 }
 
+/// Async: SCM start/stop can block for seconds — keep it off the main thread.
 #[tauri::command]
-pub fn control_service(name: String, action: String) -> CoreResult<()> {
-    crate::winsvc::control_service(name, action)
+pub async fn control_service(name: String, action: String) -> CoreResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::winsvc::control_service(name, action))
+        .await
+        .map_err(|e| CoreError::Msg(format!("service control task failed: {e}")))?
 }
 
 #[tauri::command]

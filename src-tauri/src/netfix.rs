@@ -319,10 +319,18 @@ fn check_proxy(en: bool) -> NetCheck {
     )
 }
 
+/// Async wrapper: the diagnostic sweep spawns `ipconfig`/`netsh`/`ping` children
+/// (seconds) — run it off the main thread so it never stalls the IPC router.
+#[tauri::command]
+pub async fn network_diagnose(en: bool) -> Vec<NetCheck> {
+    tauri::async_runtime::spawn_blocking(move || network_diagnose_impl(en))
+        .await
+        .unwrap_or_default()
+}
+
 /// Run the full diagnostic sweep. Best-effort, never panics. `en` selects the
 /// language of the returned label/detail strings.
-#[tauri::command]
-pub fn network_diagnose(en: bool) -> Vec<NetCheck> {
+fn network_diagnose_impl(en: bool) -> Vec<NetCheck> {
     // One ipconfig call feeds both the adapter and gateway checks.
     let ipconfig = run_capture("ipconfig", &["/all"])
         .map(|o| decode_console(&o.stdout))
@@ -356,10 +364,18 @@ fn run_fix(id: &str, label: &str, ok_detail: &str, program: &str, args: &[&str],
     }
 }
 
+/// Async wrapper: each repair spawns a `netsh`/`ipconfig` child — keep it off the
+/// main thread.
+#[tauri::command]
+pub async fn network_repair(actions: Vec<String>, en: bool) -> Vec<NetCheck> {
+    tauri::async_runtime::spawn_blocking(move || network_repair_impl(actions, en))
+        .await
+        .unwrap_or_default()
+}
+
 /// Apply the requested repairs. Unknown ids are ignored. Each requested id
 /// yields exactly one NetCheck describing the outcome. `en` selects the language.
-#[tauri::command]
-pub fn network_repair(actions: Vec<String>, en: bool) -> Vec<NetCheck> {
+fn network_repair_impl(actions: Vec<String>, en: bool) -> Vec<NetCheck> {
     let mut results = Vec::with_capacity(actions.len());
 
     for action in actions {

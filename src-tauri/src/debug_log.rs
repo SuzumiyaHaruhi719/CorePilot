@@ -64,11 +64,19 @@ fn system_info(folder: &str) -> String {
     )
 }
 
+/// Async wrapper: writes the full session log to disk (unbounded I/O) — run it off
+/// the main thread so the export can't stall the IPC router.
+#[tauri::command]
+pub async fn export_debug_logs(app: tauri::AppHandle, folder_name: String) -> CoreResult<String> {
+    tauri::async_runtime::spawn_blocking(move || export_debug_logs_impl(app, folder_name))
+        .await
+        .map_err(|e| CoreError::Msg(format!("export task failed: {e}")))?
+}
+
 /// Dump the full session log to a fresh folder under the user's Downloads
 /// directory. `folder_name` is supplied by the frontend (already timestamped,
 /// e.g. `CorePilot_Debug_2026_06_08_143355`). Returns the created folder path.
-#[tauri::command]
-pub fn export_debug_logs(app: tauri::AppHandle, folder_name: String) -> CoreResult<String> {
+fn export_debug_logs_impl(app: tauri::AppHandle, folder_name: String) -> CoreResult<String> {
     // The frontend builds the name, but sanitize defensively before joining it to
     // a filesystem path.
     let safe: String = folder_name

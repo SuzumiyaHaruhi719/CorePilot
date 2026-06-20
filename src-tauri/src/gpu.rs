@@ -419,8 +419,18 @@ pub fn gpu_temp_probe() -> Vec<String> {
 /// successes are kept even if other controls fail. Returns `Err` only when
 /// *every* requested control failed (or NVML/device init failed). The app runs
 /// elevated, which is required for these mutations.
+/// Async wrapper: NVML writes can be slow under GPU-tool contention (Armoury Crate /
+/// AURA) — keep them off the main thread.
 #[tauri::command]
-pub fn gpu_oc_apply(settings: GpuOcSettings) -> Result<(), String> {
+pub async fn gpu_oc_apply(settings: GpuOcSettings) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || gpu_oc_apply_impl(settings))
+        .await
+        .map_err(|e| format!("gpu oc apply task failed: {e}"))?
+}
+
+/// Synchronous body of [`gpu_oc_apply`], also called directly by the CLI probe
+/// (which has no async runtime), mirroring `gpu_engine_loads_now`.
+pub fn gpu_oc_apply_impl(settings: GpuOcSettings) -> Result<(), String> {
     let handle = GpuHandle::init()?;
     // All mutations run inside `with_device`; the closure returns the collapsed
     // per-control result, and `?` propagates a device-acquisition failure.
@@ -520,10 +530,18 @@ pub fn gpu_oc_apply(settings: GpuOcSettings) -> Result<(), String> {
     })?
 }
 
+/// Async wrapper: NVML writes off the main thread (see gpu_oc_apply).
+#[tauri::command]
+pub async fn gpu_oc_reset() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(gpu_oc_reset_impl)
+        .await
+        .map_err(|e| format!("gpu oc reset task failed: {e}"))?
+}
+
 /// Reset all tuning controls to stock. Each reset is attempted independently;
 /// returns `Err` only when every attempted reset failed.
-#[tauri::command]
-pub fn gpu_oc_reset() -> Result<(), String> {
+/// Synchronous body of [`gpu_oc_reset`], also called directly by the CLI probe.
+pub fn gpu_oc_reset_impl() -> Result<(), String> {
     let handle = GpuHandle::init()?;
     handle.with_device(|device| {
 

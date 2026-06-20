@@ -26,11 +26,11 @@ fn main() {
         "gpu-apply" => {
             let raw = args.get(2).cloned().unwrap_or_default();
             match serde_json::from_str::<gpu::GpuOcSettings>(&raw) {
-                Ok(settings) => print_result(gpu::gpu_oc_apply(settings)),
+                Ok(settings) => print_result(gpu::gpu_oc_apply_impl(settings)),
                 Err(e) => fail(&format!("invalid settings JSON: {e}")),
             }
         }
-        "gpu-reset" => print_result(gpu::gpu_oc_reset()),
+        "gpu-reset" => print_result(gpu::gpu_oc_reset_impl()),
         "gpu-temp-probe" => print_json(&gpu::gpu_temp_probe()),
         "gpu-engines" => {
             // PDH rate counters need two samples; prime, wait, then read.
