@@ -180,6 +180,14 @@ export function Optimize() {
       } catch {
         failedSteps.push(tf("清理缓存", "clear cache"));
       }
+      // Measure the reclaimed memory NOW — immediately after the two RAM steps.
+      // The later clean_temp / power-plan steps take seconds, during which the
+      // trimmed working sets get re-faulted (and other apps allocate), so the
+      // `avail` delta nets back toward 0; measuring at the very end reported the
+      // real multi-GB reclaim as "0 B".
+      await wait(400);
+      const afterMem = await api.getMemoryDetail();
+      const freed = Math.max(0, afterMem.avail - before.avail);
       let files = 0;
       try {
         files = (await api.cleanTemp()).files;
@@ -197,10 +205,8 @@ export function Optimize() {
       } catch {
         failedSteps.push(tf("电源计划", "power plan"));
       }
-      await wait(500);
-      const after = await api.getMemoryDetail();
-      setMem(after);
-      const freed = Math.max(0, after.avail - before.avail);
+      // Refresh the displayed gauge with the final state (after all steps).
+      setMem(await api.getMemoryDetail());
       const note =
         failedSteps.length > 0
           ? tf(`（${failedSteps.join("、")}失败）`, ` (failed: ${failedSteps.join(", ")})`)
