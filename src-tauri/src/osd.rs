@@ -192,6 +192,15 @@ const OSD_MAX_DIM: f64 = 10_000.0;
 /// flung to an absurd virtual-desktop coordinate.
 const OSD_MAX_COORD: f64 = 100_000.0;
 
+/// Quantum (logical px) the overlay window size is rounded UP to before resizing.
+/// The metrics plate's width jitters by a few px as digits change (e.g. "60"→"119"
+/// FPS); without this, every such change triggers a `set_size`, and each WebView2
+/// surface resize leaks GDI objects (upstream tauri#11525) — the driver behind the
+/// ~3-hourly GDI-recycle whose window rebuild once hung the main thread. Snapping to
+/// a grid makes resizes rare. The extra ≤16px is transparent + click-through and the
+/// plate sits at the window's top-left, so it is invisible and never moves the plate.
+const OSD_SIZE_QUANTUM: f64 = 16.0;
+
 /// Resolve the upper bound for the overlay's width/height. Prefer the primary
 /// monitor's *physical* size converted to logical px (so the overlay can never
 /// exceed the actual screen) but never trust it above [`OSD_MAX_DIM`], and fall
@@ -235,8 +244,14 @@ pub fn osd_set_bounds(app: AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<
     if let Some(win) = app.get_webview_window(OSD_LABEL) {
         let max_dim = osd_max_dim(&win);
         // Clamp size into [MIN, max_dim] and position into the coordinate cap.
-        let cw = w.clamp(OSD_MIN_DIM, max_dim);
-        let ch = h.clamp(OSD_MIN_DIM, max_dim);
+        // Round the requested size UP to the size quantum BEFORE clamping, so small
+        // metric-driven width/height jitter doesn't trigger a WebView2 surface resize
+        // every frame (the GDI-leak driver). Rounding up keeps the plate fully
+        // covered; the extra transparent margin is invisible + click-through.
+        let qw = (w / OSD_SIZE_QUANTUM).ceil() * OSD_SIZE_QUANTUM;
+        let qh = (h / OSD_SIZE_QUANTUM).ceil() * OSD_SIZE_QUANTUM;
+        let cw = qw.clamp(OSD_MIN_DIM, max_dim);
+        let ch = qh.clamp(OSD_MIN_DIM, max_dim);
         let cx = x.clamp(-OSD_MAX_COORD, OSD_MAX_COORD);
         let cy = y.clamp(-OSD_MAX_COORD, OSD_MAX_COORD);
 
