@@ -25,7 +25,12 @@ export function useProcesses(): UseProcessesResult {
   useEffect(() => {
     let alive = true;
     let gotData = false;
+    let inFlight = false;
     const tick = async () => {
+      // Backpressure: list_processes can take a while under load; never queue a
+      // second call while one is outstanding (that pile-up froze the backend).
+      if (inFlight) return;
+      inFlight = true;
       try {
         const data = await api.listProcesses();
         if (alive) {
@@ -41,6 +46,8 @@ export function useProcesses(): UseProcessesResult {
           setError(true);
           setLoading(false);
         }
+      } finally {
+        inFlight = false;
       }
     };
     void tick();

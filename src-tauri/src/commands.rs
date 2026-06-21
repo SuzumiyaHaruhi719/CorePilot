@@ -9,7 +9,10 @@ use crate::process::{self, ProcInfo};
 use crate::state::AppState;
 use crate::sysmon::{self, Metrics};
 use crate::topology::CpuTopology;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use sysinfo::System;
 use tauri::{Manager, State};
 
@@ -126,16 +129,47 @@ pub async fn get_overview(app: tauri::AppHandle) -> Overview {
 /// seconds on a loaded box (~800 processes / ~1400 GPU-engine instances). The
 /// affinity enforcer polls this every 8 s and the process page every poll tick,
 /// so as a sync command it froze the window into "未响应" on that exact cadence.
+/// Single-flight guard + last-snapshot cache for [`list_processes`]. A refresh
+/// holds `state.sys` across a multi-second `refresh_processes` plus a
+/// `CreateToolhelp32Snapshot` thread scan, and the frontend pollers fire on bare
+/// `setInterval` (no in-flight guard). Without this, a slow refresh let calls pile
+/// up on `state.sys` — each a blocking-pool thread — and the growing thread count
+/// made the Toolhelp scan slower still: a runaway congestion collapse that froze
+/// every reading (diagnosed 2026-06-22, 301 threads stuck on the lock). Capping
+/// concurrent refreshes to ONE breaks the loop; concurrent callers get the last
+/// snapshot instantly instead of queuing.
+static PROC_REFRESHING: AtomicBool = AtomicBool::new(false);
+static PROC_CACHE: Lazy<Mutex<Vec<ProcInfo>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
 #[tauri::command]
 pub async fn list_processes(app: tauri::AppHandle) -> Vec<ProcInfo> {
-    run_blocking_default("list_processes", move || {
+    // If a refresh is already in flight, return the last snapshot rather than
+    // queuing another (which would block on `state.sys` and grow the pool).
+    if PROC_REFRESHING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return PROC_CACHE.lock().clone();
+    }
+    // Clear the in-flight flag even if the body panics or the future is dropped.
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            PROC_REFRESHING.store(false, Ordering::Release);
+        }
+    }
+    let _guard = Guard;
+
+    let result = run_blocking_default("list_processes", move || {
         let state = app.state::<AppState>();
         let logical = state.topo.logical_count.max(1) as f32;
         let threads = process::thread_counts().unwrap_or_default();
         let mut sys = state.sys.lock();
         process::list(&mut sys, &threads, logical)
     })
-    .await
+    .await;
+    *PROC_CACHE.lock() = result.clone();
+    result
 }
 
 /// Async + blocking-pool: the refresh itself is cheap, but it shares the `sys`

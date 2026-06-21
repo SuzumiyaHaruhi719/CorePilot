@@ -19,37 +19,47 @@ export function useAffinityEnforcer(fullMask: bigint) {
       return;
     }
     let alive = true;
+    let inFlight = false;
 
     const enforce = async () => {
-      const groups = useGroups.getState().groups;
-      if (!groups.some((g) => g.patterns.length > 0)) return; // nothing to enforce
-      let procs;
+      // Backpressure: this also polls list_processes (every 8 s, plus on mount);
+      // never overlap a run with one already outstanding, so a slow backend can't
+      // pile up concurrent list_processes calls (that pile-up froze the backend).
+      if (inFlight) return;
+      inFlight = true;
       try {
-        procs = await api.listProcesses();
-      } catch {
-        return;
-      }
-      if (!alive) return;
-
-      const live = new Set(procs.map((p) => p.pid));
-      for (const pid of [...applied.current]) {
-        if (!live.has(pid)) applied.current.delete(pid);
-      }
-
-      for (const p of procs) {
-        if (applied.current.has(p.pid)) continue;
-        const group = groups.find((g) => g.patterns.includes(p.name.toLowerCase()));
-        if (!group) continue;
-        const mask = group.mask === 0n ? fullMask : group.mask;
+        const groups = useGroups.getState().groups;
+        if (!groups.some((g) => g.patterns.length > 0)) return; // nothing to enforce
+        let procs;
         try {
-          await api.setAffinity(p.pid, mask);
-          if (group.priority !== 0x20) {
-            await api.setPriority(p.pid, group.priority).catch(() => undefined);
-          }
-          applied.current.add(p.pid);
+          procs = await api.listProcesses();
         } catch {
-          /* protected process — skip */
+          return;
         }
+        if (!alive) return;
+
+        const live = new Set(procs.map((p) => p.pid));
+        for (const pid of [...applied.current]) {
+          if (!live.has(pid)) applied.current.delete(pid);
+        }
+
+        for (const p of procs) {
+          if (applied.current.has(p.pid)) continue;
+          const group = groups.find((g) => g.patterns.includes(p.name.toLowerCase()));
+          if (!group) continue;
+          const mask = group.mask === 0n ? fullMask : group.mask;
+          try {
+            await api.setAffinity(p.pid, mask);
+            if (group.priority !== 0x20) {
+              await api.setPriority(p.pid, group.priority).catch(() => undefined);
+            }
+            applied.current.add(p.pid);
+          } catch {
+            /* protected process — skip */
+          }
+        }
+      } finally {
+        inFlight = false;
       }
     };
 
