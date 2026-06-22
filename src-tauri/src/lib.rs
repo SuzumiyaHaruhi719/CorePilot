@@ -19,6 +19,7 @@ pub mod overlay_inject;
 pub mod perf_recorder;
 pub mod process;
 pub mod process_icon;
+pub mod sampler;
 pub mod sensors;
 pub mod smu;
 pub mod serde_u64;
@@ -163,6 +164,11 @@ pub fn run() {
             // gpu_engine_loads). It self-starts on first read too, but start it
             // eagerly so the first UI poll already has data.
             crate::telemetry::start();
+
+            // Start the single-owner system sampler (process list / metrics /
+            // sensors snapshots). The ONLY caller that refreshes the System or
+            // samples sensors; commands read its snapshots. See crate::sampler.
+            crate::sampler::start(app.handle().clone());
 
             // A tray failure must never crash startup; log and continue. The
             // close handler below only hides to the tray when the tray exists,
