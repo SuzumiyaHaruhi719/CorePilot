@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from "react";
-import { api, type Metrics, type Sensors } from "../lib/ipc";
+import { api, withTimeout, type Metrics, type Sensors } from "../lib/ipc";
 import { useSettings } from "../store/settings";
 
 /**
@@ -27,7 +27,7 @@ function makePoller<T>(fetcher: () => Promise<T>) {
     if (inFlight) return;
     inFlight = true;
     try {
-      value = await fetcher();
+      value = await withTimeout(fetcher());
       emit();
     } catch {
       /* backend not ready / transient — keep last value */

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { api } from "../lib/ipc";
+import { api, withTimeout } from "../lib/ipc";
 import { useGroups } from "../store/groups";
 import { useUi } from "../store/ui";
 
@@ -32,7 +32,7 @@ export function useAffinityEnforcer(fullMask: bigint) {
         if (!groups.some((g) => g.patterns.length > 0)) return; // nothing to enforce
         let procs;
         try {
-          procs = await api.listProcesses();
+          procs = await withTimeout(api.listProcesses());
         } catch {
           return;
         }

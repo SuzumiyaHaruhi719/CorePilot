@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api } from "../lib/ipc";
+import { api, withTimeout } from "../lib/ipc";
 import { fetchOsdData, type OsdData } from "../lib/osd";
 import {
   resolveOsd,
@@ -175,7 +175,7 @@ export function OsdOverlay() {
         setMon((p) => (p === null ? p : null));
         return;
       }
-      const info = await api.foregroundInfo().catch(() => null);
+      const info = await withTimeout(api.foregroundInfo()).catch(() => null);
       if (!alive) return;
       const exe = info?.exe ?? null;
       const isGame = info?.isGame ?? false;
@@ -211,9 +211,11 @@ export function OsdOverlay() {
         const metrics = isGame
           ? freshCfg.metrics
           : freshCfg.metrics.filter((k) => !k.startsWith("fps"));
-        const d = await fetchOsdData(
-          metrics.some((k) => k.startsWith("gpu.")),
-          metrics.some((k) => k.startsWith("fps")),
+        const d = await withTimeout(
+          fetchOsdData(
+            metrics.some((k) => k.startsWith("gpu.")),
+            metrics.some((k) => k.startsWith("fps")),
+          ),
         );
         if (alive) setData(d);
       }

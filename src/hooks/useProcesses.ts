@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type ProcInfo } from "../lib/ipc";
+import { api, withTimeout, type ProcInfo } from "../lib/ipc";
 import { useSettings } from "../store/settings";
 
 export interface UseProcessesResult {
@@ -32,7 +32,7 @@ export function useProcesses(): UseProcessesResult {
       if (inFlight) return;
       inFlight = true;
       try {
-        const data = await api.listProcesses();
+        const data = await withTimeout(api.listProcesses());
         if (alive) {
           gotData = true;
           setProcesses(data);

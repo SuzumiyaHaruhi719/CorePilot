@@ -1,6 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { PerfSample } from "./perf";
 
+/** Reject a promise if it hasn't settled within `ms`, so a hung backend invoke
+ *  can never permanently latch a poller's in-flight guard (which would make a
+ *  reading disappear forever). Clears its timer when the wrapped promise settles. */
+export function withTimeout<T>(p: Promise<T>, ms = 6000): Promise<T> {
+  let t: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<T>((_, reject) => {
+    t = setTimeout(() => reject(new Error("invoke timeout")), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(t)) as Promise<T>;
+}
+
 export interface Overview {
   cpuName: string;
   physicalCores: number;
