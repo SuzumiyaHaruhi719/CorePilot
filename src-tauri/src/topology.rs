@@ -14,8 +14,8 @@
 
 use serde::Serialize;
 use windows::Win32::System::SystemInformation::{
-    GetLogicalProcessorInformationEx, GROUP_AFFINITY, RelationAll, RelationCache,
-    RelationProcessorCore, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
+    GetLogicalProcessorInformationEx, RelationAll, RelationCache, RelationProcessorCore,
+    GROUP_AFFINITY, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -237,8 +237,8 @@ unsafe fn raw_detect() -> Option<CpuTopology> {
 
     // Per-logical-CPU mapping.
     let mut logical: Vec<LogicalCpu> = Vec::new();
-    let total_bits = ccds.iter().fold(0u64, |a, c| a | c.mask)
-        | cores.iter().fold(0u64, |a, c| a | c.mask);
+    let total_bits =
+        ccds.iter().fold(0u64, |a, c| a | c.mask) | cores.iter().fold(0u64, |a, c| a | c.mask);
     for id in bits(total_bits) {
         let core_idx = cores
             .iter()

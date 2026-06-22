@@ -217,7 +217,12 @@ fn check_dns(en: bool) -> NetCheck {
 
     let label = tr(en, "DNS resolution", "DNS 解析");
     if resolved {
-        NetCheck::new("dns", label, true, tr(en, "Domain resolution OK", "域名解析正常"))
+        NetCheck::new(
+            "dns",
+            label,
+            true,
+            tr(en, "Domain resolution OK", "域名解析正常"),
+        )
     } else {
         NetCheck::new(
             "dns",
@@ -238,7 +243,12 @@ fn check_internet(en: bool) -> NetCheck {
     let addr: SocketAddr = "223.5.5.5:443".parse().expect("static addr");
     let label = tr(en, "Internet connection", "互联网连接");
     match TcpStream::connect_timeout(&addr, Duration::from_millis(1000)) {
-        Ok(_) => NetCheck::new("internet", label, true, tr(en, "Connected to the internet", "已成功连接到互联网")),
+        Ok(_) => NetCheck::new(
+            "internet",
+            label,
+            true,
+            tr(en, "Connected to the internet", "已成功连接到互联网"),
+        ),
         Err(_) => NetCheck::new(
             "internet",
             label,
@@ -285,7 +295,12 @@ fn check_proxy(en: bool) -> NetCheck {
         .unwrap_or(false);
 
     if !enabled {
-        return NetCheck::new("proxy", label, true, tr(en, "No system proxy (normal)", "未启用系统代理（正常）"));
+        return NetCheck::new(
+            "proxy",
+            label,
+            true,
+            tr(en, "No system proxy (normal)", "未启用系统代理（正常）"),
+        );
     }
 
     // A proxy is on — surface the server string so the user can judge it.
@@ -305,14 +320,22 @@ fn check_proxy(en: bool) -> NetCheck {
             .and_then(|l| l.split("REG_SZ").nth(1).map(|s| s.trim().to_string()))
     })
     .filter(|s| !s.is_empty())
-    .unwrap_or_else(|| if en { "unknown".to_string() } else { "未知".to_string() });
+    .unwrap_or_else(|| {
+        if en {
+            "unknown".to_string()
+        } else {
+            "未知".to_string()
+        }
+    });
 
     NetCheck::new(
         "proxy",
         label,
         false,
         if en {
-            format!("System proxy enabled ({server}); if you can't get online, try resetting the proxy")
+            format!(
+                "System proxy enabled ({server}); if you can't get online, try resetting the proxy"
+            )
         } else {
             format!("已启用系统代理（{server}），若无法上网可尝试重置代理")
         },
@@ -347,7 +370,14 @@ fn network_diagnose_impl(en: bool) -> Vec<NetCheck> {
 
 /// Run a repair command silently and map the result to a NetCheck. `ok`
 /// reflects the process exit status; `ok_detail` is the success message.
-fn run_fix(id: &str, label: &str, ok_detail: &str, program: &str, args: &[&str], en: bool) -> NetCheck {
+fn run_fix(
+    id: &str,
+    label: &str,
+    ok_detail: &str,
+    program: &str,
+    args: &[&str],
+    en: bool,
+) -> NetCheck {
     match run_capture(program, args) {
         Some(out) if out.status.success() => NetCheck::new(id, label, true, ok_detail),
         Some(_) => NetCheck::new(
@@ -360,7 +390,12 @@ fn run_fix(id: &str, label: &str, ok_detail: &str, program: &str, args: &[&str],
                 "命令执行失败，请确认以管理员身份运行",
             ),
         ),
-        None => NetCheck::new(id, label, false, tr(en, "Couldn't start the repair command", "无法启动修复命令")),
+        None => NetCheck::new(
+            id,
+            label,
+            false,
+            tr(en, "Couldn't start the repair command", "无法启动修复命令"),
+        ),
     }
 }
 
@@ -395,7 +430,11 @@ fn network_repair_impl(actions: Vec<String>, en: bool) -> Vec<NetCheck> {
                 run_fix(
                     "renewDhcp",
                     tr(en, "Renew IP", "重新获取 IP"),
-                    tr(en, "Renewed IP address from DHCP", "已重新向 DHCP 获取 IP 地址"),
+                    tr(
+                        en,
+                        "Renewed IP address from DHCP",
+                        "已重新向 DHCP 获取 IP 地址",
+                    ),
                     "ipconfig",
                     &["/renew"],
                     en,
@@ -404,7 +443,11 @@ fn network_repair_impl(actions: Vec<String>, en: bool) -> Vec<NetCheck> {
             "resetWinsock" => run_fix(
                 "resetWinsock",
                 tr(en, "Reset Winsock", "重置 Winsock"),
-                tr(en, "Winsock catalog reset — takes effect after a reboot", "Winsock 目录已重置，需重启后生效"),
+                tr(
+                    en,
+                    "Winsock catalog reset — takes effect after a reboot",
+                    "Winsock 目录已重置，需重启后生效",
+                ),
                 "netsh",
                 &["winsock", "reset"],
                 en,
@@ -412,7 +455,11 @@ fn network_repair_impl(actions: Vec<String>, en: bool) -> Vec<NetCheck> {
             "resetTcpip" => run_fix(
                 "resetTcpip",
                 tr(en, "Reset TCP/IP", "重置 TCP/IP"),
-                tr(en, "TCP/IP stack reset — takes effect after a reboot", "TCP/IP 协议栈已重置，需重启后生效"),
+                tr(
+                    en,
+                    "TCP/IP stack reset — takes effect after a reboot",
+                    "TCP/IP 协议栈已重置，需重启后生效",
+                ),
                 "netsh",
                 &["int", "ip", "reset"],
                 en,
@@ -420,7 +467,11 @@ fn network_repair_impl(actions: Vec<String>, en: bool) -> Vec<NetCheck> {
             "resetProxy" => run_fix(
                 "resetProxy",
                 tr(en, "Reset proxy", "重置代理"),
-                tr(en, "WinHTTP proxy reset to direct", "WinHTTP 代理已重置为直连"),
+                tr(
+                    en,
+                    "WinHTTP proxy reset to direct",
+                    "WinHTTP 代理已重置为直连",
+                ),
                 "netsh",
                 &["winhttp", "reset", "proxy"],
                 en,

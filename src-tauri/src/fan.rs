@@ -249,24 +249,32 @@ pub fn ingest_line(line: &str) {
         }
     };
     let text = |v: &serde_json::Value, key: &str| -> String {
-        v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+        v.get(key)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
     };
 
     let mut raw = Raw::default();
 
     if let Some(arr) = json.get("fans").and_then(|v| v.as_array()) {
         for f in arr {
-            raw.fans.push((text(f, "id"), text(f, "name"), num(f, "rpm")));
+            raw.fans
+                .push((text(f, "id"), text(f, "name"), num(f, "rpm")));
         }
     }
     if let Some(arr) = json.get("temps").and_then(|v| v.as_array()) {
         for t in arr {
-            raw.temps.push((text(t, "id"), text(t, "name"), num(t, "c")));
+            raw.temps
+                .push((text(t, "id"), text(t, "name"), num(t, "c")));
         }
     }
     if let Some(arr) = json.get("controls").and_then(|v| v.as_array()) {
         for c in arr {
-            let controllable = c.get("controllable").and_then(|x| x.as_bool()).unwrap_or(false);
+            let controllable = c
+                .get("controllable")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
             raw.controls.push((
                 text(c, "id"),
                 text(c, "name"),
@@ -278,9 +286,8 @@ pub fn ingest_line(line: &str) {
     }
 
     // Only treat as a fan-bearing line if any of the arrays were present.
-    raw.got_any = json.get("fans").is_some()
-        || json.get("controls").is_some()
-        || json.get("temps").is_some();
+    raw.got_any =
+        json.get("fans").is_some() || json.get("controls").is_some() || json.get("temps").is_some();
 
     if raw.got_any {
         *SNAP.lock() = raw;
@@ -303,9 +310,8 @@ fn is_valid_control_id(id: &str) -> bool {
     if id.is_empty() || id.len() > MAX_CONTROL_ID_LEN {
         return false;
     }
-    id.chars().all(|c| {
-        matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '/' | '_' | '.' | ':' | '-')
-    })
+    id.chars()
+        .all(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '/' | '_' | '.' | ':' | '-'))
 }
 
 /// Send a raw line to the sidecar stdin (used by the SMU tuning bridge for
@@ -359,7 +365,11 @@ pub(crate) fn interp(curve: &[CurvePoint], temp: f32) -> f32 {
         return 0.0;
     }
     let mut pts: Vec<&CurvePoint> = curve.iter().collect();
-    pts.sort_by(|a, b| a.temp_c.partial_cmp(&b.temp_c).unwrap_or(std::cmp::Ordering::Equal));
+    pts.sort_by(|a, b| {
+        a.temp_c
+            .partial_cmp(&b.temp_c)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     if temp <= pts[0].temp_c {
         return pts[0].duty;
@@ -459,7 +469,10 @@ fn apply_once() {
             "manual" => {
                 let target = c.manual_pct.clamp(floor, 100.0);
                 send_set(&c.control_id, target);
-                last.insert(c.control_id.clone(), ("manual".to_string(), target.round() as i32));
+                last.insert(
+                    c.control_id.clone(),
+                    ("manual".to_string(), target.round() as i32),
+                );
                 // Leaving curve mode: drop the smoothed state so a later return to
                 // curve re-seeds from the fan's live position, not a stale value.
                 curve_duty.remove(&c.control_id);
@@ -476,8 +489,10 @@ fn apply_once() {
                     .as_ref()
                     .and_then(|src| temps.get(src).copied());
                 let Some(t) = reading else {
-                    let already_auto =
-                        last.get(&c.control_id).map(|(m, _)| m == "auto").unwrap_or(false);
+                    let already_auto = last
+                        .get(&c.control_id)
+                        .map(|(m, _)| m == "auto")
+                        .unwrap_or(false);
                     if !already_auto {
                         send_auto(&c.control_id);
                         last.insert(c.control_id.clone(), ("auto".to_string(), 0));
@@ -496,7 +511,10 @@ fn apply_once() {
                 // duty on first entry (or after a mode change away from curve)
                 // from the last known curve duty, else straight to the target so
                 // the very first apply isn't a forced ramp from 0.
-                let prev_curve = last.get(&c.control_id).map(|(m, _)| m == "curve").unwrap_or(false);
+                let prev_curve = last
+                    .get(&c.control_id)
+                    .map(|(m, _)| m == "curve")
+                    .unwrap_or(false);
                 let current = match curve_duty.get(&c.control_id) {
                     Some(&v) if prev_curve => v,
                     _ => target,
@@ -524,7 +542,10 @@ fn apply_once() {
             }
             _ => {
                 // auto: hand back to BIOS, but only once per transition.
-                let already_auto = last.get(&c.control_id).map(|(m, _)| m == "auto").unwrap_or(false);
+                let already_auto = last
+                    .get(&c.control_id)
+                    .map(|(m, _)| m == "auto")
+                    .unwrap_or(false);
                 curve_duty.remove(&c.control_id);
                 if !already_auto {
                     send_auto(&c.control_id);
@@ -805,10 +826,12 @@ struct CalibProgress {
 pub(crate) fn paired_rpm(control_id: &str) -> Option<f32> {
     let raw = SNAP.lock();
     let (cprefix, cidx) = split_id(control_id, "/control/")?;
-    raw.fans.iter().find_map(|(fid, _, frpm)| match split_id(fid, "/fan/") {
-        Some((fprefix, fidx)) if fprefix == cprefix && fidx == cidx => *frpm,
-        _ => None,
-    })
+    raw.fans
+        .iter()
+        .find_map(|(fid, _, frpm)| match split_id(fid, "/fan/") {
+            Some((fprefix, fidx)) if fprefix == cprefix && fidx == cidx => *frpm,
+            _ => None,
+        })
 }
 
 /// Human name of a control id from the latest snapshot (falls back to the id).
@@ -822,8 +845,9 @@ fn control_name(control_id: &str) -> String {
 }
 
 /// Duty steps for the sweep — denser at the low end, where start/stop lives.
-const CALIB_STEPS: [f32; 13] =
-    [0.0, 8.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0];
+const CALIB_STEPS: [f32; 13] = [
+    0.0, 8.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0,
+];
 /// Settle time per step before reading RPM (≈2 sidecar samples at ~1 Hz).
 const CALIB_SETTLE_MS: u64 = 2500;
 /// RPM at or below this is treated as "not spinning".
@@ -857,7 +881,10 @@ fn calibrate_one(
             },
         );
         if let Some(r) = rpm {
-            points.push(CalibPoint { duty, rpm: r.max(0.0) });
+            points.push(CalibPoint {
+                duty,
+                rpm: r.max(0.0),
+            });
         }
     }
     send_auto(control_id);
@@ -932,7 +959,8 @@ pub async fn fan_calibrate(
         ));
     }
 
-    let result = tauri::async_runtime::spawn_blocking(move || calibrate_headers(&app, &targets)).await;
+    let result =
+        tauri::async_runtime::spawn_blocking(move || calibrate_headers(&app, &targets)).await;
 
     CALIBRATING.store(false, Ordering::SeqCst);
     // Force the engine to re-apply the user's real config now (LAST is stale after
@@ -973,12 +1001,17 @@ mod tests {
     }
 
     fn pts(v: &[(f32, f32)]) -> Vec<CurvePoint> {
-        v.iter().map(|&(temp_c, duty)| CurvePoint { temp_c, duty }).collect()
+        v.iter()
+            .map(|&(temp_c, duty)| CurvePoint { temp_c, duty })
+            .collect()
     }
 
     #[test]
     fn combined_target_takes_max_of_both_curves() {
-        let c = cfg(pts(&[(30.0, 20.0), (80.0, 100.0)]), pts(&[(30.0, 30.0), (80.0, 90.0)]));
+        let c = cfg(
+            pts(&[(30.0, 20.0), (80.0, 100.0)]),
+            pts(&[(30.0, 30.0), (80.0, 90.0)]),
+        );
         // Primary says 20% at 30°C; secondary at 60°C → 66% — secondary wins.
         assert_eq!(combined_target(&c, 30.0, Some(60.0)).round(), 66.0);
         // Secondary reading missing → primary alone.
@@ -1000,7 +1033,10 @@ mod tests {
             pts(&[(30.0, 20.0)]),
             pts(&[(f32::NAN, 250.0), (200.0, -5.0)]),
         );
-        c.curve2.extend((0..40).map(|i| CurvePoint { temp_c: i as f32, duty: 50.0 }));
+        c.curve2.extend((0..40).map(|i| CurvePoint {
+            temp_c: i as f32,
+            duty: 50.0,
+        }));
         let s = sanitize_config(&c).expect("curve mode is valid");
         assert!(s.curve2.len() <= MAX_CURVE_POINTS);
         for p in &s.curve2 {

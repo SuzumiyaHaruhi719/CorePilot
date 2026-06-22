@@ -34,14 +34,23 @@ pub struct SampleGate {
 
 impl SampleGate {
     pub fn new(threshold: f32, streak_s: f32, spacing_s: f32) -> Self {
-        Self { threshold, streak_s, spacing_s, streak_started: None, last_fired: None }
+        Self {
+            threshold,
+            streak_s,
+            spacing_s,
+            streak_started: None,
+            last_fired: None,
+        }
     }
     /// Feed one (t_s, load%) observation; true = take a sample now.
     pub fn feed(&mut self, t_s: f32, load: Option<f32>) -> bool {
         match load {
             Some(l) if l >= self.threshold => {
                 let started = *self.streak_started.get_or_insert(t_s);
-                let spaced = self.last_fired.map(|f| t_s - f >= self.spacing_s).unwrap_or(true);
+                let spaced = self
+                    .last_fired
+                    .map(|f| t_s - f >= self.spacing_s)
+                    .unwrap_or(true);
                 if t_s - started >= self.streak_s && spaced {
                     self.last_fired = Some(t_s);
                     self.streak_started = Some(t_s); // restart the streak
@@ -145,7 +154,11 @@ pub fn tick() {
                 }
             }
         }
-        if n == 0 { 0.0 } else { sum / n as f32 }
+        if n == 0 {
+            0.0
+        } else {
+            sum / n as f32
+        }
     };
 
     // CPU axis sample.
@@ -169,7 +182,10 @@ pub fn tick() {
     // GPU axis sample (gaming: high GPU power, modest CPU load — spec §7).
     if let (Some(mg), Some(pdg)) = (st.cfg.model_gpu.as_ref(), st.cfg.p_design_gpu) {
         let gpu_load_pct = gpu_power.map(|p| (p / pdg) * 100.0);
-        if st.gpu_gate.feed(now, gpu_load_pct.map(|p| if p >= 70.0 { 95.0 } else { 0.0 })) {
+        if st.gpu_gate.feed(
+            now,
+            gpu_load_pct.map(|p| if p >= 70.0 { 95.0 } else { 0.0 }),
+        ) {
             if let (Some(t), Some(p)) = (gpu_temp, gpu_power) {
                 st.gpu_ticks += 1;
                 if let Steady::Steady(v) = st.gpu_steady.push(now, t) {
@@ -242,7 +258,12 @@ fn try_correct(st: &mut PassiveState, now: f32) {
             let median = median_of(&residuals);
             let _ = st.app.emit(
                 "fan-autotune-passive",
-                PassiveAdjustment { axis: "cpu".into(), delta_c: delta, median_residual_c: median, curves: resp },
+                PassiveAdjustment {
+                    axis: "cpu".into(),
+                    delta_c: delta,
+                    median_residual_c: median,
+                    curves: resp,
+                },
             );
         }
     }
@@ -257,7 +278,12 @@ fn try_correct(st: &mut PassiveState, now: f32) {
                 let median = median_of(&gres);
                 let _ = st.app.emit(
                     "fan-autotune-passive",
-                    PassiveAdjustment { axis: "gpu".into(), delta_c: delta, median_residual_c: median, curves: resp },
+                    PassiveAdjustment {
+                        axis: "gpu".into(),
+                        delta_c: delta,
+                        median_residual_c: median,
+                        curves: resp,
+                    },
                 );
             }
         }
@@ -301,7 +327,13 @@ fn resynth_from_cfg(cfg: &PassiveConfig) -> Result<Vec<model::TunedFanCurve>, St
         )),
         _ => None,
     };
-    Ok(super::build_curves(&fans, &cfg.calibrations, &cpu, gpu.as_ref(), 30.0))
+    Ok(super::build_curves(
+        &fans,
+        &cfg.calibrations,
+        &cpu,
+        gpu.as_ref(),
+        30.0,
+    ))
 }
 
 // --- commands -----------------------------------------------------------------------

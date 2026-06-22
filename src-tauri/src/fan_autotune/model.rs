@@ -39,7 +39,9 @@ pub struct ThermalModel {
 impl ThermalModel {
     pub fn predict(&self, p: f32, w_cpu: f32, w_case: f32) -> f32 {
         self.t_off
-            + p * (self.r_inf + self.k_c * phi(w_cpu, self.alpha) + self.k_x * phi(w_case, self.alpha))
+            + p * (self.r_inf
+                + self.k_c * phi(w_cpu, self.alpha)
+                + self.k_x * phi(w_case, self.alpha))
     }
     /// Effective thermal resistance at a fixed airflow point.
     pub fn r_at(&self, w_cpu: f32, w_case: f32) -> f32 {
@@ -273,7 +275,10 @@ pub fn fit_gpu_model(samples: &[GpuFitSample]) -> Option<GpuModel> {
         rmse: 0.0,
         conservative_shift: 0.0,
     };
-    let residuals: Vec<f32> = samples.iter().map(|s| s.t - g.predict(s.p, s.w_case)).collect();
+    let residuals: Vec<f32> = samples
+        .iter()
+        .map(|s| s.t - g.predict(s.p, s.w_case))
+        .collect();
     let rss: f64 = residuals.iter().map(|&e| (e as f64) * (e as f64)).sum();
     g.rmse = ((rss / samples.len() as f64).sqrt()) as f32;
     let shift = residuals.iter().copied().fold(0.0_f32, f32::max).max(0.0);
@@ -470,14 +475,22 @@ pub fn synthesize_cpu(inp: &SynthInput, band_c: f32) -> CpuSynth {
     let effective_target = effective_target.min(MAX_EFFECTIVE_TARGET_C);
 
     // 2. Full-load anchor (quietest combo pinning effective_target at P_design).
-    let w_req = solve_iso(m, inp.p_design, effective_target, floor, ceil, inp.g, inp.has_case)
-        .unwrap_or((ceil, ceil));
+    let w_req = solve_iso(
+        m,
+        inp.p_design,
+        effective_target,
+        floor,
+        ceil,
+        inp.g,
+        inp.has_case,
+    )
+    .unwrap_or((ceil, ceil));
 
     // 2b. Degenerate-fit honesty (field lesson, 2026-06-10): when the measured
     // grid is nearly flat the fit truthfully reports tiny fan authority — say
     // so, because the resulting near-flat curve looks "lazy" without context.
-    let fan_authority = m.predict(inp.p_design, floor, wx_of(floor))
-        - m.predict(inp.p_design, 1.0, wx_of(1.0));
+    let fan_authority =
+        m.predict(inp.p_design, floor, wx_of(floor)) - m.predict(inp.p_design, 1.0, wx_of(1.0));
     if warning.is_none() && fan_authority < 3.0 {
         warning = Some(TuneWarning {
             kind: "fansBarelyMatter".into(),
@@ -498,13 +511,25 @@ pub fn synthesize_cpu(inp: &SynthInput, band_c: f32) -> CpuSynth {
     let t_low = effective_target - band_c;
     let floor_holds = m.predict(inp.p_design, floor, wx_of(floor)) <= effective_target;
 
-    let mut points: Vec<WPoint> = vec![WPoint { temp_c: 20.0, w_cpu: floor, w_case: floor }];
-    points.push(WPoint { temp_c: t_low, w_cpu: floor, w_case: floor });
+    let mut points: Vec<WPoint> = vec![WPoint {
+        temp_c: 20.0,
+        w_cpu: floor,
+        w_case: floor,
+    }];
+    points.push(WPoint {
+        temp_c: t_low,
+        w_cpu: floor,
+        w_case: floor,
+    });
 
     if floor_holds {
         // Flat curve: hold the (≈floor) full-load solution at the target so
         // interpolation stays at the floor across the whole band.
-        points.push(WPoint { temp_c: effective_target, w_cpu: w_req.0, w_case: w_req.1 });
+        points.push(WPoint {
+            temp_c: effective_target,
+            w_cpu: w_req.0,
+            w_case: w_req.1,
+        });
     } else {
         let r_floor = m.r_at(floor, wx_of(floor));
         let p_knee = ((t_low - m.t_off) / r_floor).max(0.0).min(inp.p_design);
@@ -562,7 +587,12 @@ pub fn synthesize_cpu(inp: &SynthInput, band_c: f32) -> CpuSynth {
         points[i].w_case = points[i].w_case.max(points[i - 1].w_case);
     }
 
-    CpuSynth { effective_target, points, warning, band_c }
+    CpuSynth {
+        effective_target,
+        points,
+        warning,
+        band_c,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -575,7 +605,13 @@ pub struct GpuSynth {
 
 /// Spec §5.7: 1-D assist curve for the case group keyed to GPU temperature.
 /// Honest framing: the GPU's own cooler dominates; case airflow assists.
-pub fn synthesize_gpu(m: &GpuModel, p_design_g: f32, target_g: f32, floor: f32, ceil: f32) -> GpuSynth {
+pub fn synthesize_gpu(
+    m: &GpuModel,
+    p_design_g: f32,
+    target_g: f32,
+    floor: f32,
+    ceil: f32,
+) -> GpuSynth {
     let t_at_ceil = m.predict(p_design_g, ceil);
     let mut warning = None;
     let effective = if t_at_ceil <= target_g {
@@ -622,7 +658,11 @@ pub fn synthesize_gpu(m: &GpuModel, p_design_g: f32, target_g: f32, floor: f32, 
         }
         let w_flat = w_req.min(floor.max(w_req));
         let points = vec![(20.0, floor), (effective + 6.0, w_flat.max(floor))];
-        return GpuSynth { effective_target_g: effective, points, warning };
+        return GpuSynth {
+            effective_target_g: effective,
+            points,
+            warning,
+        };
     }
     let mut points = vec![
         (20.0, floor),
@@ -635,7 +675,11 @@ pub fn synthesize_gpu(m: &GpuModel, p_design_g: f32, target_g: f32, floor: f32, 
     for i in 1..points.len() {
         points[i].1 = points[i].1.max(points[i - 1].1);
     }
-    GpuSynth { effective_target_g: effective, points, warning }
+    GpuSynth {
+        effective_target_g: effective,
+        points,
+        warning,
+    }
 }
 
 // --- per-fan duty mapping (spec §5.6/§5.7) ------------------------------------------
@@ -653,7 +697,12 @@ pub enum Group {
 /// Port of the store's `dutyForRpmFraction` (fanProfiles.ts): the PWM duty that
 /// achieves `frac` of `max_rpm`, by linear interpolation through the measured
 /// (duty → RPM) samples; clamped to [max(MIN_SAFE_DUTY, min_start_duty), 100].
-pub fn duty_for_rpm_fraction(points: &[CalibPoint], frac: f32, min_start_duty: f32, max_rpm: f32) -> f32 {
+pub fn duty_for_rpm_fraction(
+    points: &[CalibPoint],
+    frac: f32,
+    min_start_duty: f32,
+    max_rpm: f32,
+) -> f32 {
     let f = frac.clamp(0.0, 1.0);
     let lo = MIN_SAFE_DUTY.max(min_start_duty);
     if f <= 0.0 || max_rpm <= 0.0 {
@@ -718,12 +767,17 @@ pub fn map_group_curves(
         let Some(cal) = calibs.iter().find(|c| &c.control_id == id) else {
             continue;
         };
-        let duty_at = |w: f32| duty_for_rpm_fraction(&cal.points, w, cal.min_start_duty, cal.max_rpm);
+        let duty_at =
+            |w: f32| duty_for_rpm_fraction(&cal.points, w, cal.min_start_duty, cal.max_rpm);
         let mut curve: Vec<CurvePoint> = cpu_points
             .iter()
             .map(|p| CurvePoint {
                 temp_c: p.temp_c,
-                duty: duty_at(if *group == Group::Cpu { p.w_cpu } else { p.w_case }),
+                duty: duty_at(if *group == Group::Cpu {
+                    p.w_cpu
+                } else {
+                    p.w_case
+                }),
             })
             .collect();
         for i in 1..curve.len() {
@@ -734,7 +788,10 @@ pub fn map_group_curves(
             if let Some(gp) = gpu_points {
                 curve2 = gp
                     .iter()
-                    .map(|&(temp_c, w)| CurvePoint { temp_c, duty: duty_at(w) })
+                    .map(|&(temp_c, w)| CurvePoint {
+                        temp_c,
+                        duty: duty_at(w),
+                    })
                     .collect();
                 for i in 1..curve2.len() {
                     curve2[i].duty = curve2[i].duty.max(curve2[i - 1].duty);
@@ -743,7 +800,13 @@ pub fn map_group_curves(
         }
         let floor_w = cpu_points
             .first()
-            .map(|p| if *group == Group::Cpu { p.w_cpu } else { p.w_case })
+            .map(|p| {
+                if *group == Group::Cpu {
+                    p.w_cpu
+                } else {
+                    p.w_case
+                }
+            })
             .unwrap_or(0.25);
         out.push(TunedFanCurve {
             control_id: id.clone(),
@@ -782,12 +845,19 @@ pub struct SteadyDetector {
 
 impl SteadyDetector {
     pub fn new(min_dwell_s: f32, max_dwell_s: f32) -> Self {
-        Self { samples: Vec::new(), min_dwell_s, max_dwell_s }
+        Self {
+            samples: Vec::new(),
+            min_dwell_s,
+            max_dwell_s,
+        }
     }
 
     fn tail_mean(&self, n: usize) -> f32 {
         let k = self.samples.len().min(n).max(1);
-        let s: f32 = self.samples[self.samples.len() - k..].iter().map(|&(_, v)| v).sum();
+        let s: f32 = self.samples[self.samples.len() - k..]
+            .iter()
+            .map(|&(_, v)| v)
+            .sum();
         s / k as f32
     }
 
@@ -811,10 +881,14 @@ impl SteadyDetector {
         }
         let n = win.len() as f64;
         let denom = n * sxx - sx * sx;
-        let slope = if denom.abs() < 1e-9 { 0.0 } else { (n * sxy - sx * sy) / denom };
-        let (min, max) = win
-            .iter()
-            .fold((f32::MAX, f32::MIN), |(lo, hi), &(_, v)| (lo.min(v), hi.max(v)));
+        let slope = if denom.abs() < 1e-9 {
+            0.0
+        } else {
+            (n * sxy - sx * sy) / denom
+        };
+        let (min, max) = win.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &(_, v)| {
+            (lo.min(v), hi.max(v))
+        });
         if slope.abs() < 0.05 && (max - min) < 0.8 {
             Steady::Steady(self.tail_mean(10))
         } else {
@@ -860,16 +934,34 @@ mod tests {
                 let p = 195.0 + ((i * 3 + j) % 4) as f32;
                 let t = m.predict(p, wc, wx) + sign * noise;
                 sign = -sign;
-                out.push(FitSample { p, w_cpu: wc, w_case: wx, t });
+                out.push(FitSample {
+                    p,
+                    w_cpu: wc,
+                    w_case: wx,
+                    t,
+                });
             }
         }
         // idle anchor
-        out.push(FitSample { p: 38.0, w_cpu: 0.4, w_case: 0.4, t: m.predict(38.0, 0.4, 0.4) });
+        out.push(FitSample {
+            p: 38.0,
+            w_cpu: 0.4,
+            w_case: 0.4,
+            t: m.predict(38.0, 0.4, 0.4),
+        });
         out
     }
 
     fn truth() -> ThermalModel {
-        ThermalModel { alpha: 0.8, t_off: 28.0, r_inf: 0.12, k_c: 0.10, k_x: 0.04, rmse: 0.0, conservative_shift: 0.0 }
+        ThermalModel {
+            alpha: 0.8,
+            t_off: 28.0,
+            r_inf: 0.12,
+            k_c: 0.10,
+            k_x: 0.04,
+            rmse: 0.0,
+            conservative_shift: 0.0,
+        }
     }
 
     #[test]
@@ -893,13 +985,19 @@ mod tests {
             .iter()
             .filter(|s| s.t > m.predict(s.p, s.w_cpu, s.w_case) + 1e-3)
             .count();
-        assert!(hot <= 2, "{hot} samples hotter than conservative prediction");
+        assert!(
+            hot <= 2,
+            "{hot} samples hotter than conservative prediction"
+        );
     }
 
     #[test]
     fn fit_clamps_negative_coefficients() {
         // Case axis carries no signal (k_x = 0) + noise pushing it negative.
-        let base = ThermalModel { k_x: 0.0, ..truth() };
+        let base = ThermalModel {
+            k_x: 0.0,
+            ..truth()
+        };
         let mut samples = synth_samples(&base, 0.2);
         for s in &mut samples {
             if s.w_case < 0.5 {
@@ -912,7 +1010,10 @@ mod tests {
 
     #[test]
     fn fit_without_case_group_uses_three_params() {
-        let base = ThermalModel { k_x: 0.0, ..truth() };
+        let base = ThermalModel {
+            k_x: 0.0,
+            ..truth()
+        };
         let samples: Vec<FitSample> = synth_samples(&base, 0.2)
             .into_iter()
             .map(|mut s| {
@@ -926,9 +1027,24 @@ mod tests {
 
     #[test]
     fn gpu_fit_recovers_known_model() {
-        let g = GpuModel { t_off_g: 30.0, r_g: 0.09, k_g: 0.03, rmse: 0.0, conservative_shift: 0.0 };
-        let mk = |p: f32, w: f32| GpuFitSample { p, w_case: w, t: g.predict(p, w) };
-        let samples = vec![mk(320.0, 1.0), mk(318.0, 0.6), mk(322.0, 0.3), mk(45.0, 0.4)];
+        let g = GpuModel {
+            t_off_g: 30.0,
+            r_g: 0.09,
+            k_g: 0.03,
+            rmse: 0.0,
+            conservative_shift: 0.0,
+        };
+        let mk = |p: f32, w: f32| GpuFitSample {
+            p,
+            w_case: w,
+            t: g.predict(p, w),
+        };
+        let samples = vec![
+            mk(320.0, 1.0),
+            mk(318.0, 0.6),
+            mk(322.0, 0.3),
+            mk(45.0, 0.4),
+        ];
         let f = fit_gpu_model(&samples).expect("fit");
         for s in &samples {
             assert!((f.predict(s.p, s.w_case) - s.t).abs() < 0.8);
@@ -938,12 +1054,20 @@ mod tests {
     #[test]
     fn fit_rejects_degenerate_input() {
         assert!(fit_cpu_model(&[], true).is_none());
-        let one = vec![FitSample { p: 100.0, w_cpu: 1.0, w_case: 1.0, t: 60.0 }];
+        let one = vec![FitSample {
+            p: 100.0,
+            w_cpu: 1.0,
+            w_case: 1.0,
+            t: 60.0,
+        }];
         assert!(fit_cpu_model(&one, true).is_none());
     }
 
     fn rpm_groups() -> GroupRpm {
-        GroupRpm { cpu_max_rpm_sum: 3600.0, case_max_rpm_sum: 5200.0 }
+        GroupRpm {
+            cpu_max_rpm_sum: 3600.0,
+            case_max_rpm_sum: 5200.0,
+        }
     }
 
     #[test]
@@ -965,8 +1089,21 @@ mod tests {
         assert!(solve_iso(&m, 220.0, 40.0, 0.25, 0.5, &rpm_groups(), true).is_none());
     }
 
-    fn synth_input<'a>(m: &'a ThermalModel, g: &'a GroupRpm, target: f32, ceil: f32) -> SynthInput<'a> {
-        SynthInput { model: m, p_design: 210.0, target, floor: 0.25, ceil, g, has_case: true }
+    fn synth_input<'a>(
+        m: &'a ThermalModel,
+        g: &'a GroupRpm,
+        target: f32,
+        ceil: f32,
+    ) -> SynthInput<'a> {
+        SynthInput {
+            model: m,
+            p_design: 210.0,
+            target,
+            floor: 0.25,
+            ceil,
+            g,
+            has_case: true,
+        }
     }
 
     #[test]
@@ -980,13 +1117,23 @@ mod tests {
         assert!(pts.len() >= 6 && pts.len() <= 9, "{}", pts.len());
         for w in pts.windows(2) {
             assert!(w[1].temp_c > w[0].temp_c, "temps strictly increase");
-            assert!(w[1].w_cpu >= w[0].w_cpu && w[1].w_case >= w[0].w_case, "w non-decreasing");
+            assert!(
+                w[1].w_cpu >= w[0].w_cpu && w[1].w_case >= w[0].w_case,
+                "w non-decreasing"
+            );
         }
         assert_eq!(pts[0].w_cpu, 0.25, "starts at the quiet floor");
         let last = pts.last().unwrap();
-        assert_eq!((last.w_cpu, last.w_case), (1.0, 1.0), "emergency tops at 100%");
+        assert_eq!(
+            (last.w_cpu, last.w_case),
+            (1.0, 1.0),
+            "emergency tops at 100%"
+        );
         // The point AT the target must hold the design power at/below target:
-        let at = pts.iter().find(|p| (p.temp_c - 85.0).abs() < 0.01).expect("target anchor");
+        let at = pts
+            .iter()
+            .find(|p| (p.temp_c - 85.0).abs() < 0.01)
+            .expect("target anchor");
         assert!(m.predict(210.0, at.w_cpu, at.w_case) <= 85.0 + 0.1);
     }
 
@@ -1006,7 +1153,10 @@ mod tests {
     #[test]
     fn synthesize_cpu_warns_when_cooler_is_insufficient() {
         // Hopeless cooler: huge residual resistance.
-        let m = ThermalModel { r_inf: 0.5, ..truth() };
+        let m = ThermalModel {
+            r_inf: 0.5,
+            ..truth()
+        };
         let g = rpm_groups();
         let s = synthesize_cpu(&synth_input(&m, &g, 70.0, 1.0), 8.0);
         let w = s.warning.expect("warning expected");
@@ -1022,15 +1172,24 @@ mod tests {
         // must be capped so the engine's 120 °C curve sanitizer can never
         // flatten the curve into a useless cliff, and (near-)ceiling airflow
         // must arrive by ~90 °C where real silicon actually operates.
-        let m = ThermalModel { r_inf: 0.5, ..truth() };
+        let m = ThermalModel {
+            r_inf: 0.5,
+            ..truth()
+        };
         let g = rpm_groups();
         let s = synthesize_cpu(&synth_input(&m, &g, 70.0, 1.0), 8.0);
         assert!(s.effective_target <= MAX_EFFECTIVE_TARGET_C + 1e-3);
         let max_t = s.points.iter().map(|p| p.temp_c).fold(f32::MIN, f32::max);
-        assert!(max_t <= 96.1, "max curve temp {max_t} must stay well below the 120 °C clamp");
+        assert!(
+            max_t <= 96.1,
+            "max curve temp {max_t} must stay well below the 120 °C clamp"
+        );
         // Honesty: the warning still reports the TRUE achievable temperature.
         let w = s.warning.expect("cooler warning");
-        assert!(w.achievable_c.unwrap() > 120.0, "true achievable must not be masked by the cap");
+        assert!(
+            w.achievable_c.unwrap() > 120.0,
+            "true achievable must not be masked by the cap"
+        );
         // Airflow must be at/near ceiling by 90 °C (the real operating region).
         let at_90 = s
             .points
@@ -1038,19 +1197,33 @@ mod tests {
             .filter(|p| p.temp_c <= 90.0 + 1e-3)
             .map(|p| p.w_cpu)
             .fold(0.0_f32, f32::max);
-        assert!(at_90 >= 0.99, "w_cpu by 90 °C = {at_90}, expected ≈ ceiling");
+        assert!(
+            at_90 >= 0.99,
+            "w_cpu by 90 °C = {at_90}, expected ≈ ceiling"
+        );
     }
 
     #[test]
     fn synthesize_cpu_flat_floor_when_floor_holds_everything() {
         // Monster cooler: floor airflow already pins design power below target.
-        let m = ThermalModel { r_inf: 0.02, k_c: 0.02, k_x: 0.01, t_off: 25.0, ..truth() };
+        let m = ThermalModel {
+            r_inf: 0.02,
+            k_c: 0.02,
+            k_x: 0.01,
+            t_off: 25.0,
+            ..truth()
+        };
         let g = rpm_groups();
         let s = synthesize_cpu(&synth_input(&m, &g, 85.0, 1.0), 8.0);
         assert!(s.warning.is_none());
         // All pre-emergency points sit at the floor:
         for p in s.points.iter().filter(|p| p.temp_c < 85.0 + 2.9) {
-            assert_eq!((p.w_cpu, p.w_case), (0.25, 0.25), "flat at floor, got {:?}", (p.w_cpu, p.w_case));
+            assert_eq!(
+                (p.w_cpu, p.w_case),
+                (0.25, 0.25),
+                "flat at floor, got {:?}",
+                (p.w_cpu, p.w_case)
+            );
         }
     }
 
@@ -1058,7 +1231,9 @@ mod tests {
 
     fn calib(id: &str, max_rpm: f32, nonlinear: bool) -> FanCalibration {
         // Linear fan: rpm = duty/100 × max. Non-linear fan: rpm saturates early.
-        let duties = [0.0, 8.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0];
+        let duties = [
+            0.0, 8.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0,
+        ];
         let points = duties
             .iter()
             .map(|&d| CalibPoint {
@@ -1087,8 +1262,14 @@ mod tests {
         let d = duty_for_rpm_fraction(&c.points, 0.5, c.min_start_duty, c.max_rpm);
         assert!((d - 50.0).abs() <= 1.5, "got {d}");
         // frac=0 → floor = max(MIN_SAFE_DUTY, start duty).
-        assert_eq!(duty_for_rpm_fraction(&c.points, 0.0, c.min_start_duty, c.max_rpm), 20.0);
-        assert_eq!(duty_for_rpm_fraction(&c.points, 1.0, c.min_start_duty, c.max_rpm), 100.0);
+        assert_eq!(
+            duty_for_rpm_fraction(&c.points, 0.0, c.min_start_duty, c.max_rpm),
+            20.0
+        );
+        assert_eq!(
+            duty_for_rpm_fraction(&c.points, 1.0, c.min_start_duty, c.max_rpm),
+            100.0
+        );
     }
 
     #[test]
@@ -1104,25 +1285,51 @@ mod tests {
         let cpu_fan = calib("cpu0", 2200.0, false);
         let case_fan = calib("case0", 1400.0, true);
         let cpu_pts = vec![
-            WPoint { temp_c: 20.0, w_cpu: 0.25, w_case: 0.25 },
-            WPoint { temp_c: 77.0, w_cpu: 0.25, w_case: 0.25 },
-            WPoint { temp_c: 85.0, w_cpu: 0.8, w_case: 0.5 },
-            WPoint { temp_c: 91.0, w_cpu: 1.0, w_case: 1.0 },
+            WPoint {
+                temp_c: 20.0,
+                w_cpu: 0.25,
+                w_case: 0.25,
+            },
+            WPoint {
+                temp_c: 77.0,
+                w_cpu: 0.25,
+                w_case: 0.25,
+            },
+            WPoint {
+                temp_c: 85.0,
+                w_cpu: 0.8,
+                w_case: 0.5,
+            },
+            WPoint {
+                temp_c: 91.0,
+                w_cpu: 1.0,
+                w_case: 1.0,
+            },
         ];
         let gpu_pts = vec![(20.0_f32, 0.25_f32), (74.0, 0.25), (80.0, 0.6), (86.0, 1.0)];
         let curves = map_group_curves(
-            &[("cpu0".to_string(), Group::Cpu), ("case0".to_string(), Group::Case)],
+            &[
+                ("cpu0".to_string(), Group::Cpu),
+                ("case0".to_string(), Group::Case),
+            ],
             &[cpu_fan, case_fan],
             &cpu_pts,
             Some(&gpu_pts),
         );
         assert_eq!(curves.len(), 2);
         let cpu = curves.iter().find(|c| c.control_id == "cpu0").unwrap();
-        assert!(cpu.curve2.is_empty(), "CPU-group fans never get a GPU curve");
+        assert!(
+            cpu.curve2.is_empty(),
+            "CPU-group fans never get a GPU curve"
+        );
         assert_eq!(cpu.spin_up_pct, 70.0);
         assert_eq!(cpu.spin_down_pct, 30.0);
         let case = curves.iter().find(|c| c.control_id == "case0").unwrap();
-        assert_eq!(case.curve2.len(), gpu_pts.len(), "case fans carry the GPU assist curve");
+        assert_eq!(
+            case.curve2.len(),
+            gpu_pts.len(),
+            "case fans carry the GPU assist curve"
+        );
         // Curves are duty-valued, monotone non-decreasing, within [20,100]:
         for c in &curves {
             for w in c.curve.windows(2) {
@@ -1177,13 +1384,22 @@ mod tests {
     #[test]
     fn passive_correction_is_bounded_and_asymmetric() {
         // Hot residuals: apply, capped at +0.5.
-        assert_eq!(passive_correction(&[2.1, 1.9, 2.4, 2.0, 2.2], 0.0), Some(0.5));
+        assert_eq!(
+            passive_correction(&[2.1, 1.9, 2.4, 2.0, 2.2], 0.0),
+            Some(0.5)
+        );
         // Mildly hot (≤1.5): no action.
         assert_eq!(passive_correction(&[1.2, 1.0, 1.4, 0.9, 1.3], 0.0), None);
         // Cold needs >2.5 evidence; −2.0 is ignored…
-        assert_eq!(passive_correction(&[-2.0, -1.8, -2.2, -2.1, -1.9], 0.0), None);
+        assert_eq!(
+            passive_correction(&[-2.0, -1.8, -2.2, -2.1, -1.9], 0.0),
+            None
+        );
         // …−3.0 acts, capped at −0.5.
-        assert_eq!(passive_correction(&[-3.0, -3.2, -2.8, -3.1, -2.9], 0.0), Some(-0.5));
+        assert_eq!(
+            passive_correction(&[-3.0, -3.2, -2.8, -3.1, -2.9], 0.0),
+            Some(-0.5)
+        );
         // Total drift clamp ±6: already at +6 → hot correction suppressed.
         assert_eq!(passive_correction(&[2.1, 2.0, 2.2, 2.3, 2.1], 6.0), None);
         // Fewer than 5 samples → never act.
@@ -1208,9 +1424,20 @@ mod tests {
             rmse: 1.4,
             conservative_shift: 2.1,
         };
-        let g = GroupRpm { cpu_max_rpm_sum: 2922.0, case_max_rpm_sum: 9000.0 };
+        let g = GroupRpm {
+            cpu_max_rpm_sum: 2922.0,
+            case_max_rpm_sum: 9000.0,
+        };
         let s = synthesize_cpu(
-            &SynthInput { model: &m, p_design: 135.1, target: 69.0, floor: 0.30, ceil: 1.0, g: &g, has_case: true },
+            &SynthInput {
+                model: &m,
+                p_design: 135.1,
+                target: 69.0,
+                floor: 0.30,
+                ceil: 1.0,
+                g: &g,
+                has_case: true,
+            },
             8.0,
         );
         assert_eq!(s.effective_target, 69.0);
@@ -1224,7 +1451,10 @@ mod tests {
             );
         }
         // And the result says WHY it is flat:
-        assert_eq!(s.warning.as_ref().map(|w| w.kind.as_str()), Some("fansBarelyMatter"));
+        assert_eq!(
+            s.warning.as_ref().map(|w| w.kind.as_str()),
+            Some("fansBarelyMatter")
+        );
         for w in s.points.windows(2) {
             assert!(w[1].temp_c > w[0].temp_c && w[1].w_cpu >= w[0].w_cpu);
         }
@@ -1235,17 +1465,32 @@ mod tests {
         // Same field tune, GPU axis: r_g fitted to 0, k_g tiny — case airflow
         // moves the GPU well under 2°C end to end. Surging case fans above the
         // GPU target would be pure noise for nothing; the assist must stay flat.
-        let g = GpuModel { t_off_g: 54.14, r_g: 0.0, k_g: 0.00646, rmse: 1.34, conservative_shift: 2.3 };
+        let g = GpuModel {
+            t_off_g: 54.14,
+            r_g: 0.0,
+            k_g: 0.00646,
+            rmse: 1.34,
+            conservative_shift: 2.3,
+        };
         let s = synthesize_gpu(&g, 104.0, 70.0, 0.30, 1.0);
         for &(temp, w) in &s.points {
             assert!(w <= 0.31, "expected flat assist, got {w} at {temp}°C");
         }
-        assert_eq!(s.warning.as_ref().map(|w| w.kind.as_str()), Some("caseBarelyHelpsGpu"));
+        assert_eq!(
+            s.warning.as_ref().map(|w| w.kind.as_str()),
+            Some("caseBarelyHelpsGpu")
+        );
     }
 
     #[test]
     fn synthesize_gpu_assist_anchors_and_warns() {
-        let g = GpuModel { t_off_g: 30.0, r_g: 0.09, k_g: 0.03, rmse: 0.0, conservative_shift: 0.0 };
+        let g = GpuModel {
+            t_off_g: 30.0,
+            r_g: 0.09,
+            k_g: 0.03,
+            rmse: 0.0,
+            conservative_shift: 0.0,
+        };
         let ok = synthesize_gpu(&g, 330.0, 80.0, 0.25, 1.0);
         assert!(ok.warning.is_none());
         for w in ok.points.windows(2) {
@@ -1258,7 +1503,11 @@ mod tests {
             .expect("target anchor");
         assert!(g.predict(330.0, anchor.1) <= ok.effective_target_g + 0.1);
         // Case fans can't do much for a hot GPU → honest warning:
-        let weak = GpuModel { r_g: 0.2, k_g: 0.005, ..g };
+        let weak = GpuModel {
+            r_g: 0.2,
+            k_g: 0.005,
+            ..g
+        };
         let bad = synthesize_gpu(&weak, 330.0, 70.0, 0.25, 1.0);
         assert_eq!(bad.warning.expect("warn").kind, "caseCantHelpGpu");
         assert!(bad.effective_target_g > 70.0);

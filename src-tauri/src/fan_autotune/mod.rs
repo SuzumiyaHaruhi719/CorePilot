@@ -51,7 +51,12 @@ struct Abort {
 }
 
 fn abort(phase: &'static str, zh: &str, en: &str) -> Abort {
-    Abort { phase, reason_zh: zh.into(), reason_en: en.into(), emergency: false }
+    Abort {
+        phase,
+        reason_zh: zh.into(),
+        reason_en: en.into(),
+        emergency: false,
+    }
 }
 
 /// Everything the phases share.
@@ -114,10 +119,18 @@ impl<'a> Tune<'a> {
             return Err(abort(self.phase, "用户中止", "aborted by user"));
         }
         if self.io.now_s() > HARD_CAP_S {
-            return Err(abort(self.phase, "总时长超过 45 分钟上限", "exceeded the 45-minute hard cap"));
+            return Err(abort(
+                self.phase,
+                "总时长超过 45 分钟上限",
+                "exceeded the 45-minute hard cap",
+            ));
         }
         if self.io.wall_jump_s() > 10.0 {
-            return Err(abort(self.phase, "检测到系统休眠/恢复", "system suspend/resume detected"));
+            return Err(abort(
+                self.phase,
+                "检测到系统休眠/恢复",
+                "system suspend/resume detected",
+            ));
         }
         match self.io.cpu_temp() {
             Some(t) => {
@@ -138,7 +151,11 @@ impl<'a> Tune<'a> {
             None => {
                 *misses += 1;
                 if *misses > 5 {
-                    return Err(abort(self.phase, "CPU 温度读数丢失", "lost the CPU temperature reading"));
+                    return Err(abort(
+                        self.phase,
+                        "CPU 温度读数丢失",
+                        "lost the CPU temperature reading",
+                    ));
                 }
             }
         }
@@ -146,7 +163,12 @@ impl<'a> Tune<'a> {
     }
 
     /// Settle the CPU temperature; returns (t_ss, saturated, p_mean).
-    fn settle_cpu(&mut self, line: f32, min_dwell: f32, max_dwell: f32) -> Result<(f32, bool, f32), Abort> {
+    fn settle_cpu(
+        &mut self,
+        line: f32,
+        min_dwell: f32,
+        max_dwell: f32,
+    ) -> Result<(f32, bool, f32), Abort> {
         let mut det = SteadyDetector::new(min_dwell, max_dwell);
         let (mut p_sum, mut p_n, mut misses) = (0.0_f32, 0u32, 0u32);
         let t0 = self.io.now_s();
@@ -169,14 +191,20 @@ impl<'a> Tune<'a> {
 
     /// Settle the GPU temperature. Outer Err = tune abort (CPU safety stays
     /// armed); inner None = GPU trouble → caller skips the axis (degrade).
-    fn settle_gpu(&mut self, min_dwell: f32, max_dwell: f32) -> Result<Option<(f32, bool, f32, f32)>, Abort> {
+    fn settle_gpu(
+        &mut self,
+        min_dwell: f32,
+        max_dwell: f32,
+    ) -> Result<Option<(f32, bool, f32, f32)>, Abort> {
         let mut det = SteadyDetector::new(min_dwell, max_dwell);
         let (mut p_sum, mut p_n, mut misses) = (0.0_f32, 0u32, 0u32);
         let t0 = self.io.now_s();
         loop {
             self.io.sleep_s(1.0);
             self.safety_tick(Some(RUNAWAY_ABORT_C), &mut misses)?;
-            let Some(tg) = self.io.gpu_temp() else { return Ok(None) };
+            let Some(tg) = self.io.gpu_temp() else {
+                return Ok(None);
+            };
             if tg >= GPU_ABORT_C {
                 // Cool down hard for 30 s, then degrade the axis (spec §3 安全网).
                 self.all_fans_full();
@@ -242,7 +270,9 @@ impl<'a> Tune<'a> {
         loop {
             self.io.sleep_s(2.0);
             self.safety_tick(Some(line), &mut misses)?;
-            let Some(t_cpu) = self.io.cpu_temp() else { continue };
+            let Some(t_cpu) = self.io.cpu_temp() else {
+                continue;
+            };
             let t_gpu = self.io.gpu_temp();
             for c in curves {
                 let mut target = interp(&c.curve, t_cpu);
@@ -293,7 +323,8 @@ pub fn run_tune(io: &mut dyn TuneIo, raw: &AutoTuneParams) -> AutoTuneOutcome {
             })
         }
     };
-    let mut fans: Vec<(String, Group)> = params.groups.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let mut fans: Vec<(String, Group)> =
+        params.groups.iter().map(|(k, v)| (k.clone(), *v)).collect();
     fans.sort_by(|a, b| a.0.cmp(&b.0));
     let mut t = Tune {
         floor: params.quiet_floor_pct / 100.0,
@@ -349,7 +380,9 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
         t.warnings.push(TuneWarning {
             kind: "gpuAxisSkipped".into(),
             message_zh: "未检测到 GPU 温度/功耗,GPU 轴跳过(机箱风扇只按 CPU 温度驱动)".into(),
-            message_en: "No GPU temp/power detected — GPU axis skipped (case fans follow CPU temp only)".into(),
+            message_en:
+                "No GPU temp/power detected — GPU axis skipped (case fans follow CPU temp only)"
+                    .into(),
             achievable_c: None,
         });
     }
@@ -398,7 +431,10 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
         .params
         .reuse_calibration
         .as_ref()
-        .map(|cal| ids.iter().all(|id| cal.iter().any(|c| &c.control_id == id && !c.disconnected)))
+        .map(|cal| {
+            ids.iter()
+                .all(|id| cal.iter().any(|c| &c.control_id == id && !c.disconnected))
+        })
         .unwrap_or(false);
     t.calibs = if reuse_ok {
         t.params.reuse_calibration.clone().unwrap()
@@ -410,7 +446,10 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
             t.warnings.push(TuneWarning {
                 kind: "fanDisconnected".into(),
                 message_zh: format!("{}:校准时未检测到转速,已从调优中剔除", c.name),
-                message_en: format!("{}: no RPM during calibration — excluded from tuning", c.name),
+                message_en: format!(
+                    "{}: no RPM during calibration — excluded from tuning",
+                    c.name
+                ),
                 achievable_c: None,
             });
             t.fans.retain(|(id, _)| id != &c.control_id);
@@ -418,7 +457,11 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
     }
     t.has_case = t.fans.iter().any(|(_, g)| *g == Group::Case);
     if !t.fans.iter().any(|(_, g)| *g == Group::Cpu) {
-        return Err(abort("fanCalib", "CPU 组没有可用风扇", "no usable fan left in the CPU group"));
+        return Err(abort(
+            "fanCalib",
+            "CPU 组没有可用风扇",
+            "no usable fan left in the CPU group",
+        ));
     }
 
     // --- Baseline (spec §3 阶段 2) --------------------------------------------
@@ -437,7 +480,11 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
     // --- GridSweep (spec §3 阶段 3) -------------------------------------------
     t.phase = "gridSweep";
     if !t.io.start_cpu_load() {
-        return Err(abort("gridSweep", "无法启动 CPU 负载", "failed to start the CPU load"));
+        return Err(abort(
+            "gridSweep",
+            "无法启动 CPU 负载",
+            "failed to start the CPU load",
+        ));
     }
     // Verify the load took. The power check accepts a RATIO rise (quiet idle)
     // or an ABSOLUTE rise (busy idle): with a background hog the baseline can
@@ -456,14 +503,13 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
                 saw_load = true;
             }
         }
-        let power_ok = t
-            .io
-            .cpu_power()
-            .map(|p| {
-                last_p = p;
-                p >= 1.5 * baseline.p_idle || p >= baseline.p_idle + 20.0
-            })
-            .unwrap_or(false);
+        let power_ok =
+            t.io.cpu_power()
+                .map(|p| {
+                    last_p = p;
+                    p >= 1.5 * baseline.p_idle || p >= baseline.p_idle + 20.0
+                })
+                .unwrap_or(false);
         if saw_load && power_ok {
             ok = true;
             break;
@@ -538,7 +584,14 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
             t.set_group_w(wc, wx);
             t.emit(None, Some(wc), Some(wx));
             let (t_ss, saturated, p_avg) = t.settle_cpu(RUNAWAY_ABORT_C, 35.0, 120.0)?;
-            grid.push(GridPoint { w_cpu: wc, w_case: wx, t_ss, p_avg, saturated, skipped: false });
+            grid.push(GridPoint {
+                w_cpu: wc,
+                w_case: wx,
+                t_ss,
+                p_avg,
+                saturated,
+                skipped: false,
+            });
         }
     }
     t.io.stop_cpu_load();
@@ -567,14 +620,13 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
             for _ in 0..20 {
                 t.io.sleep_s(1.0);
                 t.safety_tick(Some(RUNAWAY_ABORT_C), &mut misses)?;
-                let gate_ok = t
-                    .io
-                    .gpu_power()
-                    .map(|p| match baseline.p_gpu_idle {
-                        Some(idle) => p >= 1.5 * idle || p >= idle + 40.0,
-                        None => p >= 60.0,
-                    })
-                    .unwrap_or(false);
+                let gate_ok =
+                    t.io.gpu_power()
+                        .map(|p| match baseline.p_gpu_idle {
+                            Some(idle) => p >= 1.5 * idle || p >= idle + 40.0,
+                            None => p >= 60.0,
+                        })
+                        .unwrap_or(false);
                 if gate_ok {
                     ok = true;
                     break;
@@ -596,7 +648,12 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
                     t.emit(None, Some(0.5), Some(wx));
                     match t.settle_gpu(35.0, 120.0)? {
                         Some((t_gpu_ss, _sat, p_gpu_avg, t_cpu)) => {
-                            gpu_grid.push(GpuGridPoint { w_case: wx, t_gpu_ss, p_gpu_avg, t_cpu });
+                            gpu_grid.push(GpuGridPoint {
+                                w_case: wx,
+                                t_gpu_ss,
+                                p_gpu_avg,
+                                t_cpu,
+                            });
                         }
                         None => {
                             t.gpu_axis = false;
@@ -622,16 +679,28 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
     t.emit(None, None, None);
     let samples = fit_samples(&grid, &baseline, w0);
     let mut model = fit_cpu_model(&samples, t.has_case).ok_or_else(|| {
-        abort("fit", "测量数据不足,模型拟合失败", "not enough measurements to fit the model")
+        abort(
+            "fit",
+            "测量数据不足,模型拟合失败",
+            "not enough measurements to fit the model",
+        )
     })?;
     let mut model_gpu: Option<GpuModel> = None;
     if t.gpu_axis && gpu_grid.len() >= 3 {
         let mut gs: Vec<GpuFitSample> = gpu_grid
             .iter()
-            .map(|p| GpuFitSample { p: p.p_gpu_avg, w_case: p.w_case, t: p.t_gpu_ss })
+            .map(|p| GpuFitSample {
+                p: p.p_gpu_avg,
+                w_case: p.w_case,
+                t: p.t_gpu_ss,
+            })
             .collect();
         if let (Some(tg), Some(pg)) = (baseline.t_gpu_idle, baseline.p_gpu_idle) {
-            gs.push(GpuFitSample { p: pg, w_case: w0, t: tg });
+            gs.push(GpuFitSample {
+                p: pg,
+                w_case: w0,
+                t: tg,
+            });
         }
         model_gpu = fit_gpu_model(&gs);
         if model_gpu.is_none() {
@@ -650,15 +719,25 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
     // --- Synthesize (spec §5) ---------------------------------------------------
     t.phase = "synthesize";
     t.emit(None, None, None);
-    let p_design = grid.iter().filter(|p| !p.skipped).map(|p| p.p_avg).fold(0.0, f32::max);
+    let p_design = grid
+        .iter()
+        .filter(|p| !p.skipped)
+        .map(|p| p.p_avg)
+        .fold(0.0, f32::max);
     let p_design_gpu = gpu_grid.iter().map(|p| p.p_gpu_avg).fold(0.0, f32::max);
     let g_rpm = group_rpm(&t.fans, &t.calibs);
     let mut band = BAND_C;
     let mut spin_down = 30.0_f32;
 
-    let mut cpu_synth = synth_cpu(&model, band, p_design, &t.params, t.floor, t.ceil, &g_rpm, t.has_case);
+    let mut cpu_synth = synth_cpu(
+        &model, band, p_design, &t.params, t.floor, t.ceil, &g_rpm, t.has_case,
+    );
     let mut gpu_synth = match (&model_gpu, t.gpu_axis) {
-        (Some(mg), true) => Some(synthesize_gpu(
+        // Guard: synthesize_gpu divides by p_design_gpu, so a zero design power
+        // (no usable GPU power samples) would yield a NaN/inf assist curve. Skip
+        // the GPU axis instead. With real GPU data (p_design_gpu > 0) behavior
+        // is unchanged.
+        (Some(mg), true) if p_design_gpu > 0.0 => Some(synthesize_gpu(
             mg,
             p_design_gpu,
             t.params.target_gpu_temp_c,
@@ -667,7 +746,13 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
         )),
         _ => None,
     };
-    let mut curves = build_curves(&t.fans, &t.calibs, &cpu_synth, gpu_synth.as_ref(), spin_down);
+    let mut curves = build_curves(
+        &t.fans,
+        &t.calibs,
+        &cpu_synth,
+        gpu_synth.as_ref(),
+        spin_down,
+    );
 
     // --- Validate (spec §6) -------------------------------------------------------
     t.phase = "validate";
@@ -676,7 +761,11 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
     // handing control to the curve, or the safety line trips immediately.
     t.cooldown_below(cpu_synth.effective_target - 2.0, 90.0)?;
     if !t.io.start_cpu_load() {
-        return Err(abort("validate", "无法启动 CPU 负载", "failed to start the CPU load"));
+        return Err(abort(
+            "validate",
+            "无法启动 CPU 负载",
+            "failed to start the CPU load",
+        ));
     }
     let validate_started = t.io.now_s();
     let mut iterations = 0u32;
@@ -693,23 +782,47 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
             band += 2.0;
             spin_down -= 10.0;
             oscillation_fixed = true;
-            cpu_synth = synth_cpu(&model, band, p_design, &t.params, t.floor, t.ceil, &g_rpm, t.has_case);
-            curves = build_curves(&t.fans, &t.calibs, &cpu_synth, gpu_synth.as_ref(), spin_down);
+            cpu_synth = synth_cpu(
+                &model, band, p_design, &t.params, t.floor, t.ceil, &g_rpm, t.has_case,
+            );
+            curves = build_curves(
+                &t.fans,
+                &t.calibs,
+                &cpu_synth,
+                gpu_synth.as_ref(),
+                spin_down,
+            );
             continue;
         }
         if t_v - eff > 1.5 && iterations < 2 && budget_left {
             // Newton-ish: ∂T/∂t_off = 1, so one bump per round converges fast.
             model.t_off += t_v - eff;
             iterations += 1;
-            cpu_synth = synth_cpu(&model, band, p_design, &t.params, t.floor, t.ceil, &g_rpm, t.has_case);
-            curves = build_curves(&t.fans, &t.calibs, &cpu_synth, gpu_synth.as_ref(), spin_down);
+            cpu_synth = synth_cpu(
+                &model, band, p_design, &t.params, t.floor, t.ceil, &g_rpm, t.has_case,
+            );
+            curves = build_curves(
+                &t.fans,
+                &t.calibs,
+                &cpu_synth,
+                gpu_synth.as_ref(),
+                spin_down,
+            );
             continue;
         }
         if eff - t_v > 4.0 && !cold_done && budget_left {
             model.t_off -= (eff - t_v).min(4.0);
             cold_done = true;
-            cpu_synth = synth_cpu(&model, band, p_design, &t.params, t.floor, t.ceil, &g_rpm, t.has_case);
-            curves = build_curves(&t.fans, &t.calibs, &cpu_synth, gpu_synth.as_ref(), spin_down);
+            cpu_synth = synth_cpu(
+                &model, band, p_design, &t.params, t.floor, t.ceil, &g_rpm, t.has_case,
+            );
+            curves = build_curves(
+                &t.fans,
+                &t.calibs,
+                &cpu_synth,
+                gpu_synth.as_ref(),
+                spin_down,
+            );
             continue;
         }
         break;
@@ -740,27 +853,44 @@ fn tune_body(t: &mut Tune) -> Result<Box<AutoTuneResult>, Abort> {
         let (v0_cpu, _, _, v0_gpu) = t.drive_until_steady(&curves, line, 240.0)?;
         let (mut v_cpu, mut v_gpu) = (v0_cpu, v0_gpu);
         let eff = cpu_synth.effective_target;
-        let eff_g = gpu_synth.as_ref().map(|g| g.effective_target_g).unwrap_or(0.0);
+        let eff_g = gpu_synth
+            .as_ref()
+            .map(|g| g.effective_target_g)
+            .unwrap_or(0.0);
         let cpu_over = v_cpu - eff > 1.5;
         let gpu_over = v_gpu.map(|g| g - eff_g > 2.0).unwrap_or(false);
         if cpu_over || gpu_over {
             if cpu_over {
                 model.t_off += v_cpu - eff;
-                cpu_synth = synth_cpu(&model, band, p_design, &t.params, t.floor, t.ceil, &g_rpm, t.has_case);
+                cpu_synth = synth_cpu(
+                    &model, band, p_design, &t.params, t.floor, t.ceil, &g_rpm, t.has_case,
+                );
             }
             if gpu_over {
+                // Guard: skip re-synthesis when p_design_gpu is zero (no usable
+                // GPU power samples) — synthesize_gpu divides by it and would
+                // produce a NaN/inf curve. With real GPU data behavior is
+                // unchanged.
                 if let (Some(mg), Some(gs)) = (model_gpu.as_mut(), v_gpu) {
-                    mg.t_off_g += gs - eff_g;
-                    gpu_synth = Some(synthesize_gpu(
-                        mg,
-                        p_design_gpu,
-                        t.params.target_gpu_temp_c,
-                        t.floor,
-                        t.ceil,
-                    ));
+                    if p_design_gpu > 0.0 {
+                        mg.t_off_g += gs - eff_g;
+                        gpu_synth = Some(synthesize_gpu(
+                            mg,
+                            p_design_gpu,
+                            t.params.target_gpu_temp_c,
+                            t.floor,
+                            t.ceil,
+                        ));
+                    }
                 }
             }
-            curves = build_curves(&t.fans, &t.calibs, &cpu_synth, gpu_synth.as_ref(), spin_down);
+            curves = build_curves(
+                &t.fans,
+                &t.calibs,
+                &cpu_synth,
+                gpu_synth.as_ref(),
+                spin_down,
+            );
             let (rv_cpu, _, _, rv_gpu) = t.drive_until_steady(&curves, line, 240.0)?;
             v_cpu = rv_cpu;
             v_gpu = rv_gpu;
@@ -853,7 +983,15 @@ pub(crate) fn synth_cpu(
     has_case: bool,
 ) -> CpuSynth {
     synthesize_cpu(
-        &SynthInput { model, p_design, target: params.target_temp_c, floor, ceil, g, has_case },
+        &SynthInput {
+            model,
+            p_design,
+            target: params.target_temp_c,
+            floor,
+            ceil,
+            g,
+            has_case,
+        },
         band,
     )
 }
@@ -863,9 +1001,19 @@ fn fit_samples(grid: &[GridPoint], baseline: &Baseline, w0: f32) -> Vec<FitSampl
     let mut out: Vec<FitSample> = grid
         .iter()
         .filter(|p| !p.skipped)
-        .map(|p| FitSample { p: p.p_avg, w_cpu: p.w_cpu, w_case: p.w_case, t: p.t_ss })
+        .map(|p| FitSample {
+            p: p.p_avg,
+            w_cpu: p.w_cpu,
+            w_case: p.w_case,
+            t: p.t_ss,
+        })
         .collect();
-    out.push(FitSample { p: baseline.p_idle, w_cpu: w0, w_case: w0, t: baseline.t_idle });
+    out.push(FitSample {
+        p: baseline.p_idle,
+        w_cpu: w0,
+        w_case: w0,
+        t: baseline.t_idle,
+    });
     out
 }
 
@@ -1010,7 +1158,10 @@ pub struct ResynthResponse {
 
 #[tauri::command]
 pub fn fan_autotune_resynth(req: ResynthRequest) -> crate::error::CoreResult<ResynthResponse> {
-    let params = req.params.sanitized().map_err(crate::error::CoreError::from)?;
+    let params = req
+        .params
+        .sanitized()
+        .map_err(crate::error::CoreError::from)?;
     let fans: Vec<(String, Group)> = params.groups.iter().map(|(k, v)| (k.clone(), *v)).collect();
     let has_case = fans.iter().any(|(_, g)| *g == Group::Case);
     let g_rpm = group_rpm(&fans, &req.calibrations);

@@ -262,7 +262,7 @@ impl OsdShared {
         let seq = self.seq_atomic();
         let start = seq.load(Ordering::Relaxed);
         seq.store(start.wrapping_add(1), Ordering::Release); // odd: write in progress
-        // SAFETY: single writer; readers tolerate the in-progress window via seqlock.
+                                                             // SAFETY: single writer; readers tolerate the in-progress window via seqlock.
         unsafe {
             f(&mut *self.ptr);
         }

@@ -54,7 +54,10 @@ pub fn ingest_line(line: &str) {
             .to_string();
     } else if let Some(rp) = v.get("smuReply") {
         let mut s = STATUS.lock();
-        s.last_reply = rp.get("detail").and_then(|x| x.as_str()).map(str::to_string);
+        s.last_reply = rp
+            .get("detail")
+            .and_then(|x| x.as_str())
+            .map(str::to_string);
         s.last_reply_ok = rp.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
     }
 }

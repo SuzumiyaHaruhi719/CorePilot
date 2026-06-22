@@ -43,8 +43,8 @@ use windows::Win32::System::Memory::{
 };
 use windows::Win32::System::Threading::{
     CreateRemoteThread, GetExitCodeThread, OpenProcess, WaitForSingleObject,
-    LPTHREAD_START_ROUTINE, PROCESS_CREATE_THREAD, PROCESS_QUERY_INFORMATION,
-    PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
+    LPTHREAD_START_ROUTINE, PROCESS_CREATE_THREAD, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION,
+    PROCESS_VM_READ, PROCESS_VM_WRITE,
 };
 
 /// How long to wait for the remote LoadLibrary/FreeLibrary thread before giving
@@ -114,16 +114,8 @@ fn run_remote_thread(
     arg: *const c_void,
 ) -> Result<u32, String> {
     unsafe {
-        let thread = CreateRemoteThread(
-            proc.0,
-            None,
-            0,
-            start,
-            Some(arg),
-            0,
-            None,
-        )
-        .map_err(|e| format!("无法在目标进程创建远程线程: {e}"))?;
+        let thread = CreateRemoteThread(proc.0, None, 0, start, Some(arg), 0, None)
+            .map_err(|e| format!("无法在目标进程创建远程线程: {e}"))?;
         let thread = ThreadHandle(thread);
 
         // Wait (bounded) for the loader to finish.
@@ -180,7 +172,10 @@ pub fn inject(pid: u32, dll_path: &Path) -> Result<(), String> {
             return Err("目标进程内存分配失败 (VirtualAllocEx)".to_string());
         }
         // Ensure the allocation is released on every exit path below.
-        let remote_guard = RemoteAlloc { proc: proc.0, addr: remote };
+        let remote_guard = RemoteAlloc {
+            proc: proc.0,
+            addr: remote,
+        };
 
         // Write the path.
         let mut written = 0usize;

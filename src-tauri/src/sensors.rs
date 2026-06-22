@@ -26,16 +26,16 @@ use serde::Serialize;
 use sysinfo::Networks;
 
 use windows::core::PCWSTR;
+use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
 };
-use windows::Win32::Foundation::ERROR_SUCCESS;
-use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD};
 use windows::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhGetFormattedCounterValue, PdhOpenQueryW, PDH_FMT_COUNTERVALUE,
-    PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA,
+    PdhGetFormattedCounterValue, PdhOpenQueryW, PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_ITEM_W,
+    PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA,
 };
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD};
 
 /// PDH success return code (`ERROR_SUCCESS`).
 const PDH_SUCCESS: u32 = 0;
@@ -51,20 +51,20 @@ const SIDECAR_EXE: &str = "sensord.exe";
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SensorSample {
-    pub gpu_pct: Option<f32>,     // overall GPU utilization %, 0..100
-    pub gpu_name: Option<String>, // primary adapter description
-    pub vram_used: Option<u64>,   // dedicated VRAM used, bytes
-    pub vram_total: Option<u64>,  // dedicated VRAM total, bytes
-    pub disk_pct: Option<f32>,    // disk active time %, 0..100 (cap at 100)
-    pub disk_read: Option<u64>,   // bytes/sec
-    pub disk_write: Option<u64>,  // bytes/sec
-    pub net_up: Option<u64>,      // bytes/sec
-    pub net_down: Option<u64>,    // bytes/sec
-    pub cpu_power: Option<f32>,   // watts
-    pub gpu_power: Option<f32>,   // watts
-    pub cpu_temp: Option<f32>,    // °C
-    pub gpu_temp: Option<f32>,    // °C
-    pub cpu_clock: Option<f64>,   // live CPU clock, MHz (base × % perf)
+    pub gpu_pct: Option<f32>,        // overall GPU utilization %, 0..100
+    pub gpu_name: Option<String>,    // primary adapter description
+    pub vram_used: Option<u64>,      // dedicated VRAM used, bytes
+    pub vram_total: Option<u64>,     // dedicated VRAM total, bytes
+    pub disk_pct: Option<f32>,       // disk active time %, 0..100 (cap at 100)
+    pub disk_read: Option<u64>,      // bytes/sec
+    pub disk_write: Option<u64>,     // bytes/sec
+    pub net_up: Option<u64>,         // bytes/sec
+    pub net_down: Option<u64>,       // bytes/sec
+    pub cpu_power: Option<f32>,      // watts
+    pub gpu_power: Option<f32>,      // watts
+    pub cpu_temp: Option<f32>,       // °C
+    pub gpu_temp: Option<f32>,       // °C
+    pub cpu_clock: Option<f64>,      // live CPU clock, MHz (base × % perf)
     pub cpu_sensors: Vec<CpuSensor>, // deep SMU/CPU sensors (per-core clk, CCD temp, voltages, TDC/EDC…)
 }
 
@@ -289,11 +289,19 @@ fn parse_cpu_sensors(line: &str) -> Option<Vec<CpuSensor>> {
     let arr = json.get("cpu")?.as_array()?;
     let mut out = Vec::with_capacity(arr.len());
     for item in arr {
-        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if name.is_empty() {
             continue;
         }
-        let kind = item.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let kind = item
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let value = item
             .get("value")
             .and_then(|v| v.as_f64())
@@ -611,8 +619,7 @@ pub fn sample() -> SensorSample {
             if PdhCollectQueryData(pdh.query) == PDH_SUCCESS {
                 out.disk_read = read_scalar(pdh.disk_read).map(|v| v.max(0.0) as u64);
                 out.disk_write = read_scalar(pdh.disk_write).map(|v| v.max(0.0) as u64);
-                out.disk_pct =
-                    read_scalar(pdh.disk_time).map(|v| (v.max(0.0) as f32).min(100.0));
+                out.disk_pct = read_scalar(pdh.disk_time).map(|v| (v.max(0.0) as f32).min(100.0));
 
                 // VRAM used: sum dedicated usage across adapter-memory instances.
                 if let Some(mem) = pdh.gpu_mem {
@@ -631,8 +638,11 @@ pub fn sample() -> SensorSample {
                 // collected); the cache write-back is below to satisfy the borrow
                 // checker, since `s` is borrowed immutably by `s.pdh` above.
                 if !s.base_mhz_done {
-                    resolved_base_mhz = read_base_mhz()
-                        .or_else(|| pdh.cpu_freq.and_then(|c| read_scalar(c)).filter(|v| *v > 0.0));
+                    resolved_base_mhz = read_base_mhz().or_else(|| {
+                        pdh.cpu_freq
+                            .and_then(|c| read_scalar(c))
+                            .filter(|v| *v > 0.0)
+                    });
                     base_mhz_resolved = true;
                 }
                 cpu_perf_pct = pdh.cpu_perf.and_then(|c| read_scalar(c));

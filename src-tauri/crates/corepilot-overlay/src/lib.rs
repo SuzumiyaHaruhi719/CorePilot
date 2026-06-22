@@ -71,7 +71,11 @@ fn install_hooks(api: GraphicsApi, hmodule: HINSTANCE) {
     };
 
     if let Err(e) = result {
-        tracing::error!("CorePilot overlay: failed to apply {:?} hooks: {:?}", api, e);
+        tracing::error!(
+            "CorePilot overlay: failed to apply {:?} hooks: {:?}",
+            api,
+            e
+        );
         // Tear ourselves back out cleanly rather than leaving dangling hooks.
         hudhook::eject();
     } else {

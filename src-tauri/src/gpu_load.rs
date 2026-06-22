@@ -11,7 +11,9 @@ use std::thread::JoinHandle;
 use windows::core::PCSTR;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
-use windows::Win32::Graphics::Direct3D::{ID3DBlob, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
+use windows::Win32::Graphics::Direct3D::{
+    ID3DBlob, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
+};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Buffer, ID3D11ComputeShader, ID3D11Device, ID3D11DeviceContext,
     ID3D11UnorderedAccessView, D3D11_BIND_UNORDERED_ACCESS, D3D11_BUFFER_DESC, D3D11_BUFFER_UAV,
@@ -62,7 +64,10 @@ impl GpuLoad {
                 }
             })
             .map_err(|e| format!("spawn gpu-load thread: {e}"))?;
-        Ok(Self { stop, handle: Some(handle) })
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+        })
     }
 }
 
@@ -78,12 +83,15 @@ impl Drop for GpuLoad {
 /// Adapter with the most dedicated VRAM (the discrete GPU on a desktop).
 fn pick_adapter() -> Result<IDXGIAdapter1, String> {
     unsafe {
-        let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(|e| format!("dxgi factory: {e}"))?;
+        let factory: IDXGIFactory1 =
+            CreateDXGIFactory1().map_err(|e| format!("dxgi factory: {e}"))?;
         let mut best: Option<(usize, IDXGIAdapter1)> = None;
         let mut i = 0u32;
         while let Ok(adapter) = factory.EnumAdapters1(i) {
             i += 1;
-            let desc = adapter.GetDesc1().map_err(|e| format!("adapter desc: {e}"))?;
+            let desc = adapter
+                .GetDesc1()
+                .map_err(|e| format!("adapter desc: {e}"))?;
             let name = String::from_utf16_lossy(&desc.Description)
                 .trim_end_matches('\0')
                 .to_string();
@@ -140,7 +148,8 @@ fn build_pipeline(adapter: &IDXGIAdapter1) -> Result<(ID3D11Device, ID3D11Device
         )
         .map_err(|e| format!("compile cs: {e}"))?;
         let blob = blob.ok_or("no shader blob")?;
-        let bytecode = std::slice::from_raw_parts(blob.GetBufferPointer() as *const u8, blob.GetBufferSize());
+        let bytecode =
+            std::slice::from_raw_parts(blob.GetBufferPointer() as *const u8, blob.GetBufferSize());
 
         let mut shader: Option<ID3D11ComputeShader> = None;
         device
@@ -167,7 +176,11 @@ fn build_pipeline(adapter: &IDXGIAdapter1) -> Result<(ID3D11Device, ID3D11Device
             Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN,
             ViewDimension: D3D11_UAV_DIMENSION_BUFFER,
             Anonymous: D3D11_UNORDERED_ACCESS_VIEW_DESC_0 {
-                Buffer: D3D11_BUFFER_UAV { FirstElement: 0, NumElements: ELEMS, Flags: 0 },
+                Buffer: D3D11_BUFFER_UAV {
+                    FirstElement: 0,
+                    NumElements: ELEMS,
+                    Flags: 0,
+                },
             },
         };
         let mut uav: Option<ID3D11UnorderedAccessView> = None;

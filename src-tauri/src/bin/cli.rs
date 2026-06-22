@@ -59,14 +59,19 @@ fn main() {
         }
         "set-priority" => {
             let pid = args.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-            let class = args.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0x20);
+            let class = args
+                .get(3)
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0x20);
             print_result(affinity::set_priority(pid, class).map_err(|e| e.to_string()));
         }
         "services" => match winsvc::list_services() {
             Ok(mut v) => {
                 if let Some(f) = args.get(2) {
                     let f = f.to_lowercase();
-                    v.retain(|s| s.name.to_lowercase().contains(&f) || s.display.to_lowercase().contains(&f));
+                    v.retain(|s| {
+                        s.name.to_lowercase().contains(&f) || s.display.to_lowercase().contains(&f)
+                    });
                 }
                 print_json(&v);
             }
@@ -99,10 +104,17 @@ fn processes(args: &[String]) {
     if let Some(f) = &filter {
         list.retain(|p| {
             p.name.to_lowercase().contains(f)
-                || p.description.as_deref().map(|d| d.to_lowercase().contains(f)).unwrap_or(false)
+                || p.description
+                    .as_deref()
+                    .map(|d| d.to_lowercase().contains(f))
+                    .unwrap_or(false)
         });
     }
-    list.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal));
+    list.sort_by(|a, b| {
+        b.cpu
+            .partial_cmp(&a.cpu)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let total = list.len();
     list.truncate(limit);
     eprintln!("(showing {} of {} processes)", list.len(), total);
@@ -120,7 +132,10 @@ fn print_result(r: Result<(), String>) {
     match r {
         Ok(()) => println!("{{ \"ok\": true }}"),
         Err(e) => {
-            println!("{{ \"ok\": false, \"error\": {} }}", serde_json::to_string(&e).unwrap_or_else(|_| "\"\"".into()));
+            println!(
+                "{{ \"ok\": false, \"error\": {} }}",
+                serde_json::to_string(&e).unwrap_or_else(|_| "\"\"".into())
+            );
             std::process::exit(1);
         }
     }

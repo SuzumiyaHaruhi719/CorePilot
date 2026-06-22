@@ -197,7 +197,10 @@ fn build_rows(block: &OsdSharedBlock) -> Vec<Row> {
     if flags & show::VRAM != 0 {
         rows.push(Row {
             kind: Some(row::VRAM),
-            text: format!("VRAM {}", mem_pair_g(block.vram_used_mb, block.vram_total_mb)),
+            text: format!(
+                "VRAM {}",
+                mem_pair_g(block.vram_used_mb, block.vram_total_mb)
+            ),
         });
     }
     if flags & show::RAM != 0 {
@@ -380,7 +383,7 @@ mod tests {
         let mut b = base_block();
         b.color_rgba = 0xFFFF_FFFF; // white fallback
         b.row_colors_rgba[row::CPU] = 0xFFE600FF; // themed yellow for CPU
-        // CPU row uses its palette slot…
+                                                  // CPU row uses its palette slot…
         let cpu = row_color(&b, Some(row::CPU));
         assert!((cpu[0] - 1.0).abs() < 1e-3 && (cpu[1] - 0.9).abs() < 0.05 && cpu[2] < 0.05);
         // …an unset slot (GPU = 0) and the custom line (None) use the fallback.

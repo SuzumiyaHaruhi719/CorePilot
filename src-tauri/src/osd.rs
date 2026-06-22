@@ -212,7 +212,11 @@ fn osd_max_dim(win: &tauri::WebviewWindow) -> f64 {
         .flatten()
         .map(|m| {
             let scale = m.scale_factor();
-            let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+            let scale = if scale.is_finite() && scale > 0.0 {
+                scale
+            } else {
+                1.0
+            };
             let size = m.size();
             (size.width.max(size.height) as f64) / scale
         })

@@ -154,14 +154,19 @@ fn clean_dir(root: &Path, dir: &Path, acc: &mut CleanResult) {
         let p = entry.path();
         // symlink_metadata does NOT traverse the link, so a junction/symlink is
         // reported as itself rather than its target.
-        let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
+        let Ok(meta) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
 
         if is_reparse_or_symlink(&meta) {
             // A reparse point could point anywhere. Remove the LINK itself if and
             // only if the link node lives under root (its own path is inside the
             // temp tree), but never recurse through it. Use the directory/file
             // remover that matches the link's surface type without following it.
-            if p.parent().map(|parent| stays_under(root, parent)).unwrap_or(false) {
+            if p.parent()
+                .map(|parent| stays_under(root, parent))
+                .unwrap_or(false)
+            {
                 if meta.file_type().is_dir() {
                     // Removes the junction/dir-symlink node, not its target tree.
                     let _ = std::fs::remove_dir(&p);

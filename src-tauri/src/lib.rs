@@ -21,8 +21,8 @@ pub mod process;
 pub mod process_icon;
 pub mod sampler;
 pub mod sensors;
-pub mod smu;
 pub mod serde_u64;
+pub mod smu;
 pub mod state;
 pub mod sysmon;
 pub mod telemetry;
@@ -74,8 +74,9 @@ pub fn run() {
     // button can dump the complete session log to the Downloads folder. Our own
     // crates log at TRACE (finest), everything else at INFO (still captures every
     // warning/error). `RUST_LOG` overrides this if set.
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,corepilot=trace,corepilot_lib=trace"));
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new("info,corepilot=trace,corepilot_lib=trace")
+    });
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_ansi(false)

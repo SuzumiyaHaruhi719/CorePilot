@@ -129,17 +129,33 @@ impl FakeIo {
         // power sits far above quiet idle, while full load stays PPT-capped.
         // This is exactly the regime that broke the 1.5×p_idle verify gate in
         // the field (inflated idle ⇒ ratio unreachable under the power cap).
-        let idle_p = if self.busy_background { 150.0 } else { self.plant.p_idle };
-        let p_target = if self.cpu_on { self.plant.p_load } else { idle_p };
+        let idle_p = if self.busy_background {
+            150.0
+        } else {
+            self.plant.p_idle
+        };
+        let p_target = if self.cpu_on {
+            self.plant.p_load
+        } else {
+            idle_p
+        };
         self.p_cpu_now = if self.plant.throttle && self.t_cpu > 89.0 {
             (p_target * (1.0 - 0.25 * (self.t_cpu - 89.0))).max(0.3 * p_target)
         } else {
             p_target
         };
 
-        let couple = if self.gpu_on { self.plant.couple_c } else { 0.0 };
+        let couple = if self.gpu_on {
+            self.plant.couple_c
+        } else {
+            0.0
+        };
         let cpu_ss = self.plant.t_amb + self.p_cpu_now * self.plant.r_cpu(w_cpu, w_case) + couple;
-        let pg = if self.gpu_on { self.plant.p_gpu_load } else { self.plant.p_gpu_idle };
+        let pg = if self.gpu_on {
+            self.plant.p_gpu_load
+        } else {
+            self.plant.p_gpu_idle
+        };
         let gpu_ss = self.plant.t_gpu_ss(pg, w_case);
         self.t_cpu += (cpu_ss - self.t_cpu) * (1.0 - (-dt / self.plant.tau_cpu).exp());
         self.t_gpu += (gpu_ss - self.t_gpu) * (1.0 - (-dt / self.plant.gpu_tau).exp());
@@ -147,7 +163,10 @@ impl FakeIo {
 
     fn linear_calib(id: &str) -> FanCalibration {
         let points = (0..=10)
-            .map(|i| CalibPoint { duty: i as f32 * 10.0, rpm: 2000.0 * i as f32 / 10.0 })
+            .map(|i| CalibPoint {
+                duty: i as f32 * 10.0,
+                rpm: 2000.0 * i as f32 / 10.0,
+            })
             .collect();
         FanCalibration {
             control_id: id.into(),
@@ -184,7 +203,11 @@ impl TuneIo for FakeIo {
         Some(self.t_gpu)
     }
     fn gpu_power(&self) -> Option<f32> {
-        Some(if self.gpu_on { self.plant.p_gpu_load } else { self.plant.p_gpu_idle })
+        Some(if self.gpu_on {
+            self.plant.p_gpu_load
+        } else {
+            self.plant.p_gpu_idle
+        })
     }
     fn cpu_load_pct(&self) -> Option<f32> {
         if self.busy_background {
@@ -268,22 +291,39 @@ fn happy_path_converges_on_air_cooler() {
         .iter()
         .filter(|c| c.group == Group::Case)
         .all(|c| !c.curve2.is_empty()));
-    assert!(r.curves.iter().filter(|c| c.group == Group::Cpu).all(|c| c.curve2.is_empty()));
-    assert!(r.gpu_cpu_coupling_c.unwrap_or(0.0) > 0.5, "GPU→CPU coupling should be visible");
+    assert!(r
+        .curves
+        .iter()
+        .filter(|c| c.group == Group::Cpu)
+        .all(|c| c.curve2.is_empty()));
+    assert!(
+        r.gpu_cpu_coupling_c.unwrap_or(0.0) > 0.5,
+        "GPU→CPU coupling should be visible"
+    );
 }
 
 #[test]
 fn high_inertia_aio_still_converges() {
-    let plant = Plant { tau_cpu: 150.0, ..Plant::desktop() };
+    let plant = Plant {
+        tau_cpu: 150.0,
+        ..Plant::desktop()
+    };
     let mut io = FakeIo::new(plant);
     let r = expect_done(run_tune(&mut io, &params()));
-    assert!((r.validation.t_v - r.effective_target).abs() <= 2.0, "t_v {}", r.validation.t_v);
+    assert!(
+        (r.validation.t_v - r.effective_target).abs() <= 2.0,
+        "t_v {}",
+        r.validation.t_v
+    );
 }
 
 #[test]
 fn mismatched_plant_is_pulled_in_by_validation() {
     // α=1.4 is outside the fit family — model is wrong, validation must correct.
-    let plant = Plant { alpha: 1.4, ..Plant::desktop() };
+    let plant = Plant {
+        alpha: 1.4,
+        ..Plant::desktop()
+    };
     let mut io = FakeIo::new(plant);
     let r = expect_done(run_tune(&mut io, &params()));
     assert!(
@@ -297,7 +337,10 @@ fn mismatched_plant_is_pulled_in_by_validation() {
 #[test]
 fn weak_cooler_yields_honest_warning_not_abort() {
     // Throttle-governed weak cooler: every loaded point settles near TjMax.
-    let plant = Plant { r_inf: 0.26, ..Plant::desktop() };
+    let plant = Plant {
+        r_inf: 0.26,
+        ..Plant::desktop()
+    };
     let mut io = FakeIo::new(plant);
     let mut p = params();
     p.target_temp_c = 70.0;
@@ -334,13 +377,26 @@ fn user_abort_is_clean() {
 fn runaway_overtemp_aborts_with_fans_at_full() {
     // Throttle disabled = silicon's own guard is lying/broken; the 91 °C
     // runaway line must fire and pin every fan at 100% on the way out.
-    let plant = Plant { t_amb: 45.0, r_inf: 0.30, throttle: false, ..Plant::desktop() };
+    let plant = Plant {
+        t_amb: 45.0,
+        r_inf: 0.30,
+        throttle: false,
+        ..Plant::desktop()
+    };
     let mut io = FakeIo::new(plant);
     match run_tune(&mut io, &params()) {
         AutoTuneOutcome::Aborted(a) => {
-            assert!(a.reason_en.to_lowercase().contains("temperature"), "{}", a.reason_en);
+            assert!(
+                a.reason_en.to_lowercase().contains("temperature"),
+                "{}",
+                a.reason_en
+            );
             for (id, _) in io.fans.clone() {
-                assert_eq!(io.duties.get(&id).copied().unwrap_or(0.0), 100.0, "{id} not at full");
+                assert_eq!(
+                    io.duties.get(&id).copied().unwrap_or(0.0),
+                    100.0,
+                    "{id} not at full"
+                );
             }
         }
         AutoTuneOutcome::Done(_) => panic!("should have aborted"),

@@ -14,8 +14,8 @@
 use serde::Serialize;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W,
-    TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32,
+    CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
+    TH32CS_SNAPMODULE32,
 };
 
 /// Graphics API a process renders with, detected from its loaded modules. Drives
@@ -45,7 +45,11 @@ impl GraphicsApi {
     pub fn is_hookable(self) -> bool {
         matches!(
             self,
-            GraphicsApi::Dx12 | GraphicsApi::Dx11 | GraphicsApi::Dx10 | GraphicsApi::Dx9 | GraphicsApi::OpenGl
+            GraphicsApi::Dx12
+                | GraphicsApi::Dx11
+                | GraphicsApi::Dx10
+                | GraphicsApi::Dx9
+                | GraphicsApi::OpenGl
         )
     }
 }
@@ -62,13 +66,13 @@ const ANTICHEAT_MODULE_MARKERS: &[&str] = &[
     "gameguard",     // nProtect GameGuard (npggnt / GameMon)
     "npggnt",
     "gamemon",
-    "xigncode",      // Wellbia XIGNCODE3
+    "xigncode", // Wellbia XIGNCODE3
     "x3.xem",
-    "mhyprot",       // miHoYo anti-cheat
-    "anticheat",     // generic (covers several vendors' DLLs)
+    "mhyprot",   // miHoYo anti-cheat
+    "anticheat", // generic (covers several vendors' DLLs)
     "battleye",
-    "faceit",        // FACEIT AC
-    "esea",          // ESEA AC
+    "faceit", // FACEIT AC
+    "esea",   // ESEA AC
 ];
 
 /// Graphics-API module markers, in detection priority order (a process can load
@@ -96,10 +100,8 @@ impl Drop for Snapshot {
 /// failure (access denied, race) the closure simply isn't called. Never panics.
 fn for_each_module(pid: u32, mut visit: impl FnMut(&str)) {
     unsafe {
-        let snapshot = match CreateToolhelp32Snapshot(
-            TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
-            pid,
-        ) {
+        let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid)
+        {
             Ok(h) => Snapshot(h),
             Err(_) => return,
         };

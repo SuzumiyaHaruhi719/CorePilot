@@ -252,13 +252,29 @@ fn build_sample(session: &ActiveSession, pid: u32) -> PerfSampleOut {
     };
     // Clocks/fan/mem-ctrl only come from NVML; 0 means "unknown" → null.
     let nonzero = |v: u32| (v != 0).then_some(v as f64);
-    let gpu_clock = if gpu.available { nonzero(gpu.graphics_clock) } else { None };
-    let gpu_mem_clock = if gpu.available { nonzero(gpu.mem_clock) } else { None };
-    let gpu_fan = if gpu.available { Some(gpu.fan_speed_pct as f64) } else { None };
+    let gpu_clock = if gpu.available {
+        nonzero(gpu.graphics_clock)
+    } else {
+        None
+    };
+    let gpu_mem_clock = if gpu.available {
+        nonzero(gpu.mem_clock)
+    } else {
+        None
+    };
+    let gpu_fan = if gpu.available {
+        Some(gpu.fan_speed_pct as f64)
+    } else {
+        None
+    };
     // GPU memory-controller utilization (NVML `utilization_mem`); the frontend
     // `PerfSample.gpuMemCtrlLoad` is optional and the old recorder never set it,
     // but we populate it when NVML exposes it (the report tolerates extra fields).
-    let gpu_mem_ctrl_load = if gpu.available { Some(gpu.utilization_mem as f64) } else { None };
+    let gpu_mem_ctrl_load = if gpu.available {
+        Some(gpu.utilization_mem as f64)
+    } else {
+        None
+    };
 
     // VRAM %: prefer NVML used/total, else the PDH/DXGI sidecar values.
     let vram_load = if gpu.available && gpu.mem_total_bytes > 0 {
@@ -395,9 +411,15 @@ fn tick(app: &AppHandle, active: &mut Option<ActiveSession>) {
     //   - black → NEVER record (kill any false-positive).
     //   - white → force-record (even if NOT auto-detected as a game).
     // The OSD whitelist also force-records (back-compat).
-    let rec_black = exe_lc.as_ref().is_some_and(|e| black.iter().any(|n| n == e));
-    let rec_white = exe_lc.as_ref().is_some_and(|e| white.iter().any(|n| n == e));
-    let osd_whitelisted = exe_lc.as_ref().is_some_and(|e| osd_white.iter().any(|n| n == e));
+    let rec_black = exe_lc
+        .as_ref()
+        .is_some_and(|e| black.iter().any(|n| n == e));
+    let rec_white = exe_lc
+        .as_ref()
+        .is_some_and(|e| white.iter().any(|n| n == e));
+    let osd_whitelisted = exe_lc
+        .as_ref()
+        .is_some_and(|e| osd_white.iter().any(|n| n == e));
 
     // 3. Blacklist: never start recording a blacklisted foreground app; if we
     //    were recording IT, finalize. We do NOT bail out here — a *different*

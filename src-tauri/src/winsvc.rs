@@ -195,7 +195,10 @@ pub fn list_services() -> CoreResult<Vec<ServiceItem>> {
             let display = if entry.lpDisplayName.is_null() {
                 name.clone()
             } else {
-                entry.lpDisplayName.to_string().unwrap_or_else(|_| name.clone())
+                entry
+                    .lpDisplayName
+                    .to_string()
+                    .unwrap_or_else(|_| name.clone())
             };
             // PID straight from the enumeration; 0 means the service isn't running.
             let pid = entry.ServiceStatusProcess.dwProcessId;
@@ -317,7 +320,14 @@ unsafe fn read_service_group_start(svc: SC_HANDLE) -> (String, String) {
     let cb_buf_size = (count * stride) as u32;
 
     bytes_needed = 0;
-    if QueryServiceConfigW(svc, Some(buffer.as_mut_ptr()), cb_buf_size, &mut bytes_needed).is_err() {
+    if QueryServiceConfigW(
+        svc,
+        Some(buffer.as_mut_ptr()),
+        cb_buf_size,
+        &mut bytes_needed,
+    )
+    .is_err()
+    {
         return fallback();
     }
 
@@ -461,7 +471,11 @@ impl Drop for RegKey {
 }
 
 /// Open an existing key for the given access; `None` if it does not exist.
-fn open_key(root: HKEY, sub: &str, access: windows::Win32::System::Registry::REG_SAM_FLAGS) -> Option<RegKey> {
+fn open_key(
+    root: HKEY,
+    sub: &str,
+    access: windows::Win32::System::Registry::REG_SAM_FLAGS,
+) -> Option<RegKey> {
     let sub_w = wide(sub);
     let mut hkey = HKEY::default();
     let rc = unsafe { RegOpenKeyExW(root, PCWSTR(sub_w.as_ptr()), None, access, &mut hkey) };
@@ -720,7 +734,11 @@ pub fn set_startup_enabled(name: String, location: String, enabled: bool) -> Cor
 
     // 12-byte blob: byte[0] = state flag, rest zero.
     let mut blob = [0u8; APPROVED_BLOB_LEN];
-    blob[0] = if enabled { APPROVED_ENABLED } else { APPROVED_DISABLED };
+    blob[0] = if enabled {
+        APPROVED_ENABLED
+    } else {
+        APPROVED_DISABLED
+    };
 
     let name_w = wide(&name);
     let rc = unsafe {

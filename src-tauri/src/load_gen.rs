@@ -29,7 +29,9 @@ impl CpuLoad {
         // full system mask and restore the original afterwards. (Single
         // processor group — fine up to 64 logical CPUs; this is a desktop app.)
         let mut restore_mask = None;
-        let mut n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+        let mut n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8);
         unsafe {
             let mut si = Default::default();
             GetSystemInfo(&mut si);
@@ -65,7 +67,9 @@ impl CpuLoad {
                             // Register-only integer chain; black_box defeats
                             // the optimizer without touching memory.
                             for _ in 0..4096 {
-                                acc = acc.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                                acc = acc
+                                    .wrapping_mul(6364136223846793005)
+                                    .wrapping_add(1442695040888963407);
                                 acc ^= acc >> 33;
                             }
                             std::hint::black_box(acc);
@@ -74,7 +78,11 @@ impl CpuLoad {
                     .expect("spawn cpu-load worker")
             })
             .collect();
-        Self { stop, handles, restore_mask }
+        Self {
+            stop,
+            handles,
+            restore_mask,
+        }
     }
 }
 
@@ -96,7 +104,9 @@ impl Drop for CpuLoad {
 /// Below-normal priority: workers saturate idle cores but yield instantly to
 /// the UI, the sidecar, and the tune thread itself.
 fn lower_thread_priority() {
-    use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+    };
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
@@ -122,11 +132,13 @@ mod tests {
     #[ignore]
     fn cpu_load_measured_utilization() {
         use sysinfo::System;
-        use windows::Win32::System::Threading::GetCurrentProcess;
         use windows::Win32::System::SystemInformation::GetSystemInfo;
+        use windows::Win32::System::Threading::GetCurrentProcess;
 
         // Evidence A: what the spawner believes vs what the SYSTEM has.
-        let par = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
+        let par = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0);
         let sys_cpus = unsafe {
             let mut si = Default::default();
             GetSystemInfo(&mut si);
@@ -160,6 +172,9 @@ mod tests {
         let during = sample(&mut sys);
         drop(load);
         println!("UTILIZATION before={before:.0}% during(below-normal)={during:.0}%");
-        assert!(during >= 90.0, "below-normal load gen only reached {during:.0}%");
+        assert!(
+            during >= 90.0,
+            "below-normal load gen only reached {during:.0}%"
+        );
     }
 }

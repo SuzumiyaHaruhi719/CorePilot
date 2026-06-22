@@ -8,17 +8,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::fan::FanCalibration;
-use crate::fan_autotune::model::{Group, GpuModel, ThermalModel, TunedFanCurve, TuneWarning, WPoint};
+use crate::fan_autotune::model::{
+    GpuModel, Group, ThermalModel, TuneWarning, TunedFanCurve, WPoint,
+};
 
 // --- user parameters (spec §2) ----------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoTuneParams {
-    pub target_temp_c: f32,       // 60..=88, default 85
-    pub target_gpu_temp_c: f32,   // 60..=87, default 80
-    pub quiet_floor_pct: f32,     // 0..=60, default 25
-    pub noise_ceil_pct: f32,      // 40..=100, default 100 (ceil ≥ floor + 15)
+    pub target_temp_c: f32,     // 60..=88, default 85
+    pub target_gpu_temp_c: f32, // 60..=87, default 80
+    pub quiet_floor_pct: f32,   // 0..=60, default 25
+    pub noise_ceil_pct: f32,    // 40..=100, default 100 (ceil ≥ floor + 15)
     /// controlId → group assignment. Excluded fans simply don't appear.
     pub groups: HashMap<String, Group>,
     /// Reuse a recent calibration instead of re-sweeping (spec §3 阶段 1).
@@ -194,7 +196,14 @@ fn wall_ms() -> u64 {
 
 impl RealIo {
     pub fn new(app: tauri::AppHandle, abort_flag: Arc<AtomicBool>) -> Self {
-        Self { app, start: std::time::Instant::now(), start_wall_ms: wall_ms(), cpu_load: None, gpu_load: None, abort_flag }
+        Self {
+            app,
+            start: std::time::Instant::now(),
+            start_wall_ms: wall_ms(),
+            cpu_load: None,
+            gpu_load: None,
+            abort_flag,
+        }
     }
 }
 

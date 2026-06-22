@@ -43,7 +43,10 @@ pub struct TrayPrefs {
 
 impl Default for TrayPrefs {
     fn default() -> Self {
-        Self { close_to_tray: AtomicBool::new(true), hidden_at_ms: AtomicU64::new(0) }
+        Self {
+            close_to_tray: AtomicBool::new(true),
+            hidden_at_ms: AtomicU64::new(0),
+        }
     }
 }
 
@@ -62,7 +65,11 @@ impl TrayPrefs {
     /// when it wasn't hidden via the tray (e.g. a plain show/focus).
     pub fn hidden_ms(&self) -> u64 {
         let at = self.hidden_at_ms.swap(0, Ordering::Relaxed);
-        if at == 0 { 0 } else { now_ms().saturating_sub(at) }
+        if at == 0 {
+            0
+        } else {
+            now_ms().saturating_sub(at)
+        }
     }
 }
 

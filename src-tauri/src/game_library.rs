@@ -98,7 +98,10 @@ pub async fn game_library_list() -> Vec<GameEntry> {
 /// so `…\Doom` does not match `…\Doom2\…`). Both must already be lowercased.
 fn under(exe: &str, root: &str) -> bool {
     let root = root.trim_end_matches('\\');
-    !root.is_empty() && exe.strip_prefix(root).is_some_and(|rest| rest.starts_with('\\'))
+    !root.is_empty()
+        && exe
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('\\'))
 }
 
 // ----------------------------------------------------------------------------
@@ -219,7 +222,10 @@ fn scan_epic() -> Vec<GameEntry> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else {
             continue;
         };
-        let loc = v.get("InstallLocation").and_then(|x| x.as_str()).unwrap_or("");
+        let loc = v
+            .get("InstallLocation")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
         if loc.is_empty() {
             continue;
         }

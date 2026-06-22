@@ -43,7 +43,11 @@ fn run(program: &str, args: &[&str]) -> CoreResult<()> {
     Err(CoreError::Msg(format!(
         "{program} {} 失败: {}",
         args.join(" "),
-        if msg.is_empty() { "非零退出".into() } else { msg }
+        if msg.is_empty() {
+            "非零退出".into()
+        } else {
+            msg
+        }
     )))
 }
 
@@ -76,7 +80,10 @@ fn run_capture(program: &str, args: &[&str]) -> (bool, String) {
 // --- small helpers around the standard tools ----------------------------------
 
 fn reg_add(key: &str, name: &str, kind: &str, data: &str) -> CoreResult<()> {
-    run("reg", &["add", key, "/v", name, "/t", kind, "/d", data, "/f"])
+    run(
+        "reg",
+        &["add", key, "/v", name, "/t", kind, "/d", data, "/f"],
+    )
 }
 
 fn reg_del(key: &str, name: &str) {
@@ -94,12 +101,16 @@ fn powercfg(args: &[&str]) -> CoreResult<()> {
 }
 
 fn ps(script: &str) -> CoreResult<()> {
-    run("powershell", &["-NoProfile", "-NonInteractive", "-Command", script])
+    run(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", script],
+    )
 }
 
 const MMCSS_GAMES: &str =
     r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games";
-const MMCSS_PROFILE: &str = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile";
+const MMCSS_PROFILE: &str =
+    r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile";
 const POWER_BALANCED: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
 const POWER_ULTIMATE: &str = "e9a42b02-d5df-448d-aa00-03f14749eb61";
 
@@ -132,10 +143,7 @@ enum Snapshot {
     /// A service's start type, as an `sc config start=` token
     /// ("auto"|"demand"|"disabled"|"delayed-auto"). `None` if it couldn't be read.
     #[serde(rename = "service")]
-    Service {
-        name: String,
-        start: Option<String>,
-    },
+    Service { name: String, start: Option<String> },
     /// The active power scheme GUID. `None` if it couldn't be read.
     #[serde(rename = "power")]
     Power { guid: Option<String> },
@@ -339,7 +347,10 @@ fn targets_for(id: &str) -> Vec<Snapshot> {
             r"HKLM\SYSTEM\CurrentControlSet\Control\FileSystem",
             "NtfsDisableLastAccessUpdate",
         )],
-        "telemetry_off" => vec![capture_service("DiagTrack"), capture_service("dmwappushservice")],
+        "telemetry_off" => vec![
+            capture_service("DiagTrack"),
+            capture_service("dmwappushservice"),
+        ],
         "ultimate_power_plan" => vec![capture_power()],
         "game_dvr_off" => vec![
             reg(r"HKCU\System\GameConfigStore", "GameDVR_Enabled"),
@@ -472,16 +483,24 @@ pub fn tweak_apply(id: String) -> CoreResult<String> {
             reg_add(MMCSS_GAMES, "SFIO Priority", "REG_SZ", "High")?;
             Ok(())
         }
-        "network_throttling_off" => {
-            reg_add(MMCSS_PROFILE, "NetworkThrottlingIndex", "REG_DWORD", "4294967295")
-        }
+        "network_throttling_off" => reg_add(
+            MMCSS_PROFILE,
+            "NetworkThrottlingIndex",
+            "REG_DWORD",
+            "4294967295",
+        ),
         "foreground_boost" => reg_add(
             r"HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl",
             "Win32PrioritySeparation",
             "REG_DWORD",
             "38", // 0x26 — favour the foreground app
         ),
-        "menu_delay_0" => reg_add(r"HKCU\Control Panel\Desktop", "MenuShowDelay", "REG_SZ", "0"),
+        "menu_delay_0" => reg_add(
+            r"HKCU\Control Panel\Desktop",
+            "MenuShowDelay",
+            "REG_SZ",
+            "0",
+        ),
         "ntfs_lastaccess_off" => run("fsutil", &["behavior", "set", "disablelastaccess", "1"]),
         "telemetry_off" => {
             run_soft("sc", &["stop", "DiagTrack"]);
@@ -496,7 +515,12 @@ pub fn tweak_apply(id: String) -> CoreResult<String> {
             powercfg(&["-setactive", POWER_ULTIMATE])
         }
         "game_dvr_off" => {
-            reg_add(r"HKCU\System\GameConfigStore", "GameDVR_Enabled", "REG_DWORD", "0")?;
+            reg_add(
+                r"HKCU\System\GameConfigStore",
+                "GameDVR_Enabled",
+                "REG_DWORD",
+                "0",
+            )?;
             reg_add(
                 r"HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR",
                 "AllowGameDVR",
@@ -578,7 +602,12 @@ pub fn tweak_revert(id: String, snapshot: String) -> CoreResult<()> {
             "REG_DWORD",
             "2",
         ),
-        "menu_delay_0" => reg_add(r"HKCU\Control Panel\Desktop", "MenuShowDelay", "REG_SZ", "400"),
+        "menu_delay_0" => reg_add(
+            r"HKCU\Control Panel\Desktop",
+            "MenuShowDelay",
+            "REG_SZ",
+            "400",
+        ),
         "ntfs_lastaccess_off" => run("fsutil", &["behavior", "set", "disablelastaccess", "2"]),
         "telemetry_off" => {
             sc_config("DiagTrack", "auto")?;
@@ -588,8 +617,16 @@ pub fn tweak_revert(id: String, snapshot: String) -> CoreResult<()> {
         }
         "ultimate_power_plan" => powercfg(&["-setactive", POWER_BALANCED]),
         "game_dvr_off" => {
-            reg_add(r"HKCU\System\GameConfigStore", "GameDVR_Enabled", "REG_DWORD", "1")?;
-            reg_del(r"HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR", "AllowGameDVR");
+            reg_add(
+                r"HKCU\System\GameConfigStore",
+                "GameDVR_Enabled",
+                "REG_DWORD",
+                "1",
+            )?;
+            reg_del(
+                r"HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR",
+                "AllowGameDVR",
+            );
             Ok(())
         }
 
@@ -618,7 +655,10 @@ pub fn tweak_revert(id: String, snapshot: String) -> CoreResult<()> {
             Ok(())
         }
         "auto_update_off" => {
-            reg_del(r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU", "NoAutoUpdate");
+            reg_del(
+                r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU",
+                "NoAutoUpdate",
+            );
             Ok(())
         }
 
@@ -632,11 +672,14 @@ pub fn tweak_revert(id: String, snapshot: String) -> CoreResult<()> {
 #[tauri::command]
 pub fn create_restore_point() -> CoreResult<()> {
     // Ensure protection is on for C: then checkpoint.
-    run_soft("powershell", &[
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "Enable-ComputerRestore -Drive 'C:\\'",
-    ]);
+    run_soft(
+        "powershell",
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Enable-ComputerRestore -Drive 'C:\\'",
+        ],
+    );
     ps("Checkpoint-Computer -Description 'CorePilot 优化前' -RestorePointType MODIFY_SETTINGS")
 }
