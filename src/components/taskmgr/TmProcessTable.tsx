@@ -1,6 +1,6 @@
 import { AlertTriangle, ArrowDown, ArrowUp, ChevronRight, Loader2, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useMemo, useState, type MouseEvent } from "react";
+import { memo, useMemo, useState, type MouseEvent } from "react";
 import { cn } from "../../lib/cn";
 import { formatBytes } from "../../lib/format";
 import { useTf } from "../../lib/i18n";
@@ -180,7 +180,7 @@ interface RowProps {
 }
 
 /** A single (ungrouped) process row. */
-function LeafRow({ p, cols, detailed, onEndTask, onRowContextMenu }: RowProps & { p: ProcInfo }) {
+const LeafRow = memo(function LeafRow({ p, cols, detailed, onEndTask, onRowContextMenu }: RowProps & { p: ProcInfo }) {
   return (
     <div
       onContextMenu={(e) => onRowContextMenu?.(e, p)}
@@ -217,10 +217,10 @@ function LeafRow({ p, cols, detailed, onEndTask, onRowContextMenu }: RowProps & 
       <EndTaskButton onClick={() => onEndTask(p)} name={p.description ?? p.name} />
     </div>
   );
-}
+});
 
 /** The parent/app row for a multi-instance group. Click toggles expansion. */
-function GroupRow({
+const GroupRow = memo(function GroupRow({
   g,
   cols,
   detailed,
@@ -258,10 +258,10 @@ function GroupRow({
       <span />
     </button>
   );
-}
+});
 
 /** An indented child row revealed when its group is expanded. */
-function ChildRow({ p, cols, detailed, onEndTask, onRowContextMenu }: RowProps & { p: ProcInfo }) {
+const ChildRow = memo(function ChildRow({ p, cols, detailed, onEndTask, onRowContextMenu }: RowProps & { p: ProcInfo }) {
   return (
     <div
       onContextMenu={(e) => onRowContextMenu?.(e, p)}
@@ -290,7 +290,7 @@ function ChildRow({ p, cols, detailed, onEndTask, onRowContextMenu }: RowProps &
       <EndTaskButton onClick={() => onEndTask(p)} name={p.description ?? p.name} />
     </div>
   );
-}
+});
 
 function EndTaskButton({ onClick, name }: { onClick: () => void; name: string }) {
   const tf = useTf();
@@ -342,7 +342,10 @@ export function TmProcessTable({
     });
   }
 
-  const rowProps = { cols, detailed, onEndTask, onRowContextMenu };
+  const rowProps = useMemo(
+    () => ({ cols, detailed, onEndTask, onRowContextMenu }),
+    [cols, detailed, onEndTask, onRowContextMenu],
+  );
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/50">

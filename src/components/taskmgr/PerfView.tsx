@@ -7,7 +7,7 @@ import { cn } from "../../lib/cn";
 import { accentHue } from "../../lib/colors";
 import { formatBytes } from "../../lib/format";
 import { useTf } from "../../lib/i18n";
-import { api, type CpuTopology, type GpuOcInfo, type Overview } from "../../lib/ipc";
+import { api, withTimeout, type CpuTopology, type GpuOcInfo, type Overview } from "../../lib/ipc";
 import { useSettings, type PerfCard } from "../../store/settings";
 import { CoreGraphs } from "../charts/CoreGraphs";
 import { GpuDetail } from "./GpuDetail";
@@ -88,12 +88,17 @@ export function PerfView() {
   // NVML GPU clocks/temperature for the GPU card (graphicsClock isn't in Sensors).
   useEffect(() => {
     let alive = true;
+    let inFlight = false;
     const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
-        const info = await api.gpuOcInfo();
+        const info = await withTimeout(api.gpuOcInfo());
         if (alive) setGpuOc(info);
       } catch {
         /* NVML may be unavailable — the card falls back to Sensors. */
+      } finally {
+        inFlight = false;
       }
     };
     void tick();

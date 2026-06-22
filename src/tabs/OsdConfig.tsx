@@ -81,6 +81,10 @@ export function OsdConfig() {
   // every move; the final position is committed once on pointer-up.
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const previewRef = useRef<HTMLDivElement>(null);
+  // Detaches the in-flight free-placement drag's window listeners. Held in a ref
+  // so an unmount mid-drag can tear them down (otherwise the pointermove/pointerup
+  // handlers leak and could setState on the unmounted component).
+  const dragCleanupRef = useRef<(() => void) | null>(null);
 
   const selectedTarget = useMemo(
     () => targets.find((t) => t.name === selected) ?? null,
@@ -103,8 +107,12 @@ export function OsdConfig() {
   useEffect(() => {
     let alive = true;
     const tick = async () => {
-      const d = await fetchOsdData(needGpu, needFps);
-      if (alive) setData(d);
+      try {
+        const d = await fetchOsdData(needGpu, needFps);
+        if (alive) setData(d);
+      } catch {
+        /* transient sampler hiccup — keep the last value */
+      }
     };
     void tick();
     const id = window.setInterval(() => void tick(), 1000);
@@ -158,6 +166,10 @@ export function OsdConfig() {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+  // Safety net: if the tab unmounts while a free-placement drag is still in
+  // flight, tear down its window-level pointer listeners so they can't leak or
+  // fire on the unmounted component.
+  useEffect(() => () => dragCleanupRef.current?.(), []);
   // Auto-discovered installed-game library (Steam/Epic/GOG) — read-only; the
   // backend matches foreground EXEs against these install roots to detect games.
   const [gameLibrary, setGameLibrary] = useState<GameEntry[]>([]);
@@ -204,15 +216,20 @@ export function OsdConfig() {
         void emit("osd:cfg", { ...globalCfg, freeX: latest.x, freeY: latest.y });
       }
     };
-    const up = () => {
+    const detach = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      dragCleanupRef.current = null;
+    };
+    const up = () => {
+      detach();
       // Commit the final position to the persisted store, then drop transient state.
       applyPatch({ freeX: latest.x, freeY: latest.y });
       setDragPos(null);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    dragCleanupRef.current = detach;
   }
   function toggleMetric(key: string) {
     if (selectedTarget) {

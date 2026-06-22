@@ -5,6 +5,7 @@ import { Button } from "../ui/Button";
 import { cn } from "../../lib/cn";
 import { useTf } from "../../lib/i18n";
 import { api, type SmuStatus } from "../../lib/ipc";
+import { withTimeout } from "../../lib/ipc";
 
 interface PboInputs {
   ppt: string;
@@ -32,11 +33,21 @@ export function SmuTuning() {
 
   useEffect(() => {
     let alive = true;
-    const poll = () => {
-      api.smuStatus().then((s) => alive && setStatus(s)).catch(() => {});
+    let inFlight = false;
+    const poll = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const s = await withTimeout(api.smuStatus());
+        if (alive) setStatus(s);
+      } catch {
+        // keep last status
+      } finally {
+        inFlight = false;
+      }
     };
-    poll();
-    const id = setInterval(poll, 3000);
+    void poll();
+    const id = setInterval(() => void poll(), 3000);
     return () => {
       alive = false;
       clearInterval(id);

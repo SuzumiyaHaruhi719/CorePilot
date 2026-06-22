@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { cn } from "../../lib/cn";
 import { accentHue } from "../../lib/colors";
 import { formatBytes } from "../../lib/format";
-import { api, type GpuOcInfo } from "../../lib/ipc";
+import { api, type GpuOcInfo, withTimeout } from "../../lib/ipc";
 import { Sparkline } from "../charts/Sparkline";
 
 /** Engine graphs shown, in Windows Task-Manager order. */
@@ -42,9 +42,12 @@ export function GpuDetail() {
 
   useEffect(() => {
     let alive = true;
+    let inFlight = false;
     const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
-        const [i, e] = await Promise.all([api.gpuOcInfo(), api.gpuEngines()]);
+        const [i, e] = await withTimeout(Promise.all([api.gpuOcInfo(), api.gpuEngines()]));
         if (!alive) return;
         setInfo(i);
         setEngines(e);
@@ -57,6 +60,8 @@ export function GpuDetail() {
         });
       } catch {
         /* ignore — degrade silently */
+      } finally {
+        inFlight = false;
       }
     };
     void tick();

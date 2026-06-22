@@ -5,6 +5,7 @@ import { classifyFan, clampTuneParams } from "../../lib/autotuneUtils";
 import { useTf } from "../../lib/i18n";
 import {
   api,
+  withTimeout,
   type AutoTuneParams,
   type AutoTuneProgress,
   type AutoTuneResult,
@@ -98,24 +99,31 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
   useEffect(() => {
     if (step !== "running") return;
     let alive = true;
-    const tick = () =>
-      api
-        .getSensors()
-        .then((s) => {
-          if (!alive) return;
-          setLive(s);
-          if (s.cpuTemp != null) {
-            setTempHistory((h) => [...h.slice(-299), s.cpuTemp as number]);
-          }
-        })
-        .catch(() => undefined);
+    let inFlight = false;
+    const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const s = await withTimeout(api.getSensors());
+        if (!alive) return;
+        setLive(s);
+        if (s.cpuTemp != null) {
+          setTempHistory((h) => [...h.slice(-299), s.cpuTemp as number]);
+        }
+      } catch {
+        // keep last reading
+      } finally {
+        inFlight = false;
+      }
+    };
     void tick();
     const id = setInterval(tick, 1000);
     let unlistenCalib: (() => void) | undefined;
     void listen<FanCalibProgress>("fan-calib-progress", (e) => {
       if (alive) setCalib(e.payload);
     }).then((u) => {
-      unlistenCalib = u;
+      if (alive) unlistenCalib = u;
+      else u();
     });
     return () => {
       alive = false;

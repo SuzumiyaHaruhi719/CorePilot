@@ -31,16 +31,6 @@ import { useOsd, useOsdTargets } from "./store/osd";
 /** Last pointer-down position, used as the origin for the theme-switch circular
  *  reveal so the new theme appears to wipe out from where the user clicked. */
 const switchOrigin = { x: NaN, y: NaN };
-if (typeof window !== "undefined") {
-  window.addEventListener(
-    "pointerdown",
-    (e) => {
-      switchOrigin.x = e.clientX;
-      switchOrigin.y = e.clientY;
-    },
-    { capture: true, passive: true },
-  );
-}
 
 const TABS: Record<TabId, () => ReactElement> = {
   cores: CoreAssignment,
@@ -271,6 +261,18 @@ function App() {
   useEffect(() => {
     api.setCloseToTray(closeToTray).catch(() => undefined);
   }, [closeToTray]);
+
+  // Record the last pointer-down position as the origin for the theme-switch
+  // circular reveal. Registered with cleanup so it doesn't accumulate across
+  // hot-reloads / remounts; capture+passive matches the prior global listener.
+  useEffect(() => {
+    const h = (e: PointerEvent) => {
+      switchOrigin.x = e.clientX;
+      switchOrigin.y = e.clientY;
+    };
+    window.addEventListener("pointerdown", h, { capture: true, passive: true });
+    return () => window.removeEventListener("pointerdown", h, { capture: true });
+  }, []);
 
   // Suppress the WebView's default right-click menu (keep it only for text fields).
   useEffect(() => {

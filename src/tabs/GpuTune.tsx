@@ -27,7 +27,7 @@ import { accentHue, hueColor, isLightTheme } from "../lib/colors";
 import { useT, useTf } from "../lib/i18n";
 import { formatBytes } from "../lib/format";
 import { hoverPop } from "../lib/motion";
-import { api, type GpuOcInfo, type GpuOcSettings } from "../lib/ipc";
+import { api, withTimeout, type GpuOcInfo, type GpuOcSettings } from "../lib/ipc";
 import { useGpuProfiles, type GpuProfile } from "../store/gpuProfiles";
 import { useSettings } from "../store/settings";
 
@@ -195,18 +195,22 @@ export function GpuTune() {
   // Live readout polling.
   useEffect(() => {
     let alive = true;
-    const tick = () =>
-      api
-        .gpuOcInfo()
-        .then((i) => {
-          if (alive) {
-            setInfo(i);
-            setInfoLoaded(true);
-          }
-        })
-        .catch(() => {
-          if (alive) setInfoLoaded(true);
-        });
+    let inFlight = false;
+    const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const i = await withTimeout(api.gpuOcInfo());
+        if (alive) {
+          setInfo(i);
+          setInfoLoaded(true);
+        }
+      } catch {
+        if (alive) setInfoLoaded(true);
+      } finally {
+        inFlight = false;
+      }
+    };
     void tick();
     const id = setInterval(tick, Math.max(800, pollMs));
     return () => {

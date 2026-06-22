@@ -15,7 +15,7 @@ import { cn } from "../lib/cn";
 import { hueColor, isLightTheme } from "../lib/colors";
 import { useT, useTf } from "../lib/i18n";
 import { hoverPop } from "../lib/motion";
-import { api, type FanCalibProgress, type FanCalibration, type FanChannel, type FanCurvePoint, type FanInfo, type FanMode, type FanTempSource, type PassiveAdjustment } from "../lib/ipc";
+import { api, withTimeout, type FanCalibProgress, type FanCalibration, type FanChannel, type FanCurvePoint, type FanInfo, type FanMode, type FanTempSource, type PassiveAdjustment } from "../lib/ipc";
 import { useFanAutotune } from "../store/fanAutotune";
 import { useSettings } from "../store/settings";
 import { defaultConfig, FAN_PRESETS, MIN_SAFE_DUTY, useFanProfiles, type FanConfig } from "../store/fanProfiles";
@@ -403,21 +403,28 @@ export function FanControl() {
   // Live polling.
   useEffect(() => {
     let alive = true;
-    const tick = () =>
-      api
-        .fanInfo()
-        .then((i) => {
-          if (!alive) return;
-          setInfo(i);
-          // Remember any header currently spinning (PERSISTED via markSpun), so a
-          // fan that idles back to 0 (BIOS fan-stop) or survives a relaunch stays
-          // visible. Idempotent — only writes when a new id first spins.
-          const spinning = i.channels.filter((c) => (c.rpm ?? 0) > 0).map((c) => c.id);
-          if (spinning.length) markSpun(spinning);
-        })
-        .catch(() => undefined);
+    let inFlight = false;
+    const tick = async () => {
+      // Backpressure: never queue a second fanInfo while one is outstanding.
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const i = await withTimeout(api.fanInfo());
+        if (!alive) return;
+        setInfo(i);
+        // Remember any header currently spinning (PERSISTED via markSpun), so a
+        // fan that idles back to 0 (BIOS fan-stop) or survives a relaunch stays
+        // visible. Idempotent — only writes when a new id first spins.
+        const spinning = i.channels.filter((c) => (c.rpm ?? 0) > 0).map((c) => c.id);
+        if (spinning.length) markSpun(spinning);
+      } catch {
+        // Keep last good readings on transient failure/timeout.
+      } finally {
+        inFlight = false;
+      }
+    };
     void tick();
-    const id = setInterval(tick, Math.max(800, pollMs));
+    const id = setInterval(() => void tick(), Math.max(800, pollMs));
     return () => {
       alive = false;
       clearInterval(id);
@@ -426,6 +433,9 @@ export function FanControl() {
 
   // Passive-learning adjustments arrive from the backend: apply + log.
   useEffect(() => {
+    // `disposed` guards the unmount-vs-late-promise race: if cleanup runs before
+    // listen() resolves, immediately unlisten the handle once it arrives.
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen<PassiveAdjustment>("fan-autotune-passive", (e) => {
       const s = useFanAutotune.getState();
@@ -434,9 +444,13 @@ export function FanControl() {
       s.setResult({ ...s.result, curves: e.payload.curves });
       s.addPassiveLog({ atMs: Date.now(), axis: e.payload.axis, deltaC: e.payload.deltaC, medianResidualC: e.payload.medianResidualC });
     }).then((u) => {
-      unlisten = u;
+      if (disposed) u();
+      else unlisten = u;
     });
-    return () => unlisten?.();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   // Hand-edit detection: configs diverging from the tuned curves pause passive
