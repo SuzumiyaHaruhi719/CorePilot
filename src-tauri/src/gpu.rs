@@ -223,7 +223,10 @@ pub fn gpu_temp_power() -> (Option<f32>, Option<f32>) {
     };
     handle
         .with_device(|device| {
-            let temp = device.temperature(TemperatureSensor::Gpu).ok().map(|t| t as f32);
+            let temp = device
+                .temperature(TemperatureSensor::Gpu)
+                .ok()
+                .map(|t| t as f32);
             let power = device.power_usage().ok().map(|mw| mw as f32 / 1000.0);
             (temp, power)
         })
@@ -286,95 +289,96 @@ pub fn gpu_oc_info_snapshot() -> GpuOcInfo {
             info.name = device.name().unwrap_or_default();
             info.driver_version = device.nvml().sys_driver_version().unwrap_or_default();
 
-    info.graphics_clock = device.clock_info(Clock::Graphics).unwrap_or(0);
-    info.mem_clock = device.clock_info(Clock::Memory).unwrap_or(0);
-    info.sm_clock = device.clock_info(Clock::SM).unwrap_or(0);
+            info.graphics_clock = device.clock_info(Clock::Graphics).unwrap_or(0);
+            info.mem_clock = device.clock_info(Clock::Memory).unwrap_or(0);
+            info.sm_clock = device.clock_info(Clock::SM).unwrap_or(0);
 
-    info.temperature = device
-        .temperature(TemperatureSensor::Gpu)
-        .map(|t| t as i32)
-        .unwrap_or(0);
+            info.temperature = device
+                .temperature(TemperatureSensor::Gpu)
+                .map(|t| t as i32)
+                .unwrap_or(0);
 
-    info.power_usage_w = device.power_usage().map(mw_to_w).unwrap_or(0.0);
+            info.power_usage_w = device.power_usage().map(mw_to_w).unwrap_or(0.0);
 
-    // Power limit + constraints. `supports_power_limit` is true only if both the
-    // enforced limit and the constraints are readable (and not NotSupported).
-    let enforced = device.enforced_power_limit();
-    let constraints = device.power_management_limit_constraints();
-    info.supports_power_limit = !matches!(&enforced, Err(e) if is_unsupported(e))
-        && !matches!(&constraints, Err(e) if is_unsupported(e))
-        && enforced.is_ok()
-        && constraints.is_ok();
-    if let Ok(limit) = enforced {
-        info.power_limit_w = mw_to_w(limit);
-    }
-    if let Ok(c) = constraints {
-        info.power_limit_min_w = mw_to_w(c.min_limit);
-        info.power_limit_max_w = mw_to_w(c.max_limit);
-    }
-
-    // Fan: probe fan 0. NotSupported (or no fans) => manual control unavailable.
-    let fan0 = device.fan_speed(0);
-    info.supports_fan_control = fan0.is_ok();
-    info.fan_speed_pct = fan0.unwrap_or(0);
-
-    if let Ok(util) = device.utilization_rates() {
-        info.utilization_gpu = util.gpu;
-        info.utilization_mem = util.memory;
-    }
-
-    if let Ok(mem) = device.memory_info() {
-        info.mem_used_bytes = mem.used;
-        info.mem_total_bytes = mem.total;
-    }
-
-    // Locked-clocks support: presence of supported graphics clocks is the
-    // proxy. A non-zero max also feeds the UI's slider range.
-    info.max_graphics_clock_mhz = max_graphics_clock(device);
-    // Core-clock locking (NVML) is replaced by NVAPI clock OFFSETS — the lock
-    // crippled GeForce to its minimum; offsets are the real Afterburner control.
-    info.supports_locked_clocks = false;
-    info.supports_clock_offset = crate::nvapi_oc::available();
-    let (c_lo, c_hi, m_lo, m_hi) = crate::nvapi_oc::ranges();
-    info.core_offset_min_mhz = c_lo;
-    info.core_offset_max_mhz = c_hi;
-    info.mem_offset_min_mhz = m_lo;
-    info.mem_offset_max_mhz = m_hi;
-
-    // Temp limit (thermal target). On consumer GeForce the GPU_MAX threshold is
-    // NOT settable via NVML, but the ACOUSTIC_CURR threshold IS — it's the
-    // temperature the card tries to hold (what Afterburner calls "temp limit").
-    // Read current, capture the factory default once, and probe set-ability a
-    // single time with a no-op set, caching the result.
-    if let Ok(cur) = device.temperature_threshold(TemperatureThreshold::AcousticCurr) {
-        info.temp_limit_c = cur;
-        info.temp_limit_min_c = device
-            .temperature_threshold(TemperatureThreshold::AcousticMin)
-            .unwrap_or(TEMP_LIMIT_FLOOR);
-        info.temp_limit_max_c = device
-            .temperature_threshold(TemperatureThreshold::AcousticMax)
-            .unwrap_or(90);
-        {
-            let mut def = DEFAULT_TEMP_LIMIT.lock();
-            if def.is_none() {
-                *def = Some(cur);
+            // Power limit + constraints. `supports_power_limit` is true only if both the
+            // enforced limit and the constraints are readable (and not NotSupported).
+            let enforced = device.enforced_power_limit();
+            let constraints = device.power_management_limit_constraints();
+            info.supports_power_limit = !matches!(&enforced, Err(e) if is_unsupported(e))
+                && !matches!(&constraints, Err(e) if is_unsupported(e))
+                && enforced.is_ok()
+                && constraints.is_ok();
+            if let Ok(limit) = enforced {
+                info.power_limit_w = mw_to_w(limit);
             }
-        }
-        let settable = {
-            let mut cache = TEMP_LIMIT_SETTABLE.lock();
-            match *cache {
-                Some(v) => v,
-                None => {
-                    let ok = device
-                        .set_temperature_threshold(TemperatureThreshold::AcousticCurr, cur as i32)
-                        .is_ok();
-                    *cache = Some(ok);
-                    ok
+            if let Ok(c) = constraints {
+                info.power_limit_min_w = mw_to_w(c.min_limit);
+                info.power_limit_max_w = mw_to_w(c.max_limit);
+            }
+
+            // Fan: probe fan 0. NotSupported (or no fans) => manual control unavailable.
+            let fan0 = device.fan_speed(0);
+            info.supports_fan_control = fan0.is_ok();
+            info.fan_speed_pct = fan0.unwrap_or(0);
+
+            if let Ok(util) = device.utilization_rates() {
+                info.utilization_gpu = util.gpu;
+                info.utilization_mem = util.memory;
+            }
+
+            if let Ok(mem) = device.memory_info() {
+                info.mem_used_bytes = mem.used;
+                info.mem_total_bytes = mem.total;
+            }
+
+            // Locked-clocks support: presence of supported graphics clocks is the
+            // proxy. A non-zero max also feeds the UI's slider range.
+            info.max_graphics_clock_mhz = max_graphics_clock(device);
+            // Core-clock locking (NVML) is replaced by NVAPI clock OFFSETS — the lock
+            // crippled GeForce to its minimum; offsets are the real Afterburner control.
+            info.supports_locked_clocks = false;
+            info.supports_clock_offset = crate::nvapi_oc::available();
+            let (c_lo, c_hi, m_lo, m_hi) = crate::nvapi_oc::ranges();
+            info.core_offset_min_mhz = c_lo;
+            info.core_offset_max_mhz = c_hi;
+            info.mem_offset_min_mhz = m_lo;
+            info.mem_offset_max_mhz = m_hi;
+
+            // Temp limit (thermal target). On consumer GeForce the GPU_MAX threshold is
+            // NOT settable via NVML, but the ACOUSTIC_CURR threshold IS — it's the
+            // temperature the card tries to hold (what Afterburner calls "temp limit").
+            // Read current, capture the factory default once, and probe set-ability a
+            // single time with a no-op set, caching the result.
+            if let Ok(cur) = device.temperature_threshold(TemperatureThreshold::AcousticCurr) {
+                info.temp_limit_c = cur;
+                info.temp_limit_min_c = device
+                    .temperature_threshold(TemperatureThreshold::AcousticMin)
+                    .unwrap_or(TEMP_LIMIT_FLOOR);
+                info.temp_limit_max_c = device
+                    .temperature_threshold(TemperatureThreshold::AcousticMax)
+                    .unwrap_or(90);
+                {
+                    let mut def = DEFAULT_TEMP_LIMIT.lock();
+                    if def.is_none() {
+                        *def = Some(cur);
+                    }
                 }
+                let cached = *TEMP_LIMIT_SETTABLE.lock();
+                let settable = match cached {
+                    Some(v) => v,
+                    None => {
+                        let ok = device
+                            .set_temperature_threshold(
+                                TemperatureThreshold::AcousticCurr,
+                                cur as i32,
+                            )
+                            .is_ok();
+                        *TEMP_LIMIT_SETTABLE.lock() = Some(ok);
+                        ok
+                    }
+                };
+                info.supports_temp_limit = settable;
             }
-        };
-        info.supports_temp_limit = settable;
-    }
 
             info
         })
@@ -435,98 +439,101 @@ pub fn gpu_oc_apply_impl(settings: GpuOcSettings) -> Result<(), String> {
     // All mutations run inside `with_device`; the closure returns the collapsed
     // per-control result, and `?` propagates a device-acquisition failure.
     handle.with_device(|device| {
-    // Count requested controls so we can return Err only if ALL of them failed.
-    let mut requested = 0usize;
-    let mut failures: Vec<String> = Vec::new();
+        // Count requested controls so we can return Err only if ALL of them failed.
+        let mut requested = 0usize;
+        let mut failures: Vec<String> = Vec::new();
 
-    // --- Power limit (clamp to constraints, W -> mW) ---
-    if let Some(target_w) = settings.power_limit_w {
-        requested += 1;
-        match device.power_management_limit_constraints() {
-            Ok(c) => {
-                let target_mw = w_to_mw(target_w);
-                let clamped = clamp_u32(target_mw, c.min_limit, c.max_limit);
-                if let Err(e) = device.set_power_management_limit(clamped) {
-                    failures.push(format!("power limit: {e}"));
-                }
-            }
-            Err(e) => failures.push(format!("power limit constraints unavailable: {e}")),
-        }
-    }
-
-    // --- Core / memory clock OFFSET (NVAPI, Afterburner-style) ---
-    // Shifts the voltage-frequency curve by +/- MHz: raises (or lowers) the
-    // boost ceiling while keeping dynamic boost and idle downclock — unlike the
-    // NVML lock, which pinned GeForce to its minimum under load.
-    if let Some(off) = settings.core_offset_mhz {
-        requested += 1;
-        if let Err(e) = crate::nvapi_oc::set_core_offset(off) {
-            failures.push(format!("core offset: {e}"));
-        }
-    }
-    if let Some(off) = settings.mem_offset_mhz {
-        requested += 1;
-        if let Err(e) = crate::nvapi_oc::set_mem_offset(off) {
-            failures.push(format!("mem offset: {e}"));
-        }
-    }
-
-    // --- Fan speed (clamp to FAN_SPEED_FLOOR..=100, apply to every fan) ---
-    // A manual request only ever arrives via `Some(pct)`; "auto" is `None` and is
-    // restored through `gpu_oc_reset`. So we never honour a manual 0% (which would
-    // stop the fans entirely) — clamp up to the safe floor and cap at 100.
-    if let Some(pct) = settings.fan_speed_pct {
-        requested += 1;
-        let clamped = clamp_u32(pct, FAN_SPEED_FLOOR, 100);
-        match device.num_fans() {
-            Ok(n) if n > 0 => {
-                let mut any_ok = false;
-                let mut fan_errs: Vec<String> = Vec::new();
-                for idx in 0..n {
-                    match device.set_fan_speed(idx, clamped) {
-                        Ok(()) => any_ok = true,
-                        Err(e) => fan_errs.push(format!("fan {idx}: {e}")),
+        // --- Power limit (clamp to constraints, W -> mW) ---
+        if let Some(target_w) = settings.power_limit_w {
+            requested += 1;
+            match device.power_management_limit_constraints() {
+                Ok(c) => {
+                    let target_mw = w_to_mw(target_w);
+                    let clamped = clamp_u32(target_mw, c.min_limit, c.max_limit);
+                    if let Err(e) = device.set_power_management_limit(clamped) {
+                        failures.push(format!("power limit: {e}"));
                     }
                 }
-                // Only count fan control as failed if no fan accepted the value.
-                if !any_ok {
-                    failures.push(format!("fan speed: {}", fan_errs.join("; ")));
-                }
-            }
-            Ok(_) => failures.push("fan speed: device reports no fans".into()),
-            Err(e) => failures.push(format!("fan speed: num_fans failed: {e}")),
-        }
-    }
-
-    // --- Temperature limit (thermal target = GPU_MAX threshold) ---
-    if let Some(target_c) = settings.temp_limit_c {
-        requested += 1;
-        // Capture the factory thermal target BEFORE the first mutation so reset
-        // can restore the true default. `gpu_oc_info` also seeds this, but on a
-        // startup auto-apply path apply runs first — without this, reset would
-        // have no baseline (or worse, a baseline equal to an already-applied
-        // value). Read the live current threshold and store it once.
-        {
-            let mut def = DEFAULT_TEMP_LIMIT.lock();
-            if def.is_none() {
-                if let Ok(cur) = device.temperature_threshold(TemperatureThreshold::AcousticCurr) {
-                    *def = Some(cur);
-                }
+                Err(e) => failures.push(format!("power limit constraints unavailable: {e}")),
             }
         }
-        let lo = device
-            .temperature_threshold(TemperatureThreshold::AcousticMin)
-            .unwrap_or(TEMP_LIMIT_FLOOR);
-        let hi = device
-            .temperature_threshold(TemperatureThreshold::AcousticMax)
-            .unwrap_or(90);
-        let clamped = clamp_u32(target_c, lo, hi);
-        if let Err(e) = device.set_temperature_threshold(TemperatureThreshold::AcousticCurr, clamped as i32) {
-            failures.push(format!("temp limit: {e}"));
-        }
-    }
 
-    finish(requested, failures)
+        // --- Core / memory clock OFFSET (NVAPI, Afterburner-style) ---
+        // Shifts the voltage-frequency curve by +/- MHz: raises (or lowers) the
+        // boost ceiling while keeping dynamic boost and idle downclock — unlike the
+        // NVML lock, which pinned GeForce to its minimum under load.
+        if let Some(off) = settings.core_offset_mhz {
+            requested += 1;
+            if let Err(e) = crate::nvapi_oc::set_core_offset(off) {
+                failures.push(format!("core offset: {e}"));
+            }
+        }
+        if let Some(off) = settings.mem_offset_mhz {
+            requested += 1;
+            if let Err(e) = crate::nvapi_oc::set_mem_offset(off) {
+                failures.push(format!("mem offset: {e}"));
+            }
+        }
+
+        // --- Fan speed (clamp to FAN_SPEED_FLOOR..=100, apply to every fan) ---
+        // A manual request only ever arrives via `Some(pct)`; "auto" is `None` and is
+        // restored through `gpu_oc_reset`. So we never honour a manual 0% (which would
+        // stop the fans entirely) — clamp up to the safe floor and cap at 100.
+        if let Some(pct) = settings.fan_speed_pct {
+            requested += 1;
+            let clamped = clamp_u32(pct, FAN_SPEED_FLOOR, 100);
+            match device.num_fans() {
+                Ok(n) if n > 0 => {
+                    let mut any_ok = false;
+                    let mut fan_errs: Vec<String> = Vec::new();
+                    for idx in 0..n {
+                        match device.set_fan_speed(idx, clamped) {
+                            Ok(()) => any_ok = true,
+                            Err(e) => fan_errs.push(format!("fan {idx}: {e}")),
+                        }
+                    }
+                    // Only count fan control as failed if no fan accepted the value.
+                    if !any_ok {
+                        failures.push(format!("fan speed: {}", fan_errs.join("; ")));
+                    }
+                }
+                Ok(_) => failures.push("fan speed: device reports no fans".into()),
+                Err(e) => failures.push(format!("fan speed: num_fans failed: {e}")),
+            }
+        }
+
+        // --- Temperature limit (thermal target = GPU_MAX threshold) ---
+        if let Some(target_c) = settings.temp_limit_c {
+            requested += 1;
+            // Capture the factory thermal target BEFORE the first mutation so reset
+            // can restore the true default. `gpu_oc_info` also seeds this, but on a
+            // startup auto-apply path apply runs first — without this, reset would
+            // have no baseline (or worse, a baseline equal to an already-applied
+            // value). Read the live current threshold and store it once.
+            if DEFAULT_TEMP_LIMIT.lock().is_none() {
+                if let Ok(cur) = device.temperature_threshold(TemperatureThreshold::AcousticCurr)
+                {
+                    let mut def = DEFAULT_TEMP_LIMIT.lock();
+                    if def.is_none() {
+                        *def = Some(cur);
+                    }
+                }
+            }
+            let lo = device
+                .temperature_threshold(TemperatureThreshold::AcousticMin)
+                .unwrap_or(TEMP_LIMIT_FLOOR);
+            let hi = device
+                .temperature_threshold(TemperatureThreshold::AcousticMax)
+                .unwrap_or(90);
+            let clamped = clamp_u32(target_c, lo, hi);
+            if let Err(e) =
+                device.set_temperature_threshold(TemperatureThreshold::AcousticCurr, clamped as i32)
+            {
+                failures.push(format!("temp limit: {e}"));
+            }
+        }
+
+        finish(requested, failures)
     })?
 }
 
@@ -544,90 +551,92 @@ pub async fn gpu_oc_reset() -> Result<(), String> {
 pub fn gpu_oc_reset_impl() -> Result<(), String> {
     let handle = GpuHandle::init()?;
     handle.with_device(|device| {
+        let mut requested = 0usize;
+        let mut failures: Vec<String> = Vec::new();
 
-    let mut requested = 0usize;
-    let mut failures: Vec<String> = Vec::new();
-
-    // --- Reset NVAPI clock offsets (core + memory) to 0 ---
-    if crate::nvapi_oc::available() {
-        requested += 1;
-        let core_off = crate::nvapi_oc::set_core_offset(0);
-        let _ = crate::nvapi_oc::set_mem_offset(0);
-        if let Err(e) = core_off {
-            failures.push(format!("reset clock offset: {e}"));
-        }
-    }
-
-    // --- Reset core locked clocks (clears any lock left by older builds) ---
-    requested += 1;
-    if let Err(e) = device.reset_gpu_locked_clocks() {
-        failures.push(format!("reset core clocks: {e}"));
-    }
-
-    // --- Reset memory locked clocks (only count it if the GPU supports it) ---
-    match device.reset_mem_locked_clocks() {
-        Ok(()) => requested += 1,
-        Err(NvmlError::NotSupported) => { /* not supported: not a failure */ }
-        Err(e) => {
+        // --- Reset NVAPI clock offsets (core + memory) to 0 ---
+        if crate::nvapi_oc::available() {
             requested += 1;
-            failures.push(format!("reset memory clocks: {e}"));
-        }
-    }
-
-    // --- Restore default power limit ---
-    requested += 1;
-    match device.power_management_limit_default() {
-        Ok(default_mw) => {
-            if let Err(e) = device.set_power_management_limit(default_mw) {
-                failures.push(format!("restore default power limit: {e}"));
+            let core_off = crate::nvapi_oc::set_core_offset(0);
+            let _ = crate::nvapi_oc::set_mem_offset(0);
+            if let Err(e) = core_off {
+                failures.push(format!("reset clock offset: {e}"));
             }
         }
-        Err(NvmlError::NotSupported) => {
-            // No settable power limit on this part: drop the count so a GPU
-            // without power-limit support isn't reported as a failed reset.
-            requested -= 1;
-        }
-        Err(e) => failures.push(format!("default power limit unavailable: {e}")),
-    }
 
-    // --- Restore default fan curve for every fan ---
-    match device.num_fans() {
-        Ok(n) if n > 0 => {
-            requested += 1;
-            let mut any_ok = false;
-            let mut fan_errs: Vec<String> = Vec::new();
-            for idx in 0..n {
-                match device.set_default_fan_speed(idx) {
-                    Ok(()) => any_ok = true,
-                    Err(e) => fan_errs.push(format!("fan {idx}: {e}")),
+        // --- Reset core locked clocks (clears any lock left by older builds) ---
+        requested += 1;
+        if let Err(e) = device.reset_gpu_locked_clocks() {
+            failures.push(format!("reset core clocks: {e}"));
+        }
+
+        // --- Reset memory locked clocks (only count it if the GPU supports it) ---
+        match device.reset_mem_locked_clocks() {
+            Ok(()) => requested += 1,
+            Err(NvmlError::NotSupported) => { /* not supported: not a failure */ }
+            Err(e) => {
+                requested += 1;
+                failures.push(format!("reset memory clocks: {e}"));
+            }
+        }
+
+        // --- Restore default power limit ---
+        requested += 1;
+        match device.power_management_limit_default() {
+            Ok(default_mw) => {
+                if let Err(e) = device.set_power_management_limit(default_mw) {
+                    failures.push(format!("restore default power limit: {e}"));
                 }
             }
-            if !any_ok {
-                failures.push(format!("reset fans: {}", fan_errs.join("; ")));
+            Err(NvmlError::NotSupported) => {
+                // No settable power limit on this part: drop the count so a GPU
+                // without power-limit support isn't reported as a failed reset.
+                requested -= 1;
             }
+            Err(e) => failures.push(format!("default power limit unavailable: {e}")),
         }
-        // No fans / not supported: nothing to reset, not counted.
-        Ok(_) => {}
-        Err(NvmlError::NotSupported) => {}
-        Err(e) => {
-            requested += 1;
-            failures.push(format!("reset fans: num_fans failed: {e}"));
-        }
-    }
 
-    // --- Restore factory thermal target ---
-    if let Some(default_c) = *DEFAULT_TEMP_LIMIT.lock() {
-        match device.set_temperature_threshold(TemperatureThreshold::AcousticCurr, default_c as i32) {
-            Ok(()) => requested += 1,
+        // --- Restore default fan curve for every fan ---
+        match device.num_fans() {
+            Ok(n) if n > 0 => {
+                requested += 1;
+                let mut any_ok = false;
+                let mut fan_errs: Vec<String> = Vec::new();
+                for idx in 0..n {
+                    match device.set_default_fan_speed(idx) {
+                        Ok(()) => any_ok = true,
+                        Err(e) => fan_errs.push(format!("fan {idx}: {e}")),
+                    }
+                }
+                if !any_ok {
+                    failures.push(format!("reset fans: {}", fan_errs.join("; ")));
+                }
+            }
+            // No fans / not supported: nothing to reset, not counted.
+            Ok(_) => {}
             Err(NvmlError::NotSupported) => {}
             Err(e) => {
                 requested += 1;
-                failures.push(format!("reset temp limit: {e}"));
+                failures.push(format!("reset fans: num_fans failed: {e}"));
             }
         }
-    }
 
-    finish(requested, failures)
+        // --- Restore factory thermal target ---
+        let default_c = *DEFAULT_TEMP_LIMIT.lock();
+        if let Some(default_c) = default_c {
+            match device
+                .set_temperature_threshold(TemperatureThreshold::AcousticCurr, default_c as i32)
+            {
+                Ok(()) => requested += 1,
+                Err(NvmlError::NotSupported) => {}
+                Err(e) => {
+                    requested += 1;
+                    failures.push(format!("reset temp limit: {e}"));
+                }
+            }
+        }
+
+        finish(requested, failures)
     })?
 }
 

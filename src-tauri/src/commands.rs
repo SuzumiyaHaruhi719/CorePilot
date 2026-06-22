@@ -10,6 +10,7 @@ use crate::state::AppState;
 use crate::sysmon::Metrics;
 use crate::topology::CpuTopology;
 use serde::Serialize;
+use std::sync::Arc;
 use sysinfo::System;
 use tauri::{Manager, State};
 
@@ -132,14 +133,17 @@ pub async fn get_overview(app: tauri::AppHandle) -> Overview {
 /// this request path — so this can never block, hold `state.sys`, or pile up on a
 /// lock (the recurring freeze class). `app` lazily starts the sampler.
 #[tauri::command]
-pub async fn list_processes(app: tauri::AppHandle) -> Vec<ProcInfo> {
-    (*crate::sampler::proc_snapshot(&app)).clone()
+pub async fn list_processes(app: tauri::AppHandle) -> Arc<Vec<ProcInfo>> {
+    // Return the shared snapshot `Arc` directly — serde serializes `Arc<T>`
+    // byte-identically to `T`, so the IPC wire format and the frontend are
+    // unchanged, and we skip a deep clone of the (large) process vector.
+    crate::sampler::proc_snapshot(&app)
 }
 
 /// O(1) read of the sampler's latest CPU/memory metrics (no `state.sys` lock here).
 #[tauri::command]
-pub async fn get_metrics() -> Metrics {
-    (*crate::sampler::metrics_snapshot()).clone()
+pub async fn get_metrics() -> Arc<Metrics> {
+    crate::sampler::metrics_snapshot()
 }
 
 /// Pin a process to a logical-CPU mask. The mask arrives as a decimal string
@@ -261,10 +265,14 @@ pub fn end_task(pid: u32) -> CoreResult<()> {
 /// the OSD overlay window, this was the primary repeated main-thread stall
 /// behind the recurring "未响应" (same bug class as cfd1ec0's 一键优化 freeze).
 #[tauri::command]
-pub async fn get_sensors() -> crate::error::CoreResult<crate::sensors::SensorSample> {
+pub async fn get_sensors() -> crate::error::CoreResult<std::sync::Arc<crate::sensors::SensorSample>>
+{
     // O(1) read of the sampler's latest sensors snapshot — no SAMPLER lock or PDH/
     // NVML on this request path (the sampler does that off-path on its cadence).
-    Ok((*crate::sampler::sensors_snapshot()).clone())
+    // Return the shared `Arc` directly: serde serializes `Arc<T>` byte-identically
+    // to `T`, so the IPC wire format and the frontend are unchanged, and we skip a
+    // deep clone of the sample.
+    Ok(crate::sampler::sensors_snapshot())
 }
 
 // --- SMU tuning (Curve Optimizer / PBO) — forwarded to the sensord sidecar -----
@@ -313,34 +321,40 @@ pub fn smu_force_stock() -> bool {
 /// returns a non-zero exit code even on success, so we only fail if it can't be
 /// spawned at all.
 #[tauri::command]
-pub fn reveal_in_explorer(path: String) -> CoreResult<()> {
-    use std::os::windows::process::CommandExt;
-    let p = path.trim();
-    if p.is_empty() {
-        return Err("该进程没有可用的文件路径（受保护/系统进程）".into());
-    }
-    // We build the explorer argument with raw_arg (the path may contain spaces),
-    // wrapping the path in double quotes. Because the quoting is unescaped, a path
-    // containing a double quote, control char, or newline could break out of the
-    // quoted argument and inject additional `explorer.exe` arguments. Reject any
-    // such path before constructing the command.
-    if p.contains('"') || p.chars().any(|c| c.is_control()) {
-        return Err("文件路径包含非法字符".into());
-    }
-    // Require the file to actually exist; this both gives a clearer error for
-    // stale paths and ensures we never hand explorer an arbitrary attacker-shaped
-    // string for a nonexistent target.
-    if !std::path::Path::new(p).exists() {
-        return Err("文件路径不存在".into());
-    }
-    // `explorer /select,"<full path>"` — pass verbatim via raw_arg so the path
-    // (which may contain spaces) is quoted correctly for explorer's parser.
-    std::process::Command::new("explorer.exe")
-        .raw_arg(format!("/select,\"{p}\""))
-        .creation_flags(0x0800_0000)
-        .spawn()
-        .map_err(|e| crate::error::CoreError::Msg(format!("打开资源管理器失败: {e}")))?;
-    Ok(())
+pub async fn reveal_in_explorer(path: String) -> CoreResult<()> {
+    // Spawning a child process (and the path-exists stat) can block; run it on the
+    // blocking pool so the main thread's message pump never stalls.
+    tauri::async_runtime::spawn_blocking(move || -> CoreResult<()> {
+        use std::os::windows::process::CommandExt;
+        let p = path.trim();
+        if p.is_empty() {
+            return Err("该进程没有可用的文件路径（受保护/系统进程）".into());
+        }
+        // We build the explorer argument with raw_arg (the path may contain spaces),
+        // wrapping the path in double quotes. Because the quoting is unescaped, a path
+        // containing a double quote, control char, or newline could break out of the
+        // quoted argument and inject additional `explorer.exe` arguments. Reject any
+        // such path before constructing the command.
+        if p.contains('"') || p.chars().any(|c| c.is_control()) {
+            return Err("文件路径包含非法字符".into());
+        }
+        // Require the file to actually exist; this both gives a clearer error for
+        // stale paths and ensures we never hand explorer an arbitrary attacker-shaped
+        // string for a nonexistent target.
+        if !std::path::Path::new(p).exists() {
+            return Err("文件路径不存在".into());
+        }
+        // `explorer /select,"<full path>"` — pass verbatim via raw_arg so the path
+        // (which may contain spaces) is quoted correctly for explorer's parser.
+        std::process::Command::new("explorer.exe")
+            .raw_arg(format!("/select,\"{p}\""))
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .map_err(|e| crate::error::CoreError::Msg(format!("打开资源管理器失败: {e}")))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| crate::error::CoreError::Msg(format!("task failed: {e}")))?
 }
 
 #[tauri::command]
@@ -356,8 +370,11 @@ pub async fn set_power_plan(plan: String) -> CoreResult<()> {
 }
 
 #[tauri::command]
-pub fn list_services() -> CoreResult<Vec<crate::winsvc::ServiceItem>> {
-    crate::winsvc::list_services()
+pub async fn list_services() -> CoreResult<Vec<crate::winsvc::ServiceItem>> {
+    // Enumerating the SCM can block for seconds — keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(crate::winsvc::list_services)
+        .await
+        .map_err(|e| crate::error::CoreError::Msg(format!("task failed: {e}")))?
 }
 
 /// Async: SCM start/stop can block for seconds — keep it off the main thread.
@@ -369,13 +386,22 @@ pub async fn control_service(name: String, action: String) -> CoreResult<()> {
 }
 
 #[tauri::command]
-pub fn list_startup() -> CoreResult<Vec<crate::winsvc::StartupItem>> {
-    crate::winsvc::list_startup()
+pub async fn list_startup() -> CoreResult<Vec<crate::winsvc::StartupItem>> {
+    // Registry/filesystem startup-entry scan (may spawn `reg.exe`) can block —
+    // run it on the blocking pool so the main thread keeps painting.
+    tauri::async_runtime::spawn_blocking(crate::winsvc::list_startup)
+        .await
+        .map_err(|e| crate::error::CoreError::Msg(format!("task failed: {e}")))?
 }
 
 #[tauri::command]
-pub fn set_startup_enabled(name: String, location: String, enabled: bool) -> CoreResult<()> {
-    crate::winsvc::set_startup_enabled(name, location, enabled)
+pub async fn set_startup_enabled(name: String, location: String, enabled: bool) -> CoreResult<()> {
+    // Registry writes / startup-folder edits can block — keep them off the main thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::winsvc::set_startup_enabled(name, location, enabled)
+    })
+    .await
+    .map_err(|e| crate::error::CoreError::Msg(format!("task failed: {e}")))?
 }
 
 /// Open a native file-open dialog for `.exe` files and return the chosen files'
@@ -403,21 +429,28 @@ const AUTOSTART_TASK: &str = "CorePilotAutostart";
 
 /// Whether "开机自启动" is currently enabled (i.e. the logon scheduled task exists).
 #[tauri::command]
-pub fn get_autostart() -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("schtasks")
-            .args(["/query", "/tn", AUTOSTART_TASK])
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW — never flash a console
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        false
-    }
+pub async fn get_autostart() -> bool {
+    // Spawns `schtasks` and waits — run it on the blocking pool so the main thread
+    // never stalls. A join failure degrades to `false`, matching the existing
+    // fail-soft `unwrap_or(false)` contract.
+    tauri::async_runtime::spawn_blocking(|| {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("schtasks")
+                .args(["/query", "/tn", AUTOSTART_TASK])
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW — never flash a console
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Enable/disable "开机自启动" by creating/deleting a logon-triggered, highest-
@@ -425,65 +458,73 @@ pub fn get_autostart() -> bool {
 /// elevated at logon with no UAC prompt. Pairs with "关闭后保留到托盘" for a silent
 /// background start.
 #[tauri::command]
-pub fn set_autostart(enable: bool) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const NO_WINDOW: u32 = 0x0800_0000;
-        if enable {
-            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let exe = exe.to_string_lossy().to_string();
-            // A real Windows path can't contain a double quote; refuse anything odd
-            // so we never inject extra tokens into the schtasks command line.
-            if exe.contains('"') {
-                return Err("可执行文件路径包含非法字符".into());
-            }
-            // schtasks /tr needs the program path quoted (Program Files has spaces).
-            // raw_arg writes the command line verbatim, so we emit `/tr "\"<exe>\""`
-            // → schtasks stores the action as a quoted path. (Command's own arg
-            // escaping of embedded quotes is version-fragile, hence raw_arg.)
-            let mut cmd = std::process::Command::new("schtasks");
-            cmd.raw_arg("/create")
-                .raw_arg("/f")
-                .raw_arg("/tn")
-                .raw_arg(AUTOSTART_TASK)
-                .raw_arg("/tr")
-                .raw_arg(format!("\"\\\"{exe}\\\"\""))
-                .raw_arg("/sc")
-                .raw_arg("onlogon")
-                .raw_arg("/rl")
-                .raw_arg("highest")
-                .creation_flags(NO_WINDOW);
-            let out = cmd.output().map_err(|e| format!("创建开机自启动任务失败: {e}"))?;
-            if !out.status.success() {
-                return Err(format!(
-                    "创建开机自启动任务失败: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ));
-            }
-        } else {
-            let out = std::process::Command::new("schtasks")
-                .args(["/delete", "/f", "/tn", AUTOSTART_TASK])
-                .creation_flags(NO_WINDOW)
-                .output()
-                .map_err(|e| format!("删除开机自启动任务失败: {e}"))?;
-            // Deleting a task that doesn't exist is fine (idempotent "off").
-            if !out.status.success() {
-                let err = String::from_utf8_lossy(&out.stderr);
-                let missing = err.contains("does not exist")
-                    || err.contains("cannot find")
-                    || err.contains("找不到")
-                    || err.contains("不存在");
-                if !missing {
-                    return Err(format!("删除开机自启动任务失败: {}", err.trim()));
+pub async fn set_autostart(enable: bool) -> Result<(), String> {
+    // Spawns `schtasks /create` or `/delete` and waits — run it on the blocking
+    // pool so the main thread's message pump never stalls.
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const NO_WINDOW: u32 = 0x0800_0000;
+            if enable {
+                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                let exe = exe.to_string_lossy().to_string();
+                // A real Windows path can't contain a double quote; refuse anything odd
+                // so we never inject extra tokens into the schtasks command line.
+                if exe.contains('"') {
+                    return Err("可执行文件路径包含非法字符".into());
+                }
+                // schtasks /tr needs the program path quoted (Program Files has spaces).
+                // raw_arg writes the command line verbatim, so we emit `/tr "\"<exe>\""`
+                // → schtasks stores the action as a quoted path. (Command's own arg
+                // escaping of embedded quotes is version-fragile, hence raw_arg.)
+                let mut cmd = std::process::Command::new("schtasks");
+                cmd.raw_arg("/create")
+                    .raw_arg("/f")
+                    .raw_arg("/tn")
+                    .raw_arg(AUTOSTART_TASK)
+                    .raw_arg("/tr")
+                    .raw_arg(format!("\"\\\"{exe}\\\"\""))
+                    .raw_arg("/sc")
+                    .raw_arg("onlogon")
+                    .raw_arg("/rl")
+                    .raw_arg("highest")
+                    .creation_flags(NO_WINDOW);
+                let out = cmd
+                    .output()
+                    .map_err(|e| format!("创建开机自启动任务失败: {e}"))?;
+                if !out.status.success() {
+                    return Err(format!(
+                        "创建开机自启动任务失败: {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ));
+                }
+            } else {
+                let out = std::process::Command::new("schtasks")
+                    .args(["/delete", "/f", "/tn", AUTOSTART_TASK])
+                    .creation_flags(NO_WINDOW)
+                    .output()
+                    .map_err(|e| format!("删除开机自启动任务失败: {e}"))?;
+                // Deleting a task that doesn't exist is fine (idempotent "off").
+                if !out.status.success() {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    let missing = err.contains("does not exist")
+                        || err.contains("cannot find")
+                        || err.contains("找不到")
+                        || err.contains("不存在");
+                    if !missing {
+                        return Err(format!("删除开机自启动任务失败: {}", err.trim()));
+                    }
                 }
             }
+            Ok(())
         }
-        Ok(())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = enable;
-        Ok(())
-    }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = enable;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
 }

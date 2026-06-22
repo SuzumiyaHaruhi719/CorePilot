@@ -42,7 +42,7 @@ pub(crate) fn gpu_snapshot() -> Arc<GpuFullSnapshot> {
 /// Spawn the collector thread (idempotent; safe to call from `setup` and/or lazily).
 pub fn start() {
     STARTED.get_or_init(|| {
-        let _ = std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("corepilot-telemetry".into())
             .spawn(|| loop {
                 let started = Instant::now();
@@ -52,5 +52,10 @@ pub fn start() {
                 let elapsed = started.elapsed();
                 std::thread::sleep(INTERVAL.saturating_sub(elapsed).max(MIN_GAP));
             });
+        if let Err(e) = spawned {
+            // A silent spawn failure leaves the GPU snapshot empty forever — the
+            // "GPU readings disappeared" symptom — so surface it for diagnosis.
+            tracing::warn!("corepilot-telemetry thread failed to spawn: {e}");
+        }
     });
 }

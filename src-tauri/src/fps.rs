@@ -87,8 +87,19 @@ fn record_present(pid: u32) {
     if let Ok(mut map) = PRESENTS.lock() {
         let dq = map.entry(pid).or_default();
         dq.push_back(now);
-        while dq.front().is_some_and(|t| now.duration_since(*t) > RETENTION) {
+        while dq
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > RETENTION)
+        {
             dq.pop_front();
+        }
+        // Drop the bucket entirely once it's empty so dead/idle PIDs don't
+        // accumulate in the map forever. (We just pushed `now`, so this only
+        // fires if RETENTION is degenerate; the read paths can also empty a
+        // bucket, but the next present here reclaims it. Live PIDs always retain
+        // their just-pushed entry, so their FPS is unchanged.)
+        if dq.is_empty() {
+            map.remove(&pid);
         }
     }
 }
@@ -184,7 +195,10 @@ pub fn fps_for(pid: u32) -> Option<f64> {
     let mut map = PRESENTS.lock().ok()?;
     let dq = map.get_mut(&pid)?;
     // Prune stale entries on read so idle/dead PIDs decay to None.
-    while dq.front().is_some_and(|t| now.duration_since(*t) > RETENTION) {
+    while dq
+        .front()
+        .is_some_and(|t| now.duration_since(*t) > RETENTION)
+    {
         dq.pop_front();
     }
     let count = dq

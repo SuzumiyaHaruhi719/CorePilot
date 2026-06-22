@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use tauri::Manager;
 
 /// Hard cap so a long-running session can't grow the in-memory log without bound.
-const MAX_LOG_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LOG_BYTES: usize = 4 * 1024 * 1024;
 
 /// Complete capture of the tracing stream since process start.
 static LOG_BUFFER: Lazy<Mutex<Vec<u8>>> = Lazy::new(|| Mutex::new(Vec::with_capacity(256 * 1024)));
@@ -30,7 +30,7 @@ impl Write for TeeWriter {
             } else if b.len() < MAX_LOG_BYTES {
                 let take = MAX_LOG_BYTES - b.len();
                 b.extend_from_slice(&buf[..take]);
-                b.extend_from_slice(b"\n[log truncated: 16 MB cap reached]\n");
+                b.extend_from_slice(b"\n[log truncated: 4 MB cap reached]\n");
             }
         }
         Ok(buf.len())

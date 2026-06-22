@@ -52,7 +52,15 @@ pub fn process_icon(exe_path: String) -> Option<String> {
         return cached.clone();
     }
     let result = extract_icon_data_url(Path::new(&exe_path));
-    ICON_CACHE.lock().insert(exe_path, result.clone());
+    {
+        let mut cache = ICON_CACHE.lock();
+        // Bounded by distinct exe paths, but cap it so a very long session can't
+        // grow the cache without bound; clear (rather than evict) past the cap.
+        if cache.len() >= 1024 {
+            cache.clear();
+        }
+        cache.insert(exe_path, result.clone());
+    }
     result
 }
 
@@ -137,15 +145,7 @@ fn rasterize_icon(hicon: HICON) -> Option<Vec<u8>> {
 
         let old = SelectObject(mem_dc, HGDIOBJ(dib.0));
         let drawn = DrawIconEx(
-            mem_dc,
-            0,
-            0,
-            hicon,
-            ICON_SIZE,
-            ICON_SIZE,
-            0,
-            None,
-            DI_NORMAL,
+            mem_dc, 0, 0, hicon, ICON_SIZE, ICON_SIZE, 0, None, DI_NORMAL,
         )
         .is_ok();
 

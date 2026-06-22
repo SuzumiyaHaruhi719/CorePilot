@@ -12,25 +12,25 @@ use sysinfo::{ProcessesToUpdate, System};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
-use windows::Win32::Storage::FileSystem::{
-    GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
-};
 use windows::Win32::Security::{
     GetTokenInformation, LookupAccountSidW, TokenUser, PSID, SID_NAME_USE, TOKEN_QUERY, TOKEN_USER,
 };
-use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN;
-use windows::Win32::System::Threading::{
-    GetProcessAffinityMask, GetProcessHandleCount, GetProcessTimes, IsWow64Process2, OpenProcess,
-    OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_TERMINATE, TerminateProcess,
+use windows::Win32::Storage::FileSystem::{
+    GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
 };
 use windows::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhOpenQueryW,
-    PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA,
+    PdhOpenQueryW, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
+    PDH_MORE_DATA,
+};
+use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN;
+use windows::Win32::System::Threading::{
+    GetProcessAffinityMask, GetProcessHandleCount, GetProcessTimes, IsWow64Process2, OpenProcess,
+    OpenProcessToken, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_TERMINATE,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -131,8 +131,13 @@ fn image_name_lower(pid: u32) -> Option<String> {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false.into(), pid).ok()?;
         let mut buf = [0u16; 260]; // MAX_PATH
         let mut len = buf.len() as u32; // in/out: capacity in, written length out
-        let ok = QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len)
-            .is_ok();
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
         let _ = CloseHandle(handle);
         if !ok || len == 0 {
             return None;
@@ -162,9 +167,7 @@ pub fn guard_critical_pid(pid: u32) -> CoreResult<()> {
     }
     if let Some(name) = image_name_lower(pid) {
         if CRITICAL_PROCESS_NAMES.iter().any(|c| *c == name) {
-            return Err(CoreError::Msg(format!(
-                "拒绝操作关键系统进程: {name}"
-            )));
+            return Err(CoreError::Msg(format!("拒绝操作关键系统进程: {name}")));
         }
     }
     Ok(())
@@ -268,7 +271,9 @@ static GPU_QUERY: Lazy<Mutex<Option<GpuQuery>>> = Lazy::new(|| Mutex::new(GpuQue
 /// with `pid_<number>_...`; returns `None` if the prefix or number is absent.
 fn parse_pid(instance: &str) -> Option<u32> {
     let rest = instance.strip_prefix("pid_")?;
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     rest[..end].parse::<u32>().ok()
 }
 
@@ -398,7 +403,8 @@ pub(crate) fn gpu_map() -> GpuSnapshot {
         // First call: ask for the required buffer size.
         let mut size: u32 = 0;
         let mut count: u32 = 0;
-        let rc = PdhGetFormattedCounterArrayW(gpu.util, PDH_FMT_DOUBLE, &mut size, &mut count, None);
+        let rc =
+            PdhGetFormattedCounterArrayW(gpu.util, PDH_FMT_DOUBLE, &mut size, &mut count, None);
         if rc != PDH_MORE_DATA || size == 0 {
             return empty_engine_snapshot();
         }
@@ -490,7 +496,12 @@ pub(crate) fn gpu_map() -> GpuSnapshot {
         attribution.insert(pid, (engine, adapter));
     }
 
-    GpuSnapshot { util, attribution, aggregate, per_engine }
+    GpuSnapshot {
+        util,
+        attribution,
+        aggregate,
+        per_engine,
+    }
 }
 
 /// One full GPU sample for the background telemetry collector: the per-PID +
@@ -574,8 +585,13 @@ pub fn gpu_engine_loads_now() -> HashMap<String, f64> {
         }
         let mut bytes = vec![0u8; size as usize];
         let items_ptr = bytes.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
-        if PdhGetFormattedCounterArrayW(q.util, PDH_FMT_DOUBLE, &mut size, &mut count, Some(items_ptr))
-            != PDH_SUCCESS
+        if PdhGetFormattedCounterArrayW(
+            q.util,
+            PDH_FMT_DOUBLE,
+            &mut size,
+            &mut count,
+            Some(items_ptr),
+        ) != PDH_SUCCESS
         {
             return totals;
         }
@@ -655,8 +671,13 @@ pub(crate) fn gpu_vram_map() -> HashMap<u32, u64> {
         if rc == PDH_MORE_DATA && size > 0 {
             let mut buf = vec![0u8; size as usize];
             let items_ptr = buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
-            if PdhGetFormattedCounterArrayW(ctr, PDH_FMT_DOUBLE, &mut size, &mut count, Some(items_ptr))
-                == PDH_SUCCESS
+            if PdhGetFormattedCounterArrayW(
+                ctr,
+                PDH_FMT_DOUBLE,
+                &mut size,
+                &mut count,
+                Some(items_ptr),
+            ) == PDH_SUCCESS
             {
                 let items = std::slice::from_raw_parts(items_ptr, count as usize);
                 for item in items {
@@ -757,7 +778,9 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
     // Drop cached user/platform for PIDs that no longer exist so the cache
     // tracks the live process set instead of growing unbounded.
     DETAIL_CACHE.lock().retain(|pid, _| live_pids.contains(pid));
-    SETTABLE_CACHE.lock().retain(|pid, _| live_pids.contains(pid));
+    SETTABLE_CACHE
+        .lock()
+        .retain(|pid, _| live_pids.contains(pid));
 
     out
 }
@@ -852,7 +875,15 @@ fn description_for(path: Option<&Path>) -> Option<String> {
         return cached.clone();
     }
     let desc = exe_description(path);
-    DESC_CACHE.lock().insert(key, desc.clone());
+    {
+        let mut cache = DESC_CACHE.lock();
+        // Keyed by exe path, so it's bounded by distinct binaries seen — but guard
+        // against unbounded growth over a very long session by clearing past a cap.
+        if cache.len() >= 4096 {
+            cache.clear();
+        }
+        cache.insert(key, desc.clone());
+    }
     desc
 }
 
@@ -871,8 +902,13 @@ fn exe_description(path: &Path) -> Option<String> {
             return None;
         }
         let mut data = vec![0u8; size as usize];
-        GetFileVersionInfoW(PCWSTR(wide.as_ptr()), Some(0), size, data.as_mut_ptr() as *mut c_void)
-            .ok()?;
+        GetFileVersionInfoW(
+            PCWSTR(wide.as_ptr()),
+            Some(0),
+            size,
+            data.as_mut_ptr() as *mut c_void,
+        )
+        .ok()?;
 
         // Resolve the (language, codepage) translation; fall back to US-English.
         let mut trans_ptr: *mut c_void = std::ptr::null_mut();
@@ -931,8 +967,7 @@ fn exe_description(path: &Path) -> Option<String> {
 /// is a 64-bit count of 100-ns ticks split across high/low words; summed and
 /// divided by 10_000_000 to yield whole seconds.
 fn cpu_seconds(kernel: FILETIME, user: FILETIME) -> u64 {
-    let to_ticks =
-        |ft: FILETIME| ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
+    let to_ticks = |ft: FILETIME| ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
     (to_ticks(kernel) + to_ticks(user)) / 10_000_000
 }
 
@@ -1068,14 +1103,19 @@ fn process_details(pid: u32) -> ProcDetails {
         let mut exit = FILETIME::default();
         let mut kernel = FILETIME::default();
         let mut user_time = FILETIME::default();
-        let cpu_time =
-            if GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user_time)
-                .is_ok()
-            {
-                cpu_seconds(kernel, user_time)
-            } else {
-                0
-            };
+        let cpu_time = if GetProcessTimes(
+            handle,
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user_time,
+        )
+        .is_ok()
+        {
+            cpu_seconds(kernel, user_time)
+        } else {
+            0
+        };
 
         // Static fields (owner + architecture): resolve once per PID, then cache.
         let (user, platform) = {

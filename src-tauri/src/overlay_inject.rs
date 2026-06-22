@@ -42,7 +42,6 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 use crate::overlay::{classify_target, is_anticheat_protected, GraphicsApi, OverlayTarget};
-use crate::state::AppState;
 
 /// File name of the injectable overlay DLL (built by `cargo build -p
 /// corepilot-overlay --release`). Resolved next to the running executable, with
@@ -59,8 +58,14 @@ const SAMPLE_PERIOD: Duration = Duration::from_millis(333);
 /// sets a specific layout. "Show everything" — the sampler writes the
 /// unavailable sentinel (NaN / `u32::MAX`) for metrics this machine can't read,
 /// and the DLL renders `—` for those, so an all-on default degrades cleanly.
-const DEFAULT_LAYOUT_FLAGS: u32 =
-    show::FPS | show::FRAMETIME | show::CPU | show::GPU | show::VRAM | show::RAM | show::DISK | show::NET;
+const DEFAULT_LAYOUT_FLAGS: u32 = show::FPS
+    | show::FRAMETIME
+    | show::CPU
+    | show::GPU
+    | show::VRAM
+    | show::RAM
+    | show::DISK
+    | show::NET;
 
 /// Shared writer + attach state. The `OsdShared` writer mapping lives here for the
 /// whole app lifetime (created in [`start_sampler`]); `target_pid` is the PID the
@@ -174,15 +179,11 @@ fn opt_f64_as_f32(v: Option<f64>) -> f32 {
 /// seqlock with `enabled = 1`. The metric→field mapping mirrors the frontend
 /// `src/lib/osd.ts` (`OSD_METRICS` / `fetchOsdData`) one-for-one so the in-frame
 /// overlay and the window overlay always agree on sources and fallbacks.
-fn publish_metrics(writer: &OsdShared, app: &AppHandle, pid: u32, flags: u32, row_colors: [u32; row::COUNT]) {
-    // --- system CPU + memory (shared `System` in AppState) ---
-    let metrics = {
-        let state = app.state::<AppState>();
-        let mut sys = state.sys.lock();
-        crate::sysmon::sample(&mut sys)
-    };
+fn publish_metrics(writer: &OsdShared, pid: u32, flags: u32, row_colors: [u32; row::COUNT]) {
+    // --- system CPU + memory (single-owner sampler snapshot) ---
+    let metrics = (*crate::sampler::metrics_snapshot()).clone();
     // --- telemetry sidecar + PDH (temps/power/clock/disk/net/vram fallback) ---
-    let sensors = crate::sensors::sample();
+    let sensors = (*crate::sampler::sensors_snapshot()).clone();
     // --- NVML GPU snapshot (preferred for GPU util/temp/power/clocks/VRAM) ---
     let gpu = crate::gpu::gpu_oc_info_snapshot();
     // --- frame pacing for THIS pid (not the foreground) ---
@@ -207,13 +208,28 @@ fn publish_metrics(writer: &OsdShared, app: &AppHandle, pid: u32, flags: u32, ro
     };
     // Clocks/fan only come from NVML; 0 from NVML means "unknown" → sentinel.
     let nonzero = |v: u32| (v != 0).then_some(v as f32);
-    let gpu_clock = if gpu.available { nonzero(gpu.graphics_clock) } else { None };
-    let gpu_mem_clock = if gpu.available { nonzero(gpu.mem_clock) } else { None };
-    let gpu_fan = if gpu.available { Some(gpu.fan_speed_pct as f32) } else { None };
+    let gpu_clock = if gpu.available {
+        nonzero(gpu.graphics_clock)
+    } else {
+        None
+    };
+    let gpu_mem_clock = if gpu.available {
+        nonzero(gpu.mem_clock)
+    } else {
+        None
+    };
+    let gpu_fan = if gpu.available {
+        Some(gpu.fan_speed_pct as f32)
+    } else {
+        None
+    };
 
     // VRAM: prefer NVML used/total, else the PDH/DXGI sidecar values.
     let (vram_used_mb, vram_total_mb) = if gpu.available && gpu.mem_total_bytes > 0 {
-        (bytes_to_mb(gpu.mem_used_bytes), bytes_to_mb(gpu.mem_total_bytes))
+        (
+            bytes_to_mb(gpu.mem_used_bytes),
+            bytes_to_mb(gpu.mem_total_bytes),
+        )
     } else if let (Some(used), Some(total)) = (sensors.vram_used, sensors.vram_total) {
         (bytes_to_mb(used), bytes_to_mb(total))
     } else {
@@ -222,7 +238,10 @@ fn publish_metrics(writer: &OsdShared, app: &AppHandle, pid: u32, flags: u32, ro
 
     // RAM from the system sample (bytes → MB).
     let (ram_used_mb, ram_total_mb) = if metrics.mem_total > 0 {
-        (bytes_to_mb(metrics.mem_used), bytes_to_mb(metrics.mem_total))
+        (
+            bytes_to_mb(metrics.mem_used),
+            bytes_to_mb(metrics.mem_total),
+        )
     } else {
         (u32::MAX, u32::MAX)
     };
@@ -335,7 +354,7 @@ pub fn start_sampler(app: AppHandle) {
                             // deadlock: overlay_set_palette never holds ROW_COLORS
                             // while awaiting STATE.
                             let row_colors = *ROW_COLORS.lock();
-                            publish_metrics(writer, &app, pid, flags, row_colors);
+                            publish_metrics(writer, pid, flags, row_colors);
                         }
                     }
                     _ => write_disabled(),
@@ -518,7 +537,11 @@ fn eject_dll(pid: u32) -> Result<(), String> {
 /// API, DO NOT inject — show the keep-alive window overlay instead and return a
 /// status explaining why.
 #[tauri::command]
-pub fn overlay_attach(app: AppHandle, pid: u32, layout_flags: Option<u32>) -> Result<OverlayStatus, String> {
+pub fn overlay_attach(
+    app: AppHandle,
+    pid: u32,
+    layout_flags: Option<u32>,
+) -> Result<OverlayStatus, String> {
     let target = classify_target(pid);
     let mode = mode_for(&target);
 

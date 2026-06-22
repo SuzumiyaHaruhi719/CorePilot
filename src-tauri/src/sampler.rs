@@ -52,7 +52,7 @@ pub(crate) fn sensors_snapshot() -> Arc<SensorSample> {
 /// Spawn the sampler thread (idempotent).
 pub fn start(app: AppHandle) {
     STARTED.get_or_init(|| {
-        let _ = std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("corepilot-sampler".into())
             .spawn(move || loop {
                 let started = Instant::now();
@@ -79,5 +79,10 @@ pub fn start(app: AppHandle) {
                 let elapsed = started.elapsed();
                 std::thread::sleep(SAMPLE_INTERVAL.saturating_sub(elapsed).max(MIN_GAP));
             });
+        if let Err(e) = spawned {
+            // A silent spawn failure leaves every snapshot empty forever — the
+            // "all readings disappeared" symptom — so surface it for diagnosis.
+            tracing::warn!("corepilot-sampler thread failed to spawn: {e}");
+        }
     });
 }
