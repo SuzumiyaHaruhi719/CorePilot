@@ -7,12 +7,9 @@ use crate::error::{CoreError, CoreResult};
 use crate::optimize::{self, CleanResult, MemDetail};
 use crate::process::{self, ProcInfo};
 use crate::state::AppState;
-use crate::sysmon::{self, Metrics};
+use crate::sysmon::Metrics;
 use crate::topology::CpuTopology;
-use once_cell::sync::Lazy;
-use parking_lot::Mutex;
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
 use sysinfo::System;
 use tauri::{Manager, State};
 
@@ -69,7 +66,7 @@ pub fn set_window_opacity(window: tauri::WebviewWindow, percent: u8) -> Result<(
     Ok(())
 }
 
-#[derive(Default, Serialize)]
+#[derive(Default, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Overview {
     pub cpu_name: String,
@@ -100,89 +97,49 @@ pub fn get_topology(state: State<AppState>) -> CpuTopology {
 /// Async + blocking-pool (see `run_blocking_default`): waits on the shared
 /// `sys` mutex, which `list_processes` can hold for seconds under load — as a
 /// sync command that wait happened on the main thread.
+/// Overview is effectively static (CPU name / core counts / RAM / OS). Compute it
+/// once (locking `state.sys` a single time — it is not polled, so it can never
+/// pile up) and serve the cached clone thereafter.
+static OVERVIEW_CACHE: std::sync::OnceLock<Overview> = std::sync::OnceLock::new();
+
 #[tauri::command]
 pub async fn get_overview(app: tauri::AppHandle) -> Overview {
-    run_blocking_default("get_overview", move || {
-        let state = app.state::<AppState>();
-        let sys = state.sys.lock();
-        let cpu_name = sys
-            .cpus()
-            .first()
-            .map(|c| c.brand().trim().to_string())
-            .unwrap_or_else(|| "Unknown CPU".into());
-        Overview {
-            cpu_name,
-            physical_cores: state.topo.physical_cores,
-            logical_cpus: state.topo.logical_count,
-            ram_total: sys.total_memory(),
-            os: System::long_os_version().unwrap_or_default(),
-            vcache_ccd: state.topo.vcache_ccd,
-            detection: state.topo.detection.clone(),
-        }
-    })
-    .await
+    OVERVIEW_CACHE
+        .get_or_init(|| {
+            let state = app.state::<AppState>();
+            let sys = state.sys.lock();
+            let cpu_name = sys
+                .cpus()
+                .first()
+                .map(|c| c.brand().trim().to_string())
+                .unwrap_or_else(|| "Unknown CPU".into());
+            Overview {
+                cpu_name,
+                physical_cores: state.topo.physical_cores,
+                logical_cpus: state.topo.logical_count,
+                ram_total: sys.total_memory(),
+                os: System::long_os_version().unwrap_or_default(),
+                vcache_ccd: state.topo.vcache_ccd,
+                detection: state.topo.detection.clone(),
+            }
+        })
+        .clone()
 }
 
-/// Async + blocking-pool: a full pass is a system-wide process refresh, a
-/// Toolhelp thread snapshot, and TWO PDH GPU wildcard reads (engine utilization
-/// + per-process VRAM, the latter on a freshly-opened query) — measured at
-/// seconds on a loaded box (~800 processes / ~1400 GPU-engine instances). The
-/// affinity enforcer polls this every 8 s and the process page every poll tick,
-/// so as a sync command it froze the window into "未响应" on that exact cadence.
-/// Single-flight guard + last-snapshot cache for [`list_processes`]. A refresh
-/// holds `state.sys` across a multi-second `refresh_processes` plus a
-/// `CreateToolhelp32Snapshot` thread scan, and the frontend pollers fire on bare
-/// `setInterval` (no in-flight guard). Without this, a slow refresh let calls pile
-/// up on `state.sys` — each a blocking-pool thread — and the growing thread count
-/// made the Toolhelp scan slower still: a runaway congestion collapse that froze
-/// every reading (diagnosed 2026-06-22, 301 threads stuck on the lock). Capping
-/// concurrent refreshes to ONE breaks the loop; concurrent callers get the last
-/// snapshot instantly instead of queuing.
-static PROC_REFRESHING: AtomicBool = AtomicBool::new(false);
-static PROC_CACHE: Lazy<Mutex<Vec<ProcInfo>>> = Lazy::new(|| Mutex::new(Vec::new()));
-
+/// O(1) read of the background sampler's latest process snapshot. The expensive
+/// refresh (system-wide process refresh + Toolhelp thread scan + GPU columns from
+/// the telemetry snapshot) runs once per cadence in `crate::sampler`, NEVER on
+/// this request path — so this can never block, hold `state.sys`, or pile up on a
+/// lock (the recurring freeze class). `app` lazily starts the sampler.
 #[tauri::command]
 pub async fn list_processes(app: tauri::AppHandle) -> Vec<ProcInfo> {
-    // If a refresh is already in flight, return the last snapshot rather than
-    // queuing another (which would block on `state.sys` and grow the pool).
-    if PROC_REFRESHING
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return PROC_CACHE.lock().clone();
-    }
-    // Clear the in-flight flag even if the body panics or the future is dropped.
-    struct Guard;
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            PROC_REFRESHING.store(false, Ordering::Release);
-        }
-    }
-    let _guard = Guard;
-
-    let result = run_blocking_default("list_processes", move || {
-        let state = app.state::<AppState>();
-        let logical = state.topo.logical_count.max(1) as f32;
-        let threads = process::thread_counts().unwrap_or_default();
-        let mut sys = state.sys.lock();
-        process::list(&mut sys, &threads, logical)
-    })
-    .await;
-    *PROC_CACHE.lock() = result.clone();
-    result
+    (*crate::sampler::proc_snapshot(&app)).clone()
 }
 
-/// Async + blocking-pool: the refresh itself is cheap, but it shares the `sys`
-/// mutex with `list_processes` (see above) — a sync command blocked the main
-/// thread for that whole hold.
+/// O(1) read of the sampler's latest CPU/memory metrics (no `state.sys` lock here).
 #[tauri::command]
-pub async fn get_metrics(app: tauri::AppHandle) -> Metrics {
-    run_blocking_default("get_metrics", move || {
-        let state = app.state::<AppState>();
-        let mut sys = state.sys.lock();
-        sysmon::sample(&mut sys)
-    })
-    .await
+pub async fn get_metrics() -> Metrics {
+    (*crate::sampler::metrics_snapshot()).clone()
 }
 
 /// Pin a process to a logical-CPU mask. The mask arrives as a decimal string
@@ -305,7 +262,9 @@ pub fn end_task(pid: u32) -> CoreResult<()> {
 /// behind the recurring "未响应" (same bug class as cfd1ec0's 一键优化 freeze).
 #[tauri::command]
 pub async fn get_sensors() -> crate::error::CoreResult<crate::sensors::SensorSample> {
-    run_blocking(|| Ok(warn_slow("get_sensors", crate::sensors::sample))).await
+    // O(1) read of the sampler's latest sensors snapshot — no SAMPLER lock or PDH/
+    // NVML on this request path (the sampler does that off-path on its cadence).
+    Ok((*crate::sampler::sensors_snapshot()).clone())
 }
 
 // --- SMU tuning (Curve Optimizer / PBO) — forwarded to the sensord sidecar -----
