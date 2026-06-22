@@ -221,16 +221,14 @@ fn exe_path(app: &AppHandle, pid: u32) -> Option<String> {
 /// util/temp/power/clocks/VRAM, fall back to the PDH/sidecar aggregate; CPU
 /// load/mem from the shared `System`; CPU temp/power/clock + disk + net from the
 /// sensors sample. Unavailable metrics are `None` (→ `null`), never fabricated.
-fn build_sample(app: &AppHandle, session: &ActiveSession, pid: u32) -> PerfSampleOut {
-    // System CPU + memory (shared `System` in AppState).
-    let metrics = {
-        let state = app.state::<AppState>();
-        let mut sys = state.sys.lock();
-        crate::sysmon::sample(&mut sys)
-    };
-    // Telemetry sidecar + PDH (temps/power/clock/disk/net/vram fallback).
-    let sensors = crate::sensors::sample();
-    // NVML GPU snapshot (preferred for GPU util/temp/power/clocks/VRAM).
+fn build_sample(session: &ActiveSession, pid: u32) -> PerfSampleOut {
+    // CPU + memory and sensors come from the single-owner sampler snapshots, so
+    // this 5 Hz path never locks `state.sys` or re-samples hardware (that pile-up
+    // froze the app). ≤1 sampler tick stale — fine for a session recorder.
+    let metrics = (*crate::sampler::metrics_snapshot()).clone();
+    let sensors = (*crate::sampler::sensors_snapshot()).clone();
+    // NVML GPU snapshot (preferred for GPU util/temp/power/clocks/VRAM). Background
+    // thread + shared NVML handle, so it cannot stall the IPC router.
     let gpu = crate::gpu::gpu_oc_info_snapshot();
     // Frame pacing for THIS pid (the recorded game, not the foreground).
     let fps = crate::fps::stats_for_pid(pid);
@@ -434,7 +432,7 @@ fn tick(app: &AppHandle, active: &mut Option<ActiveSession>) {
     //    background. As long as its process is alive we keep sampling, so
     //    alt-tabbing out no longer leaves a hole in the data.
     if let Some(live) = active.as_ref() {
-        let s = build_sample(app, live, live.pid);
+        let s = build_sample(live, live.pid);
         if let Some(live) = active.as_mut() {
             live.samples.push(s);
         }
