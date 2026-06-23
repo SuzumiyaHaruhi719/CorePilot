@@ -187,6 +187,7 @@ fn field_class(key: &str) -> FieldClass {
 /// Worst-case template string for a field class, measured once per tick to fix
 /// that field's box width. `None` for `Other` (sized to the live string). The
 /// templates are the widest the formatter can produce (`{:.1}%` ≤ `100.0%`, etc.).
+#[allow(dead_code)] // kept for reference; live-width field sizing no longer uses templates
 fn field_template(class: FieldClass) -> Option<&'static str> {
     match class {
         FieldClass::Percent => Some("100.0%"),
@@ -1216,37 +1217,16 @@ unsafe fn tick() {
             }
         }
 
-        // Measure the worst-case template width of each numeric field class ONCE
-        // (with the same engine/typography as the live values, so the field box is
-        // the true digit max). The live value right-aligns into this fixed box, so
-        // the right-align gutter is constant tick-to-tick. A class whose template
-        // measures NARROWER than the live string still uses the live width (the
-        // `.max` below), so a freak over-wide reading can never clip.
-        let measure_w = |s: &str| -> i32 {
-            if use_d2d {
-                measure_d2d(rs, s).map(|(w, _)| w).unwrap_or_else(|| measure(hdc, s).0)
-            } else {
-                measure(hdc, s).0
-            }
-        };
-        let tmpl_percent = measure_w(field_template(FieldClass::Percent).unwrap());
-        let tmpl_temp = measure_w(field_template(FieldClass::Temp).unwrap());
-        let tmpl_clockpower = measure_w(field_template(FieldClass::ClockPower).unwrap());
-        let tmpl_mem = measure_w(field_template(FieldClass::Mem).unwrap());
-        let tmpl_netrate = measure_w(field_template(FieldClass::NetRate).unwrap());
-        // Worst-case field width for a value: its class template (if any) vs the
-        // live measured width — never smaller than the live string.
-        let class_w = move |class: FieldClass, live: i32| -> i32 {
-            let t = match class {
-                FieldClass::Percent => tmpl_percent,
-                FieldClass::Temp => tmpl_temp,
-                FieldClass::ClockPower => tmpl_clockpower,
-                FieldClass::Mem => tmpl_mem,
-                FieldClass::NetRate => tmpl_netrate,
-                FieldClass::Other => 0,
-            };
-            t.max(live)
-        };
+        // Field width = the LIVE measured width. With tabular figures the digit
+        // advances are uniform, so corresponding CPU/GPU values measure to the
+        // SAME width and their columns still lock WITHOUT any worst-case padding —
+        // and that padding was exactly what produced the uneven leading gaps (a
+        // short `41.3%` right-aligned inside a `100.0%`-wide box left a big gutter
+        // before it). Sizing each field to its live content keeps every gap one of
+        // the two constants (`inner` / `item`) → visually uniform spacing. The
+        // plate may grow by one digit when a reading crosses 9→10→100, which is
+        // fine (it re-docks each tick; tray overlap is acceptable).
+        let class_w = |_class: FieldClass, live: i32| -> i32 { live };
         SelectObject(hdc, old);
         let _ = ReleaseDC(Some(rs.hwnd), hdc);
 
