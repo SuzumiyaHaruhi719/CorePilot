@@ -260,6 +260,7 @@ pub fn run() {
             commands::end_task,
             commands::get_sensors,
             commands::reveal_in_explorer,
+            disk_scan::startup_directive,
             disk_scan::disk_list_volumes,
             disk_scan::disk_scan_start,
             disk_scan::disk_scan_cancel,

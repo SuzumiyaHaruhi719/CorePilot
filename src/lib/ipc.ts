@@ -659,6 +659,9 @@ export const DISK_FLAG = {
 
 export const api = {
   getOverview: () => invoke<Overview>("get_overview"),
+  /** Startup directive from COREPILOT_STARTUP (null when unset) — e.g. "disk" to
+   *  open the Disk Analyzer + auto-scan the system drive (automated verification). */
+  startupDirective: () => invoke<string | null>("startup_directive"),
   /** Enumerate fixed + removable volumes for the Disk Analyzer picker (Zone A). */
   diskListVolumes: () => invoke<VolumeInfo[]>("disk_list_volumes"),
   /** Start scanning each disk on its own dedicated thread; returns the keys. O(1). */

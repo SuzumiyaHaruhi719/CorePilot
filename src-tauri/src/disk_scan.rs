@@ -1688,6 +1688,15 @@ mod win {
 // Tauri commands (spec §2.9) — all O(1) / non-blocking.
 // =============================================================================
 
+/// Startup directive from the `COREPILOT_STARTUP` env var (empty when unset).
+/// The frontend reads this on mount to optionally jump to a tab + auto-scan — a
+/// hook for automated/headless verification (e.g. `COREPILOT_STARTUP=disk` opens
+/// the Disk Analyzer and scans the system drive). No effect for normal launches.
+#[tauri::command]
+pub fn startup_directive() -> Option<String> {
+    std::env::var("COREPILOT_STARTUP").ok().filter(|s| !s.is_empty())
+}
+
 /// Enumerate fixed + removable volumes for the disk-picker landing (Zone A).
 ///
 /// O(1) from the IPC router's perspective: the Win32 enumeration runs on the

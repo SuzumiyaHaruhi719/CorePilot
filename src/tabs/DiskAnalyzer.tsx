@@ -1,6 +1,6 @@
 import { motion } from "motion/react";
 import { HardDrive, Plus, RefreshCw, RotateCw, Scan, X } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
 import { TabHeader } from "../components/ui/TabHeader";
@@ -82,6 +82,22 @@ export function DiskAnalyzer() {
     },
     [volumes, openDisks],
   );
+
+  // Auto-scan the system drive ONCE when launched via COREPILOT_STARTUP=disk
+  // (a hook for automated/headless verification — opens straight into a live
+  // full-disk scan). No-op for normal launches and when a disk is already open.
+  const autoScanned = useRef(false);
+  useEffect(() => {
+    if (autoScanned.current || !volumes || order.length > 0) return;
+    autoScanned.current = true;
+    void api.startupDirective().then((d) => {
+      if (!d || !d.toLowerCase().startsWith("disk")) return;
+      const sys =
+        volumes.find((v) => v.supported && (v.letter ?? "").toUpperCase().startsWith("C")) ??
+        volumes.find((v) => v.supported);
+      if (sys) startScan([sys.scanId]);
+    });
+  }, [volumes, order.length, startScan]);
 
   const toggle = useCallback((scanId: string) => {
     setSelected((prev) => {

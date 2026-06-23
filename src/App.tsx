@@ -138,6 +138,18 @@ function App() {
     return useUi.persist.onFinishHydration(applyOpt);
   }, []);
 
+  // Startup directive (COREPILOT_STARTUP env var) — a hook for automated
+  // verification: "disk" opens the Disk Analyzer (which then auto-scans the
+  // system drive). No-op for normal launches (the var is unset).
+  useEffect(() => {
+    api
+      .startupDirective()
+      .then((d) => {
+        if (d && d.toLowerCase().startsWith("disk")) useUi.getState().setTab("disk");
+      })
+      .catch(() => undefined);
+  }, []);
+
   // Re-show the OSD overlay on launch if it was left enabled OR desktop mode is
   // on (the overlay window must exist for either; store is async → wait for it).
   useEffect(() => {
