@@ -34,6 +34,12 @@ const EN: Record<string, string> = {
   "未检测到可扫描的磁盘": "No scannable disks detected",
   "扫描": "Scan",
   "无法读取": "Unavailable",
+  // Disk Analyzer — treemap workspace (Phase 4)
+  "占用空间": "Allocated",
+  "逻辑大小": "Logical",
+  "按层级": "By depth",
+  "按类型": "By type",
+  "细节密度": "Detail",
   "Ryzen SMU 级调优 —— 深度遥测、Curve Optimizer 撤压、PBO 限制。实验性:写入为实时覆盖,重启恢复 BIOS 设置。": "Ryzen SMU-level tuning — deep telemetry, Curve Optimizer undervolt, PBO limits. Experimental: writes are live overrides; reboot restores BIOS.",
   "启用 AMD 调优（实验性 · 危险）": "Enable AMD tuning (experimental · risky)",
   "解锁「AMD 优化」标签:Ryzen SMU 级 Curve Optimizer 撤压 / PBO 限制。内核级写入,设置不当可能导致 WHEA 报错、死机或无法开机;默认关闭以防误触。开启后侧栏会出现「AMD 优化」标签。": "Unlocks the AMD Tuning tab: Ryzen SMU-level Curve Optimizer undervolt / PBO limits. Kernel-level writes — a bad value can cause WHEA errors, hangs, or failure to boot. Off by default to prevent accidents; enabling it reveals the AMD Tuning tab in the sidebar.",

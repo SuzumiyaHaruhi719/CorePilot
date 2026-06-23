@@ -8,24 +8,32 @@ import { cn } from "../lib/cn";
 import { formatBytes } from "../lib/format";
 import { useT, tf } from "../lib/i18n";
 import { api, type VolumeInfo } from "../lib/ipc";
+import { DiskWorkspace } from "./disk/DiskWorkspace";
 
 /**
  * Disk Space Analyzer — main-nav `disk` tab.
  *
- * PHASE 0 (Skeleton & nav) ships ONLY Zone A: the disk-picker landing. It lists
- * fixed + removable volumes (via `disk_list_volumes`) with size/usage, a
- * multi-select checkbox, and a primary Scan button. Single-click on a row body
- * scans just that disk. The actual scan engine, per-disk `SecondaryTabs`, the
- * treemap, and the `diskScan.ts` store arrive in Phase 1+; `startScan` is a stub
- * here so the picker interaction is complete but inert.
+ * Zone A is the disk-picker landing: it lists fixed + removable volumes (via
+ * `disk_list_volumes`) with size/usage, a multi-select checkbox, and a primary
+ * Scan button. Single-click on a row body scans just that disk.
  *
- * See docs/superpowers/specs/2026-06-23-disk-space-analyzer-design.md §4.2.
+ * PHASE 4 wires the workspace (Zone C): once a scan is started, the tab switches
+ * to a single-disk `DiskWorkspace` (treemap + breadcrumb drill + detail panel +
+ * Show-by / Color / LOD / Pause toolbar). A back button returns to the picker.
+ * The per-disk `SecondaryTabs` strip, concurrent multi-disk scanning, the
+ * coalesced `disk-scan://progress` listener and the `diskScan.ts` store are
+ * Phase 5 — for now the picker hands the FIRST started scan to the workspace.
+ *
+ * See docs/superpowers/specs/2026-06-23-disk-space-analyzer-design.md §3.4/§4.
  */
 export function DiskAnalyzer() {
   const t = useT();
   const [volumes, setVolumes] = useState<VolumeInfo[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
+  // The scan currently shown in the workspace (Phase 4: one at a time). `null` →
+  // the picker (Zone A) is shown.
+  const [active, setActive] = useState<{ scanId: string; rootLabel: string } | null>(null);
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -40,17 +48,22 @@ export function DiskAnalyzer() {
     refresh();
   }, [refresh]);
 
-  // Phase 1 wires the real backend scan engine: each requested disk gets its own
-  // dedicated owner thread (O(1) kickoff). The per-disk `SecondaryTabs` strip, the
-  // live `disk-scan://progress` listener, and the treemap arrive in Phase 3+/5 via
-  // the `diskScan.ts` store; here we simply start the backend scans so the engine
-  // is exercised end-to-end. `disk_scan_start` returns immediately.
-  const startScan = useCallback((scanIds: string[]) => {
-    if (scanIds.length === 0) return;
-    void api.diskScanStart(scanIds).catch(() => {
-      /* engine surfaces failures via the Error status + progress event (Phase 5). */
-    });
-  }, []);
+  // Start the real backend scan engine: each requested disk gets its own dedicated
+  // owner thread (O(1) kickoff). `disk_scan_start` returns immediately. Phase 4
+  // then opens the FIRST started disk in the workspace (treemap drill / detail);
+  // Phase 5 turns the rest into concurrent per-disk `SecondaryTabs`.
+  const startScan = useCallback(
+    (scanIds: string[]) => {
+      if (scanIds.length === 0) return;
+      void api.diskScanStart(scanIds).catch(() => {
+        /* engine surfaces failures via the Error status + progress event (Phase 5). */
+      });
+      const first = scanIds[0];
+      const vol = (volumes ?? []).find((v) => v.scanId === first);
+      setActive({ scanId: first, rootLabel: vol?.letter ?? vol?.root ?? first });
+    },
+    [volumes],
+  );
 
   const toggle = useCallback((scanId: string) => {
     setSelected((prev) => {
@@ -63,6 +76,18 @@ export function DiskAnalyzer() {
 
   const scannable = (volumes ?? []).filter((v) => v.supported);
   const selectedScannable = scannable.filter((v) => selected.has(v.scanId)).map((v) => v.scanId);
+
+  // Workspace (Zone C) once a scan is active — the treemap + drill + detail + toolbar.
+  if (active) {
+    return (
+      <DiskWorkspace
+        key={active.scanId}
+        scanId={active.scanId}
+        rootLabel={active.rootLabel}
+        onBack={() => setActive(null)}
+      />
+    );
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
