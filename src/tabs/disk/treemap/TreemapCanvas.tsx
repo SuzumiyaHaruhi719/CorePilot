@@ -50,6 +50,17 @@ import { displayName } from "./names";
  * See docs/superpowers/specs/2026-06-23-disk-space-analyzer-design.md §3.
  */
 
+/** Reduce-motion is active when EITHER the in-app flag (`data-reduce-motion`) is
+ *  set OR the OS-level `prefers-reduced-motion` media query matches, so users who
+ *  only set the OS preference still get snap-to-final geometry, not full tweens. */
+function prefersReducedMotion(): boolean {
+  if (document.documentElement.dataset.reduceMotion === "true") return true;
+  return (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
 /** Canvas label fonts — set explicitly (canvas ignores CSS font-features). */
 const NAME_FONT = '600 11px Inter, ui-sans-serif, system-ui, sans-serif';
 const SIZE_FONT = '10px "Cascadia Mono", ui-monospace, monospace';
@@ -538,7 +549,7 @@ export function TreemapCanvas({
   // On a new target (layout) / palette / size: either tween toward it (motion on)
   // or snap-draw it directly (reduce-motion / settled path — no regression).
   useEffect(() => {
-    const reduce = document.documentElement.dataset.reduceMotion === "true";
+    const reduce = prefersReducedMotion();
     if (reduce) {
       // Instant: clear any in-flight tween, set prev = target, draw once.
       if (rafId.current) {

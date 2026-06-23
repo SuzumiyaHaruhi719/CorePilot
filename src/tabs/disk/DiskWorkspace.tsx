@@ -90,12 +90,30 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
   const focusPath = stack[stack.length - 1]?.path ?? null;
   const progress = view?.progress ?? null;
   const scanning = progress?.status === "scanning";
-  const generation = progress?.generation ?? 0;
 
   const patch = useCallback(
     (p: Partial<PerDiskView>) => patchView(scanId, p),
     [patchView, scanId],
   );
+
+  // Cheap signature of the last committed view — guards against no-op publishes
+  // (a poll that returns a materially identical snapshot) forcing a full treemap
+  // relayout + tween cycle. Genuine growth changes the signature and still commits.
+  const lastTreeSig = useRef<string>("");
+  const treeSig = (tv: TreeView): string => {
+    const root = tv.nodes[0];
+    // Aggregate root bytes + file count + node count + focus + generation — any
+    // genuine growth moves one of these; a no-op republish leaves them identical.
+    const rootBytes = root ? root.allocSize + root.logicalSize : 0;
+    const rootFiles = root?.fileCount ?? 0;
+    return `${tv.generation}|${tv.focusPath}|${tv.nodes.length}|${rootFiles}|${rootBytes}`;
+  };
+  const commitTree = useCallback((tv: TreeView) => {
+    const sig = treeSig(tv);
+    if (sig === lastTreeSig.current) return; // no material change → skip relayout
+    lastTreeSig.current = sig;
+    setTree(tv);
+  }, []);
 
   // Pull the tree for the current focus. Re-runs on a drill/ascend or an LOD-knob
   // change. Selection clears on a focus change. This is the AUTHORITATIVE fetch;
@@ -107,7 +125,10 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
       .diskTree(scanId, focusPath, { minBytes: minBytesFor(lod) })
       .then((tv) => {
         if (!alive) return;
-        setTree(tv);
+        // A focus/LOD change is authoritative: always commit (reset the guard so a
+        // same-signature view across focuses isn't suppressed).
+        lastTreeSig.current = "";
+        commitTree(tv);
         setSelected(null);
         setHovered(null);
         setLoading(false);
@@ -119,13 +140,16 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
     return () => {
       alive = false;
     };
-  }, [scanId, focusPath, lod]);
+  }, [scanId, focusPath, lod, commitTree]);
 
   // Live fill-in (spec §3.8/§4.4): while THIS active tab's scan is still running
   // and not paused, re-pull `disk_tree` for the CURRENT focus on a new snapshot
   // `generation`, backpressured so a fast scan can't pile up invokes. The same
   // metric/color the canvas already uses just animates the new (larger) sizes via
   // the layout — folders grow as the scan fills in. Paused / done → no polling.
+  // Watermark = the last generation we ACTUALLY fetched + committed (NOT every
+  // progress tick). Advancing it only after a real fetch is what keeps the poller
+  // from treating an unfetched snapshot as already-drawn and silently skipping it.
   const lastFetchedGen = useRef(-1);
   useEffect(() => {
     if (!scanning || paused) return;
@@ -133,7 +157,8 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
     let inFlight = false;
     const tick = async () => {
       if (!alive || inFlight) return;
-      // Only re-fetch when the published snapshot advanced past what we drew.
+      // Only re-fetch when the latest published generation is beyond the last one
+      // we actually FETCHED — so a fresh snapshot during a scan always pulls.
       const g = useDiskScan.getState().views[scanId]?.progress?.generation ?? 0;
       if (g <= lastFetchedGen.current) return;
       inFlight = true;
@@ -141,11 +166,13 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
         const fp = useDiskScan.getState().views[scanId]?.stack.slice(-1)[0]?.path ?? null;
         const tv = await withTimeout(api.diskTree(scanId, fp, { minBytes: minBytesFor(lod) }));
         if (!alive) return;
+        // Advance the watermark to the generation we actually fetched, in the
+        // resolve path — only now is this snapshot truly "drawn".
         lastFetchedGen.current = tv.generation;
-        setTree(tv);
+        commitTree(tv);
         setLoading(false);
       } catch {
-        /* transient — keep the last tree */
+        /* transient — keep the last tree (watermark unchanged → we retry) */
       } finally {
         inFlight = false;
       }
@@ -157,13 +184,16 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
     };
     // Re-arm when the active scan status / pause / focus / LOD changes. `generation`
     // is read live inside the tick (not a dep) so we don't thrash the interval.
-  }, [scanId, scanning, paused, focusPath, lod]);
+  }, [scanId, scanning, paused, focusPath, lod, commitTree]);
 
-  // Reset the fill-in watermark whenever the focus changes (a fresh focus fetch
-  // above sets the baseline; the poller then chases gens beyond it).
+  // Reset the fill-in watermark on a scan switch / focus-path change / LOD baseline
+  // change — the authoritative focus fetch above re-pulls a fresh baseline, so the
+  // poller should start chasing generations from scratch. NOTE: do NOT couple this
+  // to `generation` — advancing the watermark on every progress tick is exactly the
+  // bug that made the poller skip live updates.
   useEffect(() => {
-    lastFetchedGen.current = generation;
-  }, [focusPath, generation]);
+    lastFetchedGen.current = -1;
+  }, [scanId, focusPath, lod]);
 
   /**
    * One-shot ~220ms zoom tween (gated by reduce-motion). `dir: "in"` grows the
