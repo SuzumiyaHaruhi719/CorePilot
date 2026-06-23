@@ -28,7 +28,12 @@ import { AmdTuning } from "./tabs/AmdTuning";
 import { Tuning } from "./tabs/Tuning";
 import { useGpuProfiles } from "./store/gpuProfiles";
 import { useFanProfiles } from "./store/fanProfiles";
-import { useOsd, useOsdTargets } from "./store/osd";
+import {
+  TASKBAR_DEFAULTS,
+  TBMON_DEFAULTS,
+  useOsd,
+  useOsdTargets,
+} from "./store/osd";
 
 /** Last pointer-down position, used as the origin for the theme-switch circular
  *  reveal so the new theme appears to wipe out from where the user clicked. */
@@ -147,6 +152,58 @@ function App() {
     return useOsd.persist.onFinishHydration(showIfEnabled);
   }, []);
 
+  // Push the taskbar-monitor config to the NATIVE Win32/GDI taskbar window
+  // (taskbar_mon.rs) on mount AND whenever any tb* store field changes. The
+  // native window reads `tbEnabled` from this config and shows/hides itself
+  // accordingly — there is no separate window-visibility call. Dedupe by JSON
+  // so the per-frame appearance writes (sliders) don't spam the IPC; the tb*
+  // config almost never changes. Mirrors usePerfRecorder's pushConfig+lastSent.
+  useEffect(() => {
+    let lastSent = "";
+    const pushTbmon = () => {
+      const s = useOsd.getState();
+      const payload = {
+        enabled: s.tbEnabled ?? TBMON_DEFAULTS.tbEnabled,
+        singleLine: s.tbSingleLine ?? TBMON_DEFAULTS.tbSingleLine,
+        barPosition: s.tbBarPosition ?? TBMON_DEFAULTS.tbBarPosition,
+        offset: s.tbOffset ?? TBMON_DEFAULTS.tbOffset,
+        customLayout: s.tbCustomLayout ?? TBMON_DEFAULTS.tbCustomLayout,
+        size: s.tbSize ?? TBMON_DEFAULTS.tbSize,
+        bold: s.tbBold ?? TBMON_DEFAULTS.tbBold,
+        itemSpace: s.tbItemSpace ?? TBMON_DEFAULTS.tbItemSpace,
+        innerSpace: s.tbInnerSpace ?? TBMON_DEFAULTS.tbInnerSpace,
+        padding: s.tbPadding ?? TBMON_DEFAULTS.tbPadding,
+        colorsEnabled: s.tbColorsEnabled ?? TASKBAR_DEFAULTS.tbColorsEnabled,
+        bg: s.tbBg ?? TASKBAR_DEFAULTS.tbBg,
+        label: s.tbLabel ?? TASKBAR_DEFAULTS.tbLabel,
+        safe: s.tbSafe ?? TASKBAR_DEFAULTS.tbSafe,
+        warn: s.tbWarn ?? TASKBAR_DEFAULTS.tbWarn,
+        crit: s.tbCrit ?? TASKBAR_DEFAULTS.tbCrit,
+        warnLoad: s.tbWarnLoad ?? TASKBAR_DEFAULTS.tbWarnLoad,
+        critLoad: s.tbCritLoad ?? TASKBAR_DEFAULTS.tbCritLoad,
+        warnTemp: s.tbWarnTemp ?? TASKBAR_DEFAULTS.tbWarnTemp,
+        critTemp: s.tbCritTemp ?? TASKBAR_DEFAULTS.tbCritTemp,
+        metrics: s.tbMetrics ?? TBMON_DEFAULTS.tbMetrics,
+      };
+      const key = JSON.stringify(payload);
+      if (key === lastSent) return;
+      lastSent = key;
+      api.tbmonConfig(payload).catch(() => undefined);
+    };
+    const push = () => {
+      if (useOsd.persist.hasHydrated()) pushTbmon();
+    };
+    push();
+    const unhydrate = useOsd.persist.hasHydrated()
+      ? undefined
+      : useOsd.persist.onFinishHydration(pushTbmon);
+    const unsub = useOsd.subscribe(pushTbmon);
+    return () => {
+      unsub();
+      unhydrate?.();
+    };
+  }, []);
+
   // Mirror the OSD store + target lists to the overlay webview WHENEVER they
   // change. Previously only the OSD config tab emitted these events, so the
   // global hotkey (Ctrl+Shift+F10) — which flips `enabled` in THIS window's
@@ -161,8 +218,10 @@ function App() {
       if (timer != null) return;
       timer = window.setTimeout(() => {
         timer = null;
-        const { enabled, style, scale, opacity, position, freeX, freeY, rounded, oledShift, desktopMode, inject, autoInject, metrics } = useOsd.getState();
-        void emit("osd:cfg", { enabled, style, scale, opacity, position, freeX, freeY, rounded, oledShift, desktopMode, inject, autoInject, metrics });
+        // Emit the whole config minus the action fns (so new OSD fields like the
+        // tb* taskbar-color set never silently fall out of live updates).
+        const { setEnabled, update, toggleMetric, ...cfg } = useOsd.getState();
+        void emit("osd:cfg", cfg);
       }, 16);
     };
     const unCfg = useOsd.subscribe(emitCfg);

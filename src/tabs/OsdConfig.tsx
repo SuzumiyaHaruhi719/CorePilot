@@ -33,12 +33,15 @@ import {
   type OsdData,
 } from "../lib/osd";
 import {
+  TASKBAR_DEFAULTS,
+  TBMON_DEFAULTS,
   effectiveConfig,
   useOsd,
   useOsdTargets,
   useOverlayStatus,
   type OsdAppearance,
   type OsdConfig as OsdCfg,
+  type TbBarPosition,
 } from "../store/osd";
 import { OsdPlate } from "../osd/OsdPlate";
 
@@ -59,6 +62,27 @@ function cfgOf(s: OsdCfg): OsdCfg {
     inject: s.inject,
     autoInject: s.autoInject,
     metrics: s.metrics,
+    tbColorsEnabled: s.tbColorsEnabled,
+    tbBg: s.tbBg,
+    tbLabel: s.tbLabel,
+    tbSafe: s.tbSafe,
+    tbWarn: s.tbWarn,
+    tbCrit: s.tbCrit,
+    tbWarnLoad: s.tbWarnLoad,
+    tbCritLoad: s.tbCritLoad,
+    tbWarnTemp: s.tbWarnTemp,
+    tbCritTemp: s.tbCritTemp,
+    tbEnabled: s.tbEnabled,
+    tbSingleLine: s.tbSingleLine,
+    tbBarPosition: s.tbBarPosition,
+    tbOffset: s.tbOffset,
+    tbCustomLayout: s.tbCustomLayout,
+    tbSize: s.tbSize,
+    tbBold: s.tbBold,
+    tbItemSpace: s.tbItemSpace,
+    tbInnerSpace: s.tbInnerSpace,
+    tbPadding: s.tbPadding,
+    tbMetrics: s.tbMetrics,
   };
 }
 
@@ -402,6 +426,17 @@ export function OsdConfig() {
                     opacity={previewCfg.opacity}
                     rounded={previewCfg.rounded}
                     data={data}
+                    taskbar={false}
+                    tbColorsEnabled={previewCfg.tbColorsEnabled}
+                    tbBg={previewCfg.tbBg}
+                    tbLabel={previewCfg.tbLabel}
+                    tbSafe={previewCfg.tbSafe}
+                    tbWarn={previewCfg.tbWarn}
+                    tbCrit={previewCfg.tbCrit}
+                    tbWarnLoad={previewCfg.tbWarnLoad}
+                    tbCritLoad={previewCfg.tbCritLoad}
+                    tbWarnTemp={previewCfg.tbWarnTemp}
+                    tbCritTemp={previewCfg.tbCritTemp}
                   />
                 </div>
               ) : (
@@ -412,6 +447,17 @@ export function OsdConfig() {
                   opacity={previewCfg.opacity}
                   rounded={previewCfg.rounded}
                   data={data}
+                  taskbar={false}
+                  tbColorsEnabled={previewCfg.tbColorsEnabled}
+                  tbBg={previewCfg.tbBg}
+                  tbLabel={previewCfg.tbLabel}
+                  tbSafe={previewCfg.tbSafe}
+                  tbWarn={previewCfg.tbWarn}
+                  tbCrit={previewCfg.tbCrit}
+                  tbWarnLoad={previewCfg.tbWarnLoad}
+                  tbCritLoad={previewCfg.tbCritLoad}
+                  tbWarnTemp={previewCfg.tbWarnTemp}
+                  tbCritTemp={previewCfg.tbCritTemp}
                 />
               )}
             </div>
@@ -600,6 +646,12 @@ export function OsdConfig() {
 
         {/* Appearance settings (drive the default, or the selected game's override) */}
         <OsdAppearanceControls cfg={previewCfg} onChange={applyPatch} />
+
+        {/* Taskbar Monitor — an INDEPENDENT second overlay docked on the Windows
+            taskbar, with its own enable toggle (coexists with the corner/free
+            OSD above; turning it on never moves that OSD). Always shown. */}
+        <TaskbarMonitorControls cfg={previewCfg} onChange={applyPatch} />
+        <TaskbarColorControls cfg={previewCfg} onChange={applyPatch} />
 
         {/* Monitoring content */}
         <div className="glass hairline rounded-2xl p-4">
@@ -937,6 +989,267 @@ function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
       </Row>
       </div>
     </div>
+  );
+}
+
+interface TaskbarMonitorControlsProps {
+  cfg: OsdAppearance;
+  onChange: (patch: Partial<OsdCfg>) => void;
+}
+
+/** The independent taskbar-monitor settings: the "Taskbar" panel (Show Taskbar =
+ *  its own enable toggle, Single Line, Position, Offset) + the "Custom Layout"
+ *  panel (Size / Bold / Item Space / Inner Space / Padding). Mirrors the
+ *  reference screenshot. The native taskbar monitor is a GLOBAL feature (App.tsx
+ *  pushes only the global `useOsd` state to `tbmon_config`), so these controls
+ *  read from AND write to the global store directly — bypassing the per-game
+ *  preview/override path — so what the user edits is exactly what reaches the
+ *  native window (a per-game override here would silently never apply).
+ *  ponytail: deferred from the reference UI — Style preset, Hover Details,
+ *  Double-Click action, Monitor selector, Click-Through (always on for this
+ *  click-through window), and the Font picker (uses the inherited OSD font). */
+function TaskbarMonitorControls(_props: TaskbarMonitorControlsProps) {
+  const tf = useTf();
+  const update = useOsd((s) => s.update);
+  // Read the GLOBAL store (not the passed per-game previewCfg) so the editor
+  // reflects exactly what is pushed to the native taskbar window.
+  const cfg = useOsd();
+  const tbEnabled = cfg.tbEnabled ?? TBMON_DEFAULTS.tbEnabled;
+  const customLayout = cfg.tbCustomLayout ?? TBMON_DEFAULTS.tbCustomLayout;
+  return (
+    <div className="glass hairline rounded-2xl p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <MonitorPlay size={14} className="text-accent-bright" />
+        <span className="hud-label text-[10.5px] text-dim">任务栏监视器 · TASKBAR MONITOR</span>
+        <span className="h-px flex-1 bg-line/50" />
+      </div>
+      <div className="mb-3 text-[11.5px] leading-relaxed text-dim">
+        {tf(
+          "停靠在 Windows 任务栏上的独立监视条;与上方角落/桌面 OSD 互不影响,可同时开启。",
+          "An independent monitor docked on the Windows taskbar — coexists with the corner / desktop OSD above (both can be on at once).",
+        )}
+      </div>
+
+      {/* Taskbar panel */}
+      <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+        <Row label={tf("显示任务栏监视器", "Show Taskbar")}>
+          <Toggle
+            checked={tbEnabled}
+            onChange={(v) => {
+              // The native taskbar window reads `tbEnabled` from the pushed config
+              // (App.tsx subscribes to the store and calls api.tbmonConfig), so the
+              // toggle only updates the store — no direct window call.
+              update({ tbEnabled: v });
+            }}
+          />
+        </Row>
+        <Row label={tf("单行显示", "Single Line")}>
+          <Toggle
+            checked={cfg.tbSingleLine ?? TBMON_DEFAULTS.tbSingleLine}
+            onChange={(v) => update({ tbSingleLine: v })}
+          />
+        </Row>
+        <Row label={tf("停靠位置", "Position")}>
+          <Segmented
+            id="tbmon-pos"
+            value={cfg.tbBarPosition ?? TBMON_DEFAULTS.tbBarPosition}
+            onChange={(v) => update({ tbBarPosition: v as TbBarPosition })}
+            options={[
+              { value: "left", label: tf("靠左", "Left") },
+              { value: "right", label: tf("靠右", "Right") },
+            ]}
+          />
+        </Row>
+        <NumRow
+          label={tf("偏移 (px)", "Offset (px)")}
+          value={cfg.tbOffset ?? TBMON_DEFAULTS.tbOffset}
+          onChange={(v) => update({ tbOffset: v })}
+        />
+      </div>
+
+      {/* Custom Layout panel */}
+      <div className="mt-4 mb-3 flex items-center gap-2 border-t border-line/60 pt-3">
+        <span className="hud-label text-[10.5px] text-dim">自定义布局 · CUSTOM LAYOUT</span>
+        <span className="h-px flex-1 bg-line/50" />
+      </div>
+      <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+        <Row label={tf("启用自定义布局", "Custom Layout")}>
+          <Toggle checked={customLayout} onChange={(v) => update({ tbCustomLayout: v })} />
+        </Row>
+        <Row label={tf("加粗", "Bold")}>
+          <Toggle checked={cfg.tbBold ?? TBMON_DEFAULTS.tbBold} onChange={(v) => update({ tbBold: v })} />
+        </Row>
+        <NumRow
+          label={tf("字号 (pt)", "Size (pt)")}
+          value={cfg.tbSize ?? TBMON_DEFAULTS.tbSize}
+          onChange={(v) => update({ tbSize: v })}
+        />
+        <NumRow
+          label={tf("项间距 (px)", "Item Space (px)")}
+          value={cfg.tbItemSpace ?? TBMON_DEFAULTS.tbItemSpace}
+          onChange={(v) => update({ tbItemSpace: v })}
+        />
+        <NumRow
+          label={tf("内间距 (px)", "Inner Space (px)")}
+          value={cfg.tbInnerSpace ?? TBMON_DEFAULTS.tbInnerSpace}
+          onChange={(v) => update({ tbInnerSpace: v })}
+        />
+        <NumRow
+          label={tf("内边距 (px)", "Padding (px)")}
+          value={cfg.tbPadding ?? TBMON_DEFAULTS.tbPadding}
+          onChange={(v) => update({ tbPadding: v })}
+        />
+      </div>
+    </div>
+  );
+}
+
+interface TaskbarColorControlsProps {
+  cfg: OsdAppearance;
+  onChange: (patch: Partial<OsdCfg>) => void;
+}
+
+/** The taskbar-monitor "Colors" panel: an Enable toggle + a background color set
+ *  close to the system taskbar + Label / Value / Warn / Crit colors and the
+ *  load/temp warn-crit thresholds. Mirrors LiteMonitor's Colors settings (and the
+ *  reference screenshot). These tb* fields feed the GLOBAL native taskbar monitor
+ *  (App.tsx pushes only the global `useOsd` state), so — like the Taskbar Monitor
+ *  card — they read from AND write to the global store directly, bypassing the
+ *  per-game preview/override path (a per-game override would never reach the
+ *  native window). */
+function TaskbarColorControls(_props: TaskbarColorControlsProps) {
+  const update = useOsd((s) => s.update);
+  // Read + write the GLOBAL store so what the user edits is exactly what is pushed
+  // to the native taskbar window (not a per-game override).
+  const cfg = useOsd();
+  const onChange = update;
+  const on = cfg.tbColorsEnabled ?? TASKBAR_DEFAULTS.tbColorsEnabled;
+  return (
+    <div className="glass hairline rounded-2xl p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <Palette size={14} className="text-accent-bright" />
+        <span className="hud-label text-[10.5px] text-dim">配色 · COLORS</span>
+        <span className="h-px flex-1 bg-line/50" />
+      </div>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <span className="text-[12.5px] text-muted">启用配色</span>
+        <Toggle checked={on} onChange={(v) => onChange({ tbColorsEnabled: v })} />
+      </div>
+      <div className="mb-3 flex items-start gap-2 rounded-lg border border-line/60 bg-surface2/50 px-3 py-2">
+        <AlertTriangle size={13} className="mt-0.5 shrink-0 text-warn" />
+        <span className="text-[11.5px] leading-relaxed text-dim">
+          将背景色设为接近系统任务栏颜色 / Set BG close to system taskbar color
+        </span>
+      </div>
+      <div className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
+        <ColorRow
+          label="背景色 Background"
+          value={cfg.tbBg ?? TASKBAR_DEFAULTS.tbBg}
+          onChange={(v) => onChange({ tbBg: v })}
+        />
+        <ColorRow
+          label="标签 Label"
+          value={cfg.tbLabel ?? TASKBAR_DEFAULTS.tbLabel}
+          onChange={(v) => onChange({ tbLabel: v })}
+        />
+        <ColorRow
+          label="数值 Value"
+          value={cfg.tbSafe ?? TASKBAR_DEFAULTS.tbSafe}
+          onChange={(v) => onChange({ tbSafe: v })}
+        />
+        <ColorRow
+          label="警告 Warn"
+          value={cfg.tbWarn ?? TASKBAR_DEFAULTS.tbWarn}
+          onChange={(v) => onChange({ tbWarn: v })}
+        />
+        <ColorRow
+          label="危险 Crit"
+          value={cfg.tbCrit ?? TASKBAR_DEFAULTS.tbCrit}
+          onChange={(v) => onChange({ tbCrit: v })}
+        />
+      </div>
+      <div className="mt-4 grid gap-x-6 gap-y-3 sm:grid-cols-2">
+        <NumRow
+          label="占用警告 (%)"
+          value={cfg.tbWarnLoad ?? TASKBAR_DEFAULTS.tbWarnLoad}
+          onChange={(v) => onChange({ tbWarnLoad: v })}
+        />
+        <NumRow
+          label="占用危险 (%)"
+          value={cfg.tbCritLoad ?? TASKBAR_DEFAULTS.tbCritLoad}
+          onChange={(v) => onChange({ tbCritLoad: v })}
+        />
+        <NumRow
+          label="温度警告 (°C)"
+          value={cfg.tbWarnTemp ?? TASKBAR_DEFAULTS.tbWarnTemp}
+          onChange={(v) => onChange({ tbWarnTemp: v })}
+        />
+        <NumRow
+          label="温度危险 (°C)"
+          value={cfg.tbCritTemp ?? TASKBAR_DEFAULTS.tbCritTemp}
+          onChange={(v) => onChange({ tbCritTemp: v })}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** A label + hex text + native color swatch, kept in sync (the screenshot shows
+ *  the same "#RRGGBB + swatch" pairing for each color slot). */
+function ColorRow({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <Row label={label}>
+      <div className="flex items-center gap-2">
+        <input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          spellCheck={false}
+          className="no-drag w-24 rounded-lg border border-line bg-surface2 px-2 py-1 text-[12px] text-ink outline-none transition-colors focus:border-accent/50"
+        />
+        <input
+          type="color"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="no-drag h-7 w-9 cursor-pointer rounded border border-line bg-surface2 p-0.5"
+          aria-label={label}
+        />
+      </div>
+    </Row>
+  );
+}
+
+/** A label + small numeric input, clamped to a sane 0..150 range. */
+function NumRow({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <Row label={label}>
+      <input
+        type="number"
+        min={0}
+        max={150}
+        value={value}
+        onChange={(e) => {
+          const n = Number(e.target.value);
+          if (Number.isFinite(n)) onChange(Math.min(150, Math.max(0, n)));
+        }}
+        className="no-drag w-20 rounded-lg border border-line bg-surface2 px-2 py-1 text-[12px] text-ink outline-none transition-colors focus:border-accent/50"
+      />
+    </Row>
   );
 }
 

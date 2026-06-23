@@ -123,6 +123,16 @@ export function OsdOverlay() {
       inject: global.inject,
       autoInject: global.autoInject,
       metrics: global.metrics,
+      tbColorsEnabled: global.tbColorsEnabled,
+      tbBg: global.tbBg,
+      tbLabel: global.tbLabel,
+      tbSafe: global.tbSafe,
+      tbWarn: global.tbWarn,
+      tbCrit: global.tbCrit,
+      tbWarnLoad: global.tbWarnLoad,
+      tbCritLoad: global.tbCritLoad,
+      tbWarnTemp: global.tbWarnTemp,
+      tbCritTemp: global.tbCritTemp,
     },
     targets,
     fg.exe,
@@ -293,6 +303,17 @@ export function OsdOverlay() {
         opacity={cfg.opacity}
         rounded={cfg.rounded}
         data={data}
+        taskbar={false}
+        tbColorsEnabled={cfg.tbColorsEnabled}
+        tbBg={cfg.tbBg}
+        tbLabel={cfg.tbLabel}
+        tbSafe={cfg.tbSafe}
+        tbWarn={cfg.tbWarn}
+        tbCrit={cfg.tbCrit}
+        tbWarnLoad={cfg.tbWarnLoad}
+        tbCritLoad={cfg.tbCritLoad}
+        tbWarnTemp={cfg.tbWarnTemp}
+        tbCritTemp={cfg.tbCritTemp}
       />
     </div>
   );

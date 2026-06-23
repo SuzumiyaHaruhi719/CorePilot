@@ -777,6 +777,36 @@ export const api = {
   osdSetVisible: (visible: boolean) => invoke<void>("osd_set_visible", { visible }),
   osdSetBounds: (x: number, y: number, w: number, h: number) =>
     invoke<void>("osd_set_bounds", { x, y, w, h }),
+  /**
+   * Push the taskbar-monitor config to the NATIVE Win32/GDI taskbar window
+   * (which runs on its own thread and reads the in-process sampler directly —
+   * see src-tauri/src/taskbar_mon.rs). Called on mount (from the persisted store)
+   * and whenever any tb* field changes. Colors are `#RRGGBB`; the native window
+   * shows iff `enabled`. Mirrors `perfRecorderConfig`.
+   */
+  tbmonConfig: (cfg: {
+    enabled: boolean;
+    singleLine: boolean;
+    barPosition: string;
+    offset: number;
+    customLayout: boolean;
+    size: number;
+    bold: boolean;
+    itemSpace: number;
+    innerSpace: number;
+    padding: number;
+    colorsEnabled: boolean;
+    bg: string;
+    label: string;
+    safe: string;
+    warn: string;
+    crit: string;
+    warnLoad: number;
+    critLoad: number;
+    warnTemp: number;
+    critTemp: number;
+    metrics: string[];
+  }) => invoke<void>("tbmon_config", cfg),
   /** Logical bounds [x,y,w,h] of the monitor the foreground game is on (null when
    *  unresolved), so the overlay can follow the game across monitors. */
   osdTargetMonitor: () =>

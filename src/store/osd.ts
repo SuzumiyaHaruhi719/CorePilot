@@ -6,6 +6,68 @@ import type { OverlayStatus } from "../lib/ipc";
 export type OsdStyle = "horizontal" | "vertical";
 export type OsdPosition = "tl" | "tr" | "tc" | "bl" | "br" | "bc" | "free";
 
+/** Which end of the taskbar's free area the monitor docks to. */
+export type TbBarPosition = "left" | "right";
+
+/** Default "taskbar monitor" Colors panel values. Matches LiteMonitor's
+ *  light-theme palette (Background close to the system taskbar, green/amber/red
+ *  value states) and the reference screenshot. Extracted so the create() initial
+ *  state and the persist `migrate` backfill share one source of truth. */
+export const TASKBAR_DEFAULTS = {
+  tbColorsEnabled: false,
+  tbBg: "#D2D2D2",
+  tbLabel: "#141414",
+  tbSafe: "#008040",
+  tbWarn: "#B57500",
+  tbCrit: "#C03030",
+  tbWarnLoad: 60,
+  tbCritLoad: 85,
+  tbWarnTemp: 50,
+  tbCritTemp: 70,
+} as const;
+
+/** The screenshot's default taskbar-monitor metric set: per-column pairs
+ *  (CPU%/CPU°, CCLK/RAM, GPU%/GPU°, net↑/net↓) flowing into two rows. */
+export const TBMON_METRICS = [
+  "cpu.util",
+  "cpu.temp",
+  "cpu.freq",
+  "mem.used",
+  "gpu.util",
+  "gpu.temp",
+  "net.up",
+  "net.down",
+] as const;
+
+/** Default settings for the INDEPENDENT taskbar monitor (the second overlay
+ *  window). Separate from the OSD master switch / position: `tbEnabled` is the
+ *  taskbar monitor's own on/off. Extracted so the create() initial state and the
+ *  persist `migrate` backfill share one source of truth. */
+export const TBMON_DEFAULTS = {
+  /** Taskbar monitor master switch (NOT the OSD `enabled` flag). */
+  tbEnabled: false,
+  /** false = two rows (default — single row is too cramped); true = one row. */
+  tbSingleLine: false,
+  /** Which end of the bar's free area to dock to. */
+  tbBarPosition: "left" as TbBarPosition,
+  /** Horizontal offset (logical px) nudging the docked plate along the bar. */
+  tbOffset: 0,
+  /** Custom-layout master switch (size/bold/spacing below only apply when on). */
+  tbCustomLayout: true,
+  /** Font size (pt) of the cell text. */
+  tbSize: 9,
+  /** Bold cell text. */
+  tbBold: true,
+  /** Gap between cells / columns (px). */
+  tbItemSpace: 6,
+  /** Gap between a cell's label and its value (px). */
+  tbInnerSpace: 8,
+  /** Plate padding (px). */
+  tbPadding: 2,
+  /** Enabled metric keys for the taskbar monitor (its own list, in pair order). */
+  tbMetrics: TBMON_METRICS as readonly string[] as string[],
+} as const;
+
 /** OSD overlay configuration. Persisted and shared between the config panel
  *  (main window) and the overlay window via the tauri-store backed `persist`. */
 export interface OsdConfig {
@@ -35,6 +97,54 @@ export interface OsdConfig {
   autoInject: boolean;
   /** Enabled metric keys (see OSD_METRICS), in display order. */
   metrics: string[];
+
+  // --- Taskbar monitor "Colors" panel (only used when position === "taskbar").
+  // Optional so old persisted configs / sparse per-game overrides still type-check;
+  // the persist `migrate` backfills the GLOBAL config and consumers default them. ---
+  /** Master switch for the taskbar color skin. Off → the taskbar plate uses the
+   *  normal glass/themed look (just docked on the bar). */
+  tbColorsEnabled?: boolean;
+  /** Solid plate background — set close to the system taskbar color to blend in. */
+  tbBg?: string;
+  /** Category-label text color. */
+  tbLabel?: string;
+  /** Value color in the safe (normal) state. */
+  tbSafe?: string;
+  /** Value color in the warn state (load ≥ tbWarnLoad / temp ≥ tbWarnTemp). */
+  tbWarn?: string;
+  /** Value color in the crit state (load ≥ tbCritLoad / temp ≥ tbCritTemp). */
+  tbCrit?: string;
+  /** Load-% warn / crit thresholds (CPU/GPU/mem/disk util, GPU fan). */
+  tbWarnLoad?: number;
+  tbCritLoad?: number;
+  /** Temperature warn / crit thresholds (°C; CPU/GPU temp). */
+  tbWarnTemp?: number;
+  tbCritTemp?: number;
+
+  // --- Taskbar monitor (the independent second overlay window). All optional so
+  // old persisted configs type-check; the persist `migrate` backfills them. ---
+  /** Taskbar monitor master switch — independent of the OSD `enabled` flag. */
+  tbEnabled?: boolean;
+  /** false = two rows (default); true = one cramped row. */
+  tbSingleLine?: boolean;
+  /** Dock to the left or right end of the bar's free area. */
+  tbBarPosition?: TbBarPosition;
+  /** Horizontal offset (logical px) along the bar. */
+  tbOffset?: number;
+  /** Custom-layout master switch (the size/spacing fields below only apply on). */
+  tbCustomLayout?: boolean;
+  /** Cell font size (pt). */
+  tbSize?: number;
+  /** Bold cell text. */
+  tbBold?: boolean;
+  /** Gap between cells / columns (px). */
+  tbItemSpace?: number;
+  /** Gap between a cell's label and its value (px). */
+  tbInnerSpace?: number;
+  /** Plate padding (px). */
+  tbPadding?: number;
+  /** The taskbar monitor's own enabled metric keys, in pair order. */
+  tbMetrics?: string[];
 }
 
 interface OsdStore extends OsdConfig {
@@ -85,6 +195,8 @@ export const useOsd = create<OsdStore>()(
       inject: false,
       autoInject: false,
       metrics: DEFAULT_METRICS,
+      ...TASKBAR_DEFAULTS,
+      ...TBMON_DEFAULTS,
       setEnabled: (enabled) => set({ enabled }),
       update: (patch) => set(patch),
       toggleMetric: (key) =>
@@ -94,7 +206,19 @@ export const useOsd = create<OsdStore>()(
             : [...s.metrics, key],
         })),
     }),
-    { name: "corepilot-osd", version: 1, storage: createJSONStorage(() => tauriStorage) },
+    {
+      name: "corepilot-osd",
+      version: 3,
+      storage: createJSONStorage(() => tauriStorage),
+      // v1 → v2: backfill the taskbar "Colors" fields. v2 → v3: backfill the
+      // independent taskbar-monitor settings (tbEnabled / two-row / layout).
+      // Persisted values win where present.
+      migrate: (persisted) => ({
+        ...TASKBAR_DEFAULTS,
+        ...TBMON_DEFAULTS,
+        ...(persisted as Partial<OsdStore>),
+      }),
+    },
   ),
 );
 

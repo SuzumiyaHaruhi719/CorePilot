@@ -56,9 +56,13 @@ pub fn start_gdi_guard(app: AppHandle) {
                 );
                 let handle = app.clone();
                 let _ = app.run_on_main_thread(move || {
+                    // Recycle the corner/free OSD window — a transparent host that
+                    // leaks GDI objects upstream. destroy() skips the close-request
+                    // path (the overlay is non-closable for the user). The taskbar
+                    // monitor is a native GDI window on its own thread (taskbar_mon.rs)
+                    // with cached, never-per-paint GDI objects, so it is NOT part of
+                    // this leak class and is left untouched.
                     if let Some(win) = handle.get_webview_window(OSD_LABEL) {
-                        // destroy() skips the close-request path (the window is
-                        // marked non-closable for the user).
                         let _ = win.destroy();
                     }
                     if let Err(e) = osd_set_visible(handle.clone(), true) {
@@ -117,18 +121,16 @@ fn hwnd_of(win: &tauri::WebviewWindow) -> isize {
     win.hwnd().map(|h| h.0 as isize).unwrap_or(0)
 }
 
-/// Show or hide the overlay window, creating it on first show. Idempotent.
-#[tauri::command]
-pub fn osd_set_visible(app: AppHandle, visible: bool) -> Result<(), String> {
-    // The overlay is a KEEP-ALIVE window: once created it stays shown and is
-    // never hidden. Hiding a WebView2 window freezes its renderer's task loop,
-    // which silently stops BOTH the overlay's own metric poll AND the perf
-    // recorder (they run in the shared renderer). When there is nothing to
-    // display the React overlay parks itself off-screen (1×1 at -200,-200) so it
-    // is invisible without being hidden. `visible` is therefore advisory only —
-    // we always ensure the window exists and is shown.
-    let _ = visible;
-    if let Some(win) = app.get_webview_window(OSD_LABEL) {
+/// Ensure the transparent, click-through, always-on-top corner/free OSD overlay
+/// window exists and is shown. Idempotent. (The taskbar monitor is a separate
+/// native GDI window on its own thread — see `taskbar_mon.rs` — not a webview.)
+fn ensure_overlay_window(
+    app: &AppHandle,
+    label: &'static str,
+    url: &'static str,
+    title: &'static str,
+) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(label) {
         let _ = win.show();
         let _ = win.set_always_on_top(true);
         // Re-assert click-through on every show (WebView2 can reset it).
@@ -138,11 +140,11 @@ pub fn osd_set_visible(app: AppHandle, visible: bool) -> Result<(), String> {
     }
 
     // Create the overlay SMALL (content-sized). The frontend measures the plate
-    // and resizes/repositions the window via `osd_set_bounds` once it has
-    // rendered, so a tiny starting size is fine — and crucially a small window
-    // can never lock the whole screen if click-through momentarily fails.
-    let win = WebviewWindowBuilder::new(&app, OSD_LABEL, WebviewUrl::App("index.html?osd".into()))
-        .title("CorePilot OSD")
+    // and resizes/repositions the window via `*_set_bounds` once it has rendered,
+    // so a tiny starting size is fine — and crucially a small window can never
+    // lock the whole screen if click-through momentarily fails.
+    let win = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
+        .title(title)
         // Keep this background, always-on-top, ALWAYS-occluded overlay's JS timers
         // running. Critically this must disable `CalculateNativeWinOcclusion`, or
         // WebView2 marks the (game-covered) overlay hidden and freezes its task
@@ -178,6 +180,20 @@ pub fn osd_set_visible(app: AppHandle, visible: bool) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+/// Show or hide the overlay window, creating it on first show. Idempotent.
+#[tauri::command]
+pub fn osd_set_visible(app: AppHandle, visible: bool) -> Result<(), String> {
+    // The overlay is a KEEP-ALIVE window: once created it stays shown and is
+    // never hidden. Hiding a WebView2 window freezes its renderer's task loop,
+    // which silently stops BOTH the overlay's own metric poll AND the perf
+    // recorder (they run in the shared renderer). When there is nothing to
+    // display the React overlay parks itself off-screen (1×1 at -200,-200) so it
+    // is invisible without being hidden. `visible` is therefore advisory only —
+    // we always ensure the window exists and is shown.
+    let _ = visible;
+    ensure_overlay_window(&app, OSD_LABEL, "index.html?osd", "CorePilot OSD")
 }
 
 /// Smallest overlay window we will ever set (logical px). Below this the plate
@@ -238,6 +254,8 @@ fn osd_max_dim(win: &tauri::WebviewWindow) -> f64 {
 /// screen-covering window or flinging it off into the virtual-desktop void.
 #[tauri::command]
 pub fn osd_set_bounds(app: AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+    let label = OSD_LABEL;
+    let last_size = &LAST_OSD_SIZE;
     use std::sync::atomic::Ordering;
     use tauri::{LogicalPosition, LogicalSize};
     // Reject any non-finite input without touching the window. Returning Ok (not
@@ -245,7 +263,7 @@ pub fn osd_set_bounds(app: AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<
     if !x.is_finite() || !y.is_finite() || !w.is_finite() || !h.is_finite() {
         return Ok(());
     }
-    if let Some(win) = app.get_webview_window(OSD_LABEL) {
+    if let Some(win) = app.get_webview_window(label) {
         let max_dim = osd_max_dim(&win);
         // Clamp size into [MIN, max_dim] and position into the coordinate cap.
         // Round the requested size UP to the size quantum BEFORE clamping, so small
@@ -267,7 +285,7 @@ pub fn osd_set_bounds(app: AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<
         let wk = cw.round() as u64;
         let hk = ch.round() as u64;
         let key = (wk << 32) | (hk & 0xFFFF_FFFF);
-        if LAST_OSD_SIZE.swap(key, Ordering::Relaxed) != key {
+        if last_size.swap(key, Ordering::Relaxed) != key {
             let _ = win.set_size(LogicalSize::new(cw, ch));
             let _ = win.set_ignore_cursor_events(true);
             force_click_through(hwnd_of(&win));

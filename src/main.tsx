@@ -6,10 +6,14 @@ import { OsdOverlay } from "./osd/OsdOverlay";
 import { useSettings, type Theme, type ThemeStyle } from "./store/settings";
 import "./index.css";
 
-// The transparent overlay window loads the same bundle with `?osd`; render only
-// the lightweight overlay there (and make the page background transparent).
-const isOsd = new URLSearchParams(window.location.search).has("osd");
-if (isOsd) {
+// The transparent overlay window loads the same bundle with `?osd` (corner/free
+// OSD); render only the lightweight overlay there and make the page background
+// transparent. (The taskbar monitor is a native GDI window — see
+// src-tauri/src/taskbar_mon.rs — not a webview, so it has no entry here.)
+const params = new URLSearchParams(window.location.search);
+const isOsd = params.has("osd");
+const isOverlay = isOsd;
+if (isOverlay) {
   document.documentElement.classList.add("osd-window");
   // App (which owns the theme effect) never mounts in the OSD webview, so apply
   // the persisted theme to this window's <html> here — then the overlay's accent
@@ -36,7 +40,7 @@ if (isOsd) {
 function logFatal(label: string, detail: string) {
   // eslint-disable-next-line no-console
   console.error(`[CorePilot] ${label}\n${detail}`);
-  if (isOsd) return; // never paint an error plate over the transparent overlay
+  if (isOverlay) return; // never paint an error plate over a transparent overlay
   const el = document.getElementById("root");
   if (el && !el.querySelector("[data-fatal]")) {
     // Build the error plate with safe DOM APIs. The label/detail are set via
@@ -56,5 +60,7 @@ window.addEventListener("unhandledrejection", (e) =>
 );
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>{isOsd ? <OsdOverlay /> : <App />}</React.StrictMode>,
+  <React.StrictMode>
+    {isOsd ? <OsdOverlay /> : <App />}
+  </React.StrictMode>,
 );

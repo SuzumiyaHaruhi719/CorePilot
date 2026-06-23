@@ -26,6 +26,7 @@ pub mod serde_u64;
 pub mod smu;
 pub mod state;
 pub mod sysmon;
+pub mod taskbar_mon;
 pub mod telemetry;
 pub mod topology;
 pub mod tray;
@@ -206,6 +207,15 @@ pub fn run() {
             // game exit; the frontend persists + shows the report.
             perf_recorder::start_recorder(app.handle().clone());
 
+            // Start the NATIVE Win32/GDI taskbar monitor on its OWN dedicated
+            // thread + message loop. It reads the in-process sampler snapshots
+            // directly (no IPC) and owner-draws a docked plate on the taskbar,
+            // shown only while its `tbEnabled` config (pushed via tbmon_config)
+            // is on. It NEVER touches the Tauri main thread — replacing the prior
+            // transparent-WebView2 taskbar window (the main-thread create-hang /
+            // GDI-leak freeze class).
+            taskbar_mon::start(app.handle().clone());
+
             // Start the motherboard fan-control engine. It idles until the
             // frontend pushes a per-fan config (mode/curve), then drives the
             // sidecar's fan controls every ~2s. Safe no-op on locked boards.
@@ -282,6 +292,7 @@ pub fn run() {
             osd::osd_set_visible,
             osd::osd_set_bounds,
             osd::osd_target_monitor,
+            taskbar_mon::tbmon_config,
             fps::osd_fps,
             fps::osd_fps_stats,
             fps::foreground_process,
