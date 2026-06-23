@@ -40,11 +40,16 @@ export function DiskAnalyzer() {
     refresh();
   }, [refresh]);
 
-  // Phase 1 wires the real backend scan + per-disk tab strip here. For Phase 0
-  // this is an inert stub so the picker interaction is fully present but no scan
-  // runs yet.
-  const startScan = useCallback((_scanIds: string[]) => {
-    // intentionally no-op until Phase 1 (backend scan engine core).
+  // Phase 1 wires the real backend scan engine: each requested disk gets its own
+  // dedicated owner thread (O(1) kickoff). The per-disk `SecondaryTabs` strip, the
+  // live `disk-scan://progress` listener, and the treemap arrive in Phase 3+/5 via
+  // the `diskScan.ts` store; here we simply start the backend scans so the engine
+  // is exercised end-to-end. `disk_scan_start` returns immediately.
+  const startScan = useCallback((scanIds: string[]) => {
+    if (scanIds.length === 0) return;
+    void api.diskScanStart(scanIds).catch(() => {
+      /* engine surfaces failures via the Error status + progress event (Phase 5). */
+    });
   }, []);
 
   const toggle = useCallback((scanId: string) => {

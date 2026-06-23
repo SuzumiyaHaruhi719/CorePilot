@@ -552,10 +552,40 @@ export interface VolumeInfo {
   supported: boolean;
 }
 
+/**
+ * Scalar progress for one disk scan. Mirrors the Rust `disk_scan::ScanProgress`
+ * (camelCase) — the `disk-scan://progress` event payload AND the
+ * `disk_scan_status` return. Never carries the tree (pulled via `disk_tree` in
+ * Phase 2). `status`: "scanning" | "done" | "cancelled" | "error".
+ */
+export interface ScanProgress {
+  scanId: string;
+  root: string;
+  status: "scanning" | "done" | "cancelled" | "error";
+  filesSeen: number;
+  dirsSeen: number;
+  bytesAlloc: number;
+  bytesLogical: number;
+  skipped: number;
+  nodeCount: number;
+  /** Bumped on each published snapshot — the frontend pulls a tree on a new gen. */
+  generation: number;
+  /** True once the node cap stopped descent (truncation banner). */
+  truncated: boolean;
+  elapsedMs: number;
+  error: string | null;
+}
+
 export const api = {
   getOverview: () => invoke<Overview>("get_overview"),
   /** Enumerate fixed + removable volumes for the Disk Analyzer picker (Zone A). */
   diskListVolumes: () => invoke<VolumeInfo[]>("disk_list_volumes"),
+  /** Start scanning each disk on its own dedicated thread; returns the keys. O(1). */
+  diskScanStart: (scanIds: string[]) => invoke<string[]>("disk_scan_start", { scanIds }),
+  /** Flip the per-disk cancel atomic; the walk drains promptly. O(1). */
+  diskScanCancel: (scanId: string) => invoke<void>("disk_scan_cancel", { scanId }),
+  /** Cold read of a scan's progress atomics (the event is the live channel). O(1). */
+  diskScanStatus: (scanId: string) => invoke<ScanProgress>("disk_scan_status", { scanId }),
   getTopology: async (): Promise<CpuTopology> => {
     const raw = await invoke<RawCpuTopology>("get_topology");
     return {

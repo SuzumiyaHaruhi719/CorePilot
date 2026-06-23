@@ -2,23 +2,41 @@
 //!
 //! See docs/superpowers/specs/2026-06-23-disk-space-analyzer-design.md.
 //!
-//! PHASE 0 (Skeleton & nav) implements ONLY the volume enumeration command
-//! (`disk_list_volumes`) backing the disk-picker landing (Zone A). The scan
-//! registry, `ScanHandle`, the `FindFirstFileExW` walk, the arena tree, and the
-//! `disk-scan://progress` event arrive in Phase 1+. The `ScanId` type alias and
-//! the module skeleton are introduced here so later phases extend, not rewrite.
+//! PHASE 1 (Scan engine core) adds the `SCANS` keyed registry, the per-disk
+//! `ScanHandle` owner, the dedicated-thread `FindFirstFileExW` walk with a small
+//! worker pool (hand-rolled `Mutex`+`Condvar` directory queue — zero new deps),
+//! the flat arena `Node` tree + interned names, both size metrics
+//! (logical + cluster-rounded allocation), reparse / permission / hardlink
+//! correctness, the `AtomicBool` cancel, top-N-per-dir source aggregation, the
+//! node cap with a truncation flag, the `disk_scan_start` / `disk_scan_cancel` /
+//! `disk_scan_status` commands, and the throttled `disk-scan://progress` event.
 //!
-//! CRITICAL-PATH INVARIANT (see lib.rs): every Tauri command stays O(1) and never
-//! blocks the main thread. `disk_list_volumes` does a handful of cheap Win32 calls
-//! but is routed through `spawn_blocking` anyway (a slow/disconnected removable or
-//! network volume can stall `GetVolumeInformationW`), so the IPC router never stalls.
+//! Phase 2 adds incremental size roll-up + the LOD-sliced `disk_tree` /
+//! `disk_top_items` commands; this phase publishes one `Arc<DiskTree>` snapshot on
+//! completion so the registry shape is already in place.
+//!
+//! CRITICAL-PATH INVARIANT (mirrors sampler.rs / telemetry.rs): every Tauri
+//! command stays O(1) — clone an `Arc`, read/flip an atomic, or insert a handle —
+//! and never blocks the main thread. The multi-million-file walk runs on dedicated
+//! named `std::thread`s, **off** the `spawn_blocking` pool (so it never starves the
+//! O(1) telemetry commands). No shared read-path lock is ever held across slow I/O:
+//! the snapshot `Mutex` is taken only to swap an `Arc` pointer, the same proven
+//! `sampler.rs` `PROC_SNAPSHOT` contract.
 
-use crate::error::CoreResult;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use serde::Serialize;
 
+use crate::error::CoreResult;
+
 /// Stable per-disk key. The volume GUID path (`\\?\Volume{guid}\`) where
-/// available, falling back to the drive-letter root (`C:\`). Phase 1+ keys the
-/// `SCANS` registry by this; the UI displays the friendly letter+label.
+/// available, falling back to the drive-letter root (`C:\`). The `SCANS` registry
+/// is keyed by this; the UI displays the friendly letter+label.
 pub type ScanId = String;
 
 /// One fixed/removable volume surfaced in the disk picker (Zone A).
@@ -49,13 +67,306 @@ pub struct VolumeInfo {
     pub supported: bool,
 }
 
+// =============================================================================
+// Arena tree (spec §2.6) — flat Vec<Node> indexed by u32 NodeId.
+// =============================================================================
+
+/// `NodeId` sentinel meaning "no node" (no child / no sibling).
+pub const SENTINEL: u32 = u32::MAX;
+
+// Node bit flags (spec §2.6).
+pub const FLAG_IS_DIR: u8 = 1 << 0;
+pub const FLAG_REPARSE: u8 = 1 << 1;
+pub const FLAG_DENIED: u8 = 1 << 2;
+pub const FLAG_HIDDEN: u8 = 1 << 3;
+pub const FLAG_SYSTEM: u8 = 1 << 4;
+pub const FLAG_HARDLINK: u8 = 1 << 5;
+pub const FLAG_AGGREGATED: u8 = 1 << 6;
+
+/// One arena node (≈ 40 bytes). Never `Box`/`Rc`/`Arc` per node — pointer-chasing
+/// + per-alloc overhead blows up at tens of millions of nodes. Children form a
+/// `first_child` / `next_sibling` intrusive list; the absolute path is
+/// reconstructed on demand by walking `parent` (no per-node full paths).
+#[derive(Debug, Clone)]
+pub struct Node {
+    /// NodeId of the parent (root points at itself).
+    pub parent: u32,
+    /// Index into the interned-name table.
+    pub name_id: u32,
+    /// First child NodeId, or `SENTINEL`.
+    pub first_child: u32,
+    /// Next sibling NodeId, or `SENTINEL`.
+    pub next_sibling: u32,
+    /// Subtree-aggregated apparent size for dirs; own size for files.
+    pub logical_size: u64,
+    /// Subtree-aggregated cluster-rounded on-disk footprint.
+    pub alloc_size: u64,
+    /// Files in the subtree (dirs) or 1 (files); aggregated leaves carry their count.
+    pub file_count: u32,
+    /// Bit flags: IS_DIR | REPARSE | DENIED | HIDDEN | SYSTEM | HARDLINK | AGGREGATED.
+    pub flags: u8,
+}
+
+impl Node {
+    #[inline]
+    pub fn is_dir(&self) -> bool {
+        self.flags & FLAG_IS_DIR != 0
+    }
+}
+
+/// An immutable, published scan tree. Phase 2 slices this with LOD for the
+/// `disk_tree` command; Phase 1 publishes it whole on completion so the
+/// pointer-swap channel is wired. `names` is the interned-name table indexed by
+/// `Node::name_id`; `nodes[0]` is always the root.
+#[derive(Debug, Default)]
+pub struct DiskTree {
+    pub nodes: Vec<Node>,
+    pub names: Vec<Box<str>>,
+}
+
+impl DiskTree {
+    /// Reconstruct a node's absolute path by walking `parent` links (cheap; only
+    /// the handful of nodes the UI drills into need it). Root's name is the
+    /// display root (e.g. "C:\\").
+    pub fn path_of(&self, mut id: u32) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        loop {
+            let n = &self.nodes[id as usize];
+            parts.push(&self.names[n.name_id as usize]);
+            if n.parent == id {
+                break; // root
+            }
+            id = n.parent;
+        }
+        parts.reverse();
+        // Root already carries a trailing separator ("C:\\"); join the rest with '\'.
+        let mut out = String::new();
+        for (i, p) in parts.iter().enumerate() {
+            out.push_str(p);
+            if i == 0 {
+                // root like "C:\\" already ends in a separator
+                if !out.ends_with('\\') {
+                    out.push('\\');
+                }
+            } else if i + 1 < parts.len() {
+                out.push('\\');
+            }
+        }
+        out
+    }
+}
+
+/// Hand-rolled string interner (spec §2.6 — no new dep). Repeated path
+/// components (`node_modules`, `.git`, `.dll`) cost one copy.
+struct Interner {
+    table: Vec<Box<str>>,
+    map: std::collections::HashMap<Box<str>, u32>,
+}
+
+impl Interner {
+    fn new() -> Self {
+        Self {
+            table: Vec::new(),
+            map: std::collections::HashMap::new(),
+        }
+    }
+    fn intern(&mut self, s: &str) -> u32 {
+        if let Some(&id) = self.map.get(s) {
+            return id;
+        }
+        let id = self.table.len() as u32;
+        let boxed: Box<str> = s.into();
+        self.table.push(boxed.clone());
+        self.map.insert(boxed, id);
+        id
+    }
+}
+
+// =============================================================================
+// Scan status + per-disk owner handle (spec §2.2)
+// =============================================================================
+
+/// Lifecycle of one disk scan. Stored as a `u8` atomic on the handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[repr(u8)]
+pub enum ScanStatus {
+    Scanning = 0,
+    Done = 1,
+    Cancelled = 2,
+    Error = 3,
+}
+
+impl ScanStatus {
+    fn from_u8(v: u8) -> ScanStatus {
+        match v {
+            1 => ScanStatus::Done,
+            2 => ScanStatus::Cancelled,
+            3 => ScanStatus::Error,
+            _ => ScanStatus::Scanning,
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            ScanStatus::Scanning => "scanning",
+            ScanStatus::Done => "done",
+            ScanStatus::Cancelled => "cancelled",
+            ScanStatus::Error => "error",
+        }
+    }
+}
+
+/// The per-disk owner (spec §2.2). Cheap scalar atomics back the O(1) status
+/// command; `snapshot` is the `sampler.rs` pointer-swap publish channel — the
+/// lock is held **only** to swap the `Arc`, never across the walk.
+pub struct ScanHandle {
+    pub scan_id: ScanId,
+    /// Friendly display root ("C:\\") for the UI and path reconstruction.
+    pub root_display: Box<str>,
+    /// Filesystem root actually walked (the drive letter root "C:\\").
+    walk_root: Box<str>,
+    status: AtomicU8,
+    /// Flipped by `disk_scan_cancel`; checked when popping the queue AND inside
+    /// the per-entry enumeration loop (spec §2.3).
+    cancel: Arc<AtomicBool>,
+    // Progress atomics — cheap scalar reads for the O(1) status command + event.
+    files_seen: AtomicU64,
+    dirs_seen: AtomicU64,
+    bytes_logical: AtomicU64,
+    bytes_alloc: AtomicU64,
+    /// Permission-denied / unreadable entries — surfaced, never aborts the scan.
+    skipped: AtomicU64,
+    /// Live node count for the memory cap (spec §2.7).
+    node_count: AtomicU64,
+    /// Set when the node cap stopped descent — drives the truncation banner.
+    truncated: AtomicBool,
+    started_at: Instant,
+    /// Bumped on each published snapshot swap (the frontend pulls on a new gen).
+    generation: AtomicU64,
+    /// Optional error message for the `Error` state.
+    error: Mutex<Option<String>>,
+    /// Pointer-swap publish channel (sampler.rs `PROC_SNAPSHOT` contract).
+    snapshot: Mutex<Arc<DiskTree>>,
+}
+
+impl ScanHandle {
+    fn new(scan_id: ScanId, root_display: String, walk_root: String) -> ScanHandle {
+        ScanHandle {
+            scan_id,
+            root_display: root_display.into(),
+            walk_root: walk_root.into(),
+            status: AtomicU8::new(ScanStatus::Scanning as u8),
+            cancel: Arc::new(AtomicBool::new(false)),
+            files_seen: AtomicU64::new(0),
+            dirs_seen: AtomicU64::new(0),
+            bytes_logical: AtomicU64::new(0),
+            bytes_alloc: AtomicU64::new(0),
+            skipped: AtomicU64::new(0),
+            node_count: AtomicU64::new(0),
+            truncated: AtomicBool::new(false),
+            started_at: Instant::now(),
+            generation: AtomicU64::new(0),
+            error: Mutex::new(None),
+            snapshot: Mutex::new(Arc::new(DiskTree::default())),
+        }
+    }
+
+    fn status(&self) -> ScanStatus {
+        ScanStatus::from_u8(self.status.load(Ordering::Relaxed))
+    }
+    fn set_status(&self, s: ScanStatus) {
+        self.status.store(s as u8, Ordering::Relaxed);
+    }
+
+    /// O(1) latest snapshot — clone the `Arc` (Phase 2 LOD-slices it).
+    pub fn snapshot(&self) -> Arc<DiskTree> {
+        self.snapshot.lock().clone()
+    }
+
+    /// Swap in a freshly-built tree and bump `generation` (the publish step).
+    fn publish(&self, tree: Arc<DiskTree>) {
+        *self.snapshot.lock() = tree;
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn build_progress(&self) -> ScanProgress {
+        let status = self.status();
+        ScanProgress {
+            scan_id: self.scan_id.clone(),
+            root: self.root_display.to_string(),
+            status: status.as_str().to_string(),
+            files_seen: self.files_seen.load(Ordering::Relaxed),
+            dirs_seen: self.dirs_seen.load(Ordering::Relaxed),
+            bytes_alloc: self.bytes_alloc.load(Ordering::Relaxed),
+            bytes_logical: self.bytes_logical.load(Ordering::Relaxed),
+            skipped: self.skipped.load(Ordering::Relaxed),
+            node_count: self.node_count.load(Ordering::Relaxed),
+            generation: self.generation.load(Ordering::Relaxed),
+            truncated: self.truncated.load(Ordering::Relaxed),
+            elapsed_ms: self.started_at.elapsed().as_millis() as u64,
+            error: self.error.lock().clone(),
+        }
+    }
+}
+
+/// Scalar progress snapshot — the `disk-scan://progress` event payload and the
+/// `disk_scan_status` return (spec §2.8). Never carries the tree.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanProgress {
+    pub scan_id: ScanId,
+    pub root: String,
+    /// "scanning" | "done" | "cancelled" | "error".
+    pub status: String,
+    pub files_seen: u64,
+    pub dirs_seen: u64,
+    pub bytes_alloc: u64,
+    pub bytes_logical: u64,
+    pub skipped: u64,
+    pub node_count: u64,
+    pub generation: u64,
+    pub truncated: bool,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
+}
+
+/// The multi-owner keyed registry (spec §2.1). `DashMap` gives per-key locking —
+/// starting/cancelling/reading disk D never contends with disk C. We never
+/// iterate the whole map while holding an entry lock.
+static SCANS: Lazy<DashMap<ScanId, Arc<ScanHandle>>> = Lazy::new(DashMap::new);
+
+// =============================================================================
+// Engine tunables (spec §2.6 / §2.7)
+// =============================================================================
+
+/// Hard node ceiling — stop descending, mark truncated, finish clean. Never OOM.
+/// ~20M nodes ≈ 640 MB (spec §2.7, owner decision 2).
+const NODE_CAP: u64 = 20_000_000;
+/// Within a directory, keep the top-N largest files as real nodes; fold the rest
+/// into one synthetic `AGGREGATED` "(other M files)" leaf (spec §2.6).
+const TOP_N_PER_DIR: usize = 32;
+/// Progress-event throttle floor (spec §2.8 — ~4–10 Hz).
+const PROGRESS_THROTTLE: Duration = Duration::from_millis(200);
+
+// =============================================================================
+// Win32 walk (spec §2.3) — only compiled on Windows.
+// =============================================================================
+
 #[cfg(target_os = "windows")]
 mod win {
-    use super::VolumeInfo;
+    use super::*;
     use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE,
+    };
     use windows::Win32::Storage::FileSystem::{
-        GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
-        GetVolumeNameForVolumeMountPointW,
+        CreateFileW, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW,
+        FindNextFileW, GetDiskFreeSpaceExW, GetDiskFreeSpaceW, GetDriveTypeW, GetFileInformationByHandle,
+        GetLogicalDrives, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FIND_FIRST_EX_LARGE_FETCH, OPEN_EXISTING,
+        WIN32_FIND_DATAW,
     };
 
     // Win32 DRIVE_* return codes from GetDriveTypeW (winbase.h). The windows crate
@@ -151,6 +462,39 @@ mod win {
         }
     }
 
+    /// Cluster (allocation-unit) size in bytes for a drive root. Allocation size
+    /// is the logical size rounded up to this; v1 uses this find-data-derived
+    /// value (owner decision 5 — no `GetCompressedFileSizeW`). Falls back to 4096.
+    fn cluster_size(root_w: &[u16]) -> u64 {
+        let mut spc = 0u32; // sectors per cluster
+        let mut bps = 0u32; // bytes per sector
+        // SAFETY: out-params point at live u32s; `root_w` is NUL-terminated.
+        let ok = unsafe {
+            GetDiskFreeSpaceW(
+                PCWSTR(root_w.as_ptr()),
+                Some(&mut spc),
+                Some(&mut bps),
+                None,
+                None,
+            )
+        };
+        let cl = (spc as u64) * (bps as u64);
+        if ok.is_ok() && cl > 0 {
+            cl
+        } else {
+            4096
+        }
+    }
+
+    /// Round a logical size up to the next whole cluster (the on-disk footprint).
+    #[inline]
+    fn round_to_cluster(logical: u64, cluster: u64) -> u64 {
+        if cluster == 0 {
+            return logical;
+        }
+        logical.div_ceil(cluster) * cluster
+    }
+
     /// Enumerate the machine's logical drives (A:..Z:) and describe each as a
     /// `VolumeInfo`. Cheap Win32 calls; called from a `spawn_blocking` task so a
     /// slow removable/network probe never stalls the IPC router.
@@ -195,15 +539,641 @@ mod win {
         }
         out
     }
+
+    /// Resolve the friendly walk root ("C:\\") for a `ScanId`. A drive-root key is
+    /// already the walk root; a GUID-path key is mapped back to its drive letter by
+    /// matching `GetVolumeNameForVolumeMountPointW` across present drives. Falls
+    /// back to the key itself (a GUID path is a valid `FindFirstFileExW` root too).
+    pub fn resolve_walk_root(scan_id: &str) -> String {
+        if scan_id.len() >= 2 && scan_id.as_bytes()[1] == b':' {
+            // Already a drive-letter root like "C:\\".
+            return if scan_id.ends_with('\\') {
+                scan_id.to_string()
+            } else {
+                format!("{scan_id}\\")
+            };
+        }
+        // GUID path — find the drive letter that maps to it.
+        let mask = unsafe { GetLogicalDrives() };
+        for i in 0..26u32 {
+            if mask & (1 << i) == 0 {
+                continue;
+            }
+            let root = format!("{}:\\", (b'A' + i as u8) as char);
+            if let Some(g) = volume_guid_path(&wide(&root)) {
+                if g == scan_id {
+                    return root;
+                }
+            }
+        }
+        // Fallback: the GUID path itself enumerates fine; ensure a trailing sep.
+        if scan_id.ends_with('\\') {
+            scan_id.to_string()
+        } else {
+            format!("{scan_id}\\")
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Worker pool + directory queue (spec §2.3) — hand-rolled, zero new deps.
+    // -------------------------------------------------------------------------
+
+    /// One unit of work: a directory to enumerate, identified by its arena
+    /// NodeId and its `\\?\`-prefixed wide path (sans the trailing `\*`).
+    struct DirTask {
+        node: u32,
+        /// `\\?\C:\dir` wide string, NUL-terminated, WITHOUT a trailing separator.
+        wpath: Vec<u16>,
+    }
+
+    /// The shared, hand-rolled work queue (spec §2.3 — `Mutex<Vec>` + `Condvar`,
+    /// no crossbeam). `pending` tracks in-flight + queued tasks so workers know
+    /// when the whole walk is drained (queue empty AND nothing being processed).
+    struct Queue {
+        stack: Vec<DirTask>,
+        pending: usize,
+        done: bool,
+    }
+
+    /// Per-entry result a worker accumulates for one directory, merged into the
+    /// arena under the arena lock (keeps the arena critical section tiny).
+    struct ChildResult {
+        name: String,
+        flags: u8,
+        logical: u64,
+        alloc: u64,
+        is_dir: bool,
+        /// `\\?\`-prefixed wide path of this child (for dirs we push back).
+        wpath: Vec<u16>,
+    }
+
+    /// Shared mutable scan state guarded by one `parking_lot::Mutex`. Held only
+    /// for the small arena-merge critical section — never across `FindNextFileW`.
+    struct Arena {
+        nodes: Vec<Node>,
+        interner: Interner,
+        /// Hardlink dedup seen-set: (VolumeSerial, FileIndex) → counted once.
+        seen_links: std::collections::HashSet<(u32, u64)>,
+    }
+
+    /// Build the `\\?\`-prefixed wide root for `FindFirstFileExW`. `C:\\` →
+    /// `\\?\C:` (no trailing sep). A GUID path `\\?\Volume{..}\` is already
+    /// extended-length; we just strip the trailing separator.
+    fn ext_root_w(walk_root: &str) -> Vec<u16> {
+        let trimmed = walk_root.trim_end_matches('\\');
+        let s = if trimmed.starts_with("\\\\?\\") {
+            trimmed.to_string()
+        } else {
+            format!("\\\\?\\{trimmed}")
+        };
+        wide(&s)
+    }
+
+    /// Open a handle for `BY_HANDLE_FILE_INFORMATION` (hardlink dedup, dir count).
+    /// Returns None on any failure (denied / in-use) — the caller degrades.
+    fn handle_info(wpath: &[u16]) -> Option<BY_HANDLE_FILE_INFORMATION> {
+        // SAFETY: `wpath` is a NUL-terminated wide path; flags request metadata
+        // only (no content read), open-reparse so we stat the link itself, and
+        // backup-semantics so directories can be opened.
+        let h: HANDLE = match unsafe {
+            CreateFileW(
+                PCWSTR(wpath.as_ptr()),
+                GENERIC_READ.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            )
+        } {
+            Ok(h) if h != INVALID_HANDLE_VALUE => h,
+            _ => return None,
+        };
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: `h` is a live handle; `info` is a valid out-param.
+        let ok = unsafe { GetFileInformationByHandle(h, &mut info) };
+        // SAFETY: `h` came from CreateFileW and is closed exactly once.
+        let _ = unsafe { CloseHandle(h) };
+        ok.is_ok().then_some(info)
+    }
+
+    /// Enumerate ONE directory's entries in a single `FindFirstFileExW` pass.
+    /// Returns the per-entry results; permission/sharing failures bump `skipped`
+    /// on the handle and return an empty list (the dir node is flagged DENIED by
+    /// the caller). Cancel is checked inside the loop (spec §2.3 / §2.5).
+    fn enumerate_dir(
+        dir_wpath: &[u16],
+        cluster: u64,
+        handle: &ScanHandle,
+        arena: &Mutex<Arena>,
+    ) -> Result<Vec<ChildResult>, ()> {
+        // Build the search pattern: "<dir>\*".
+        let mut pattern: Vec<u16> = dir_wpath.to_vec();
+        // dir_wpath is NUL-terminated; drop the NUL, append "\*\0".
+        if pattern.last() == Some(&0) {
+            pattern.pop();
+        }
+        pattern.push(b'\\' as u16);
+        pattern.push(b'*' as u16);
+        pattern.push(0);
+
+        let mut data = WIN32_FIND_DATAW::default();
+        // SAFETY: `pattern` is a NUL-terminated wide string; `data` is a valid
+        // out-buffer of the correct type. FindExInfoBasic skips the (unused)
+        // alternate 8.3 name; LARGE_FETCH batches directory reads.
+        let find = unsafe {
+            FindFirstFileExW(
+                PCWSTR(pattern.as_ptr()),
+                FindExInfoBasic,
+                &mut data as *mut WIN32_FIND_DATAW as *mut core::ffi::c_void,
+                FindExSearchNameMatch,
+                None,
+                FIND_FIRST_EX_LARGE_FETCH,
+            )
+        };
+        let hfind = match find {
+            Ok(h) if h != INVALID_HANDLE_VALUE => h,
+            _ => {
+                // Permission denied / unreadable directory — count and degrade.
+                handle.skipped.fetch_add(1, Ordering::Relaxed);
+                return Err(());
+            }
+        };
+
+        let mut out: Vec<ChildResult> = Vec::new();
+        loop {
+            if handle.cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let attrs = data.dwFileAttributes;
+            let name = from_wide_nul(&data.cFileName);
+            // Skip the "." and ".." pseudo-entries.
+            if name != "." && name != ".." {
+                let is_dir = attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
+                let is_reparse = attrs & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
+                let mut flags = 0u8;
+                if is_dir {
+                    flags |= FLAG_IS_DIR;
+                }
+                if is_reparse {
+                    flags |= FLAG_REPARSE;
+                }
+                if attrs & FILE_ATTRIBUTE_HIDDEN.0 != 0 {
+                    flags |= FLAG_HIDDEN;
+                }
+                if attrs & FILE_ATTRIBUTE_SYSTEM.0 != 0 {
+                    flags |= FLAG_SYSTEM;
+                }
+
+                let logical =
+                    ((data.nFileSizeHigh as u64) << 32) | (data.nFileSizeLow as u64);
+
+                // Child's extended-length wide path (for dirs we push back; for
+                // hardlinked files we open it for dedup).
+                let child_wpath = {
+                    let mut p: Vec<u16> = dir_wpath.to_vec();
+                    if p.last() == Some(&0) {
+                        p.pop();
+                    }
+                    p.push(b'\\' as u16);
+                    p.extend(name.encode_utf16());
+                    p.push(0);
+                    p
+                };
+
+                // Reparse points (symlink/junction/mount): treat as a flagged
+                // LEAF — do NOT recurse (prevents loops + double-counting,
+                // spec §2.5.1). Counted with zero subtree bytes.
+                let recurse_dir = is_dir && !is_reparse;
+
+                // Files only: dedup hardlinks (link count > 1) so shared bytes
+                // count once (spec §2.5.2). Link-count-1 files skip the handle.
+                let mut counted_logical = if is_dir { 0 } else { logical };
+                let mut counted_alloc = if is_dir {
+                    0
+                } else {
+                    round_to_cluster(logical, cluster)
+                };
+                if !is_dir {
+                    // Cheap probe: open for BY_HANDLE info only when the file might
+                    // be hardlinked. We can't know link count without the handle,
+                    // so only pay it when dedup matters by checking after open.
+                    if let Some(info) = handle_info(&child_wpath) {
+                        if info.nNumberOfLinks > 1 {
+                            let key = (
+                                info.dwVolumeSerialNumber,
+                                ((info.nFileIndexHigh as u64) << 32)
+                                    | (info.nFileIndexLow as u64),
+                            );
+                            let mut a = arena.lock();
+                            if !a.seen_links.insert(key) {
+                                // Already counted this physical file — zero it.
+                                counted_logical = 0;
+                                counted_alloc = 0;
+                            }
+                            drop(a);
+                            flags |= FLAG_HARDLINK;
+                        }
+                    }
+                }
+
+                out.push(ChildResult {
+                    name,
+                    flags,
+                    logical: counted_logical,
+                    alloc: counted_alloc,
+                    is_dir: recurse_dir,
+                    wpath: child_wpath,
+                });
+            }
+
+            // Advance; FindNextFileW returns Err at end-of-enumeration.
+            // SAFETY: `hfind` is live; `data` is a valid out-buffer.
+            if unsafe { FindNextFileW(hfind, &mut data) }.is_err() {
+                break;
+            }
+        }
+        // SAFETY: `hfind` came from FindFirstFileExW and is closed exactly once.
+        let _ = unsafe { FindClose(hfind) };
+        Ok(out)
+    }
+
+    /// One worker loop: pop a directory, enumerate it, merge children into the
+    /// arena (top-N aggregation), push child dirs back. Exits when the queue is
+    /// drained or cancel is set.
+    fn worker(
+        queue: &Mutex<Queue>,
+        cv: &parking_lot::Condvar,
+        arena: &Mutex<Arena>,
+        handle: &ScanHandle,
+        cluster: u64,
+    ) {
+        loop {
+            // --- pop (or wait / exit) -----------------------------------------
+            let task = {
+                let mut q = queue.lock();
+                loop {
+                    if handle.cancel.load(Ordering::Relaxed) || q.done {
+                        return;
+                    }
+                    if let Some(t) = q.stack.pop() {
+                        break t;
+                    }
+                    if q.pending == 0 {
+                        // Nothing in flight and nothing queued → walk complete.
+                        q.done = true;
+                        cv.notify_all();
+                        return;
+                    }
+                    cv.wait(&mut q);
+                }
+            };
+
+            if handle.cancel.load(Ordering::Relaxed) {
+                // Account for the popped task and bail.
+                let mut q = queue.lock();
+                q.pending -= 1;
+                cv.notify_all();
+                continue;
+            }
+
+            // --- enumerate (NO locks held across this slow I/O) ---------------
+            let children = enumerate_dir(&task.wpath, cluster, handle, arena);
+            handle.dirs_seen.fetch_add(1, Ordering::Relaxed);
+
+            let denied = children.is_err();
+            let mut children = children.unwrap_or_default();
+
+            // --- merge into arena (small critical section) --------------------
+            let mut new_dirs: Vec<DirTask> = Vec::new();
+            {
+                let mut a = arena.lock();
+                if denied {
+                    a.nodes[task.node as usize].flags |= FLAG_DENIED;
+                }
+
+                // Top-N-per-dir source aggregation (spec §2.6): keep the N largest
+                // LEAVES (files + non-recursed reparse points) as real nodes; fold
+                // the rest into one AGGREGATED leaf. Real directories (is_dir, the
+                // ones we descend) always become real nodes — they may hold big
+                // subtrees — so they partition out here.
+                let (mut files, dirs): (Vec<ChildResult>, Vec<ChildResult>) =
+                    children.drain(..).partition(|c| !c.is_dir);
+                files.sort_unstable_by(|a, b| b.alloc.cmp(&a.alloc));
+
+                let mut agg_files: u64 = 0;
+                let mut agg_logical: u64 = 0;
+                let mut agg_alloc: u64 = 0;
+
+                for (idx, c) in files.into_iter().enumerate() {
+                    if idx < TOP_N_PER_DIR {
+                        ScanHandle::push_child_file(&mut a, handle, task.node, &c);
+                    } else {
+                        agg_files += 1;
+                        agg_logical += c.logical;
+                        agg_alloc += c.alloc;
+                        // Still account bytes/files in the running totals.
+                        handle.files_seen.fetch_add(1, Ordering::Relaxed);
+                        handle.bytes_logical.fetch_add(c.logical, Ordering::Relaxed);
+                        handle.bytes_alloc.fetch_add(c.alloc, Ordering::Relaxed);
+                    }
+                }
+                if agg_files > 0 {
+                    ScanHandle::push_aggregated(&mut a, handle, task.node, agg_files, agg_logical, agg_alloc);
+                }
+
+                // Directories: real nodes, queued for descent (unless capped).
+                let capped =
+                    handle.node_count.load(Ordering::Relaxed) >= NODE_CAP;
+                for c in dirs {
+                    let child = ScanHandle::push_child_dir(&mut a, handle, task.node, &c);
+                    if let Some(child_id) = child {
+                        if capped {
+                            handle.truncated.store(true, Ordering::Relaxed);
+                            a.nodes[child_id as usize].flags |= FLAG_AGGREGATED;
+                        } else {
+                            new_dirs.push(DirTask {
+                                node: child_id,
+                                wpath: c.wpath,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // --- requeue child dirs -------------------------------------------
+            {
+                let mut q = queue.lock();
+                q.pending -= 1; // this task done
+                let n = new_dirs.len();
+                q.pending += n;
+                q.stack.extend(new_dirs);
+                if n > 0 {
+                    cv.notify_all();
+                } else {
+                    // We may have been the last in-flight task.
+                    cv.notify_all();
+                }
+            }
+        }
+    }
+
+    impl ScanHandle {
+        /// Append a file leaf to the arena. Caller holds the arena lock.
+        fn push_child_file(a: &mut Arena, handle: &ScanHandle, parent: u32, c: &ChildResult) {
+            let name_id = a.interner.intern(&c.name);
+            let id = a.nodes.len() as u32;
+            let prev_first = a.nodes[parent as usize].first_child;
+            a.nodes.push(Node {
+                parent,
+                name_id,
+                first_child: SENTINEL,
+                next_sibling: prev_first,
+                logical_size: c.logical,
+                alloc_size: c.alloc,
+                file_count: 1,
+                flags: c.flags & !FLAG_IS_DIR,
+            });
+            a.nodes[parent as usize].first_child = id;
+            handle.node_count.fetch_add(1, Ordering::Relaxed);
+            handle.files_seen.fetch_add(1, Ordering::Relaxed);
+            handle.bytes_logical.fetch_add(c.logical, Ordering::Relaxed);
+            handle.bytes_alloc.fetch_add(c.alloc, Ordering::Relaxed);
+        }
+
+        /// Append a directory node; returns its NodeId. Caller holds the lock.
+        fn push_child_dir(
+            a: &mut Arena,
+            handle: &ScanHandle,
+            parent: u32,
+            c: &ChildResult,
+        ) -> Option<u32> {
+            let name_id = a.interner.intern(&c.name);
+            let id = a.nodes.len() as u32;
+            let prev_first = a.nodes[parent as usize].first_child;
+            a.nodes.push(Node {
+                parent,
+                name_id,
+                first_child: SENTINEL,
+                next_sibling: prev_first,
+                logical_size: 0,
+                alloc_size: 0,
+                file_count: 0,
+                flags: c.flags | FLAG_IS_DIR,
+            });
+            a.nodes[parent as usize].first_child = id;
+            handle.node_count.fetch_add(1, Ordering::Relaxed);
+            Some(id)
+        }
+
+        /// Append the synthetic "(other M files)" aggregated leaf. Caller holds
+        /// the lock. Its name carries the count so the UI can render it directly.
+        fn push_aggregated(
+            a: &mut Arena,
+            handle: &ScanHandle,
+            parent: u32,
+            files: u64,
+            logical: u64,
+            alloc: u64,
+        ) {
+            let name = format!("({files} more files)");
+            let name_id = a.interner.intern(&name);
+            let id = a.nodes.len() as u32;
+            let prev_first = a.nodes[parent as usize].first_child;
+            a.nodes.push(Node {
+                parent,
+                name_id,
+                first_child: SENTINEL,
+                next_sibling: prev_first,
+                logical_size: logical,
+                alloc_size: alloc,
+                file_count: files as u32,
+                flags: FLAG_AGGREGATED,
+            });
+            a.nodes[parent as usize].first_child = id;
+            handle.node_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Roll subtree sizes UP the parent spine so the published tree is internally
+    /// consistent (spec §2.6). Single post-order pass over the arena: because
+    /// children were always appended after their parent, indices are NOT in
+    /// topo order, so we accumulate by walking parents from the back.
+    fn rollup(nodes: &mut [Node]) {
+        // Iterate from the last-added node back to the root; each node adds its
+        // OWN size into its parent. Files/aggregated leaves already carry size;
+        // dirs start at 0 and receive their children's contributions. Processing
+        // back-to-front guarantees a child is fully summed before its parent is
+        // visited (a parent always has a smaller index than its children).
+        for i in (1..nodes.len()).rev() {
+            let (logical, alloc, count, parent) = {
+                let n = &nodes[i];
+                (n.logical_size, n.alloc_size, n.file_count, n.parent)
+            };
+            let p = &mut nodes[parent as usize];
+            p.logical_size = p.logical_size.saturating_add(logical);
+            p.alloc_size = p.alloc_size.saturating_add(alloc);
+            p.file_count = p.file_count.saturating_add(count);
+        }
+    }
+
+    /// Run the whole scan for one disk on this (already-dedicated) thread. Builds
+    /// the arena via a small worker pool, rolls up sizes, publishes one snapshot.
+    pub fn run_scan(handle: Arc<ScanHandle>, app: tauri::AppHandle) {
+        let walk_root = handle.walk_root.to_string();
+        let root_display = handle.root_display.to_string();
+        let root_w = ext_root_w(&walk_root);
+        let cluster = cluster_size(&wide(&walk_root));
+
+        // Seed the arena with the root node (name = display root, e.g. "C:\\").
+        let mut interner = Interner::new();
+        let root_name_id = interner.intern(&root_display);
+        let arena = Mutex::new(Arena {
+            nodes: vec![Node {
+                parent: 0,
+                name_id: root_name_id,
+                first_child: SENTINEL,
+                next_sibling: SENTINEL,
+                logical_size: 0,
+                alloc_size: 0,
+                file_count: 0,
+                flags: FLAG_IS_DIR,
+            }],
+            interner,
+            seen_links: std::collections::HashSet::new(),
+        });
+        handle.node_count.store(1, Ordering::Relaxed);
+
+        let queue = Mutex::new(Queue {
+            stack: vec![DirTask {
+                node: 0,
+                wpath: root_w,
+            }],
+            pending: 1,
+            done: false,
+        });
+        let cv = parking_lot::Condvar::new();
+
+        // Worker count: I/O-bound, so small (spec §2.3). min(cores, 8).
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(1, 8);
+
+        // Progress emitter — a separate thread polling the atomics on a throttle
+        // (spec §2.8); scalars only, never the tree. Stops when the walk ends.
+        let walk_done = Arc::new(AtomicBool::new(false));
+        let emit_handle = {
+            let handle = Arc::clone(&handle);
+            let app = app.clone();
+            let walk_done = Arc::clone(&walk_done);
+            std::thread::Builder::new()
+                .name(format!("corepilot-scan-emit-{}", handle.scan_id))
+                .spawn(move || {
+                    use tauri::Emitter;
+                    let mut last = ScanProgressKey::default();
+                    while !walk_done.load(Ordering::Relaxed) {
+                        std::thread::sleep(PROGRESS_THROTTLE);
+                        let p = handle.build_progress();
+                        let key = ScanProgressKey::from(&p);
+                        if key != last {
+                            last = key;
+                            let _ = app.emit("disk-scan://progress", p);
+                        }
+                    }
+                })
+                .ok()
+        };
+
+        // Fan out workers on dedicated threads scoped to this scan.
+        std::thread::scope(|s| {
+            for w in 0..workers {
+                let queue = &queue;
+                let cv = &cv;
+                let arena = &arena;
+                let handle = &handle;
+                std::thread::Builder::new()
+                    .name(format!("corepilot-scan-{}-w{w}", handle.scan_id))
+                    .spawn_scoped(s, move || worker(queue, cv, arena, handle, cluster))
+                    .ok();
+            }
+        });
+
+        // Walk done (or cancelled). Roll up + publish the final snapshot.
+        let cancelled = handle.cancel.load(Ordering::Relaxed);
+        {
+            let mut a = arena.lock();
+            rollup(&mut a.nodes);
+            let tree = DiskTree {
+                nodes: std::mem::take(&mut a.nodes),
+                names: std::mem::take(&mut a.interner.table),
+            };
+            handle.publish(Arc::new(tree));
+        }
+
+        handle.set_status(if cancelled {
+            ScanStatus::Cancelled
+        } else {
+            ScanStatus::Done
+        });
+
+        // Stop the emitter and fire one final progress event.
+        walk_done.store(true, Ordering::Relaxed);
+        if let Some(h) = emit_handle {
+            let _ = h.join();
+        }
+        {
+            use tauri::Emitter;
+            let _ = app.emit("disk-scan://progress", handle.build_progress());
+        }
+    }
+}
+
+/// Cheap change-detection key so the emitter only fires when counters actually
+/// move (spec §2.8: "emit only if … counters changed").
+#[derive(Default, PartialEq, Eq)]
+struct ScanProgressKey {
+    status: u8,
+    files: u64,
+    dirs: u64,
+    gen: u64,
+    truncated: bool,
+}
+
+impl From<&ScanProgress> for ScanProgressKey {
+    fn from(p: &ScanProgress) -> Self {
+        ScanProgressKey {
+            status: match p.status.as_str() {
+                "done" => 1,
+                "cancelled" => 2,
+                "error" => 3,
+                _ => 0,
+            },
+            files: p.files_seen,
+            dirs: p.dirs_seen,
+            gen: p.generation,
+            truncated: p.truncated,
+        }
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
 mod win {
-    use super::VolumeInfo;
+    use super::*;
     pub fn list_volumes() -> Vec<VolumeInfo> {
         Vec::new()
     }
+    pub fn resolve_walk_root(scan_id: &str) -> String {
+        scan_id.to_string()
+    }
+    pub fn run_scan(handle: Arc<ScanHandle>, _app: tauri::AppHandle) {
+        handle.set_status(ScanStatus::Done);
+    }
 }
+
+// =============================================================================
+// Tauri commands (spec §2.9) — all O(1) / non-blocking.
+// =============================================================================
 
 /// Enumerate fixed + removable volumes for the disk-picker landing (Zone A).
 ///
@@ -214,4 +1184,73 @@ pub async fn disk_list_volumes() -> CoreResult<Vec<VolumeInfo>> {
     tauri::async_runtime::spawn_blocking(win::list_volumes)
         .await
         .map_err(|e| crate::error::CoreError::Msg(format!("task failed: {e}")))
+}
+
+/// Start scanning each requested disk. Inserts a `ScanHandle` and spawns one
+/// dedicated owner thread per disk (NOT the `spawn_blocking` pool). Returns the
+/// keys immediately — O(1) from the caller's view. A `scan_id` that is already
+/// scanning is left untouched (idempotent re-start is `disk_scan_rescan`, Phase 5).
+#[tauri::command]
+pub fn disk_scan_start(app: tauri::AppHandle, scan_ids: Vec<ScanId>) -> CoreResult<Vec<ScanId>> {
+    let mut started = Vec::new();
+    for scan_id in scan_ids {
+        // Skip a scan that is already in flight for this key.
+        if let Some(existing) = SCANS.get(&scan_id) {
+            if existing.status() == ScanStatus::Scanning {
+                started.push(scan_id);
+                continue;
+            }
+        }
+        let walk_root = win::resolve_walk_root(&scan_id);
+        let root_display = walk_root.clone();
+        let handle = Arc::new(ScanHandle::new(
+            scan_id.clone(),
+            root_display,
+            walk_root,
+        ));
+        SCANS.insert(scan_id.clone(), Arc::clone(&handle));
+
+        let app = app.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("corepilot-scan-{scan_id}"))
+            .spawn(move || win::run_scan(handle, app));
+        if let Err(e) = spawned {
+            // A failed spawn must not leave a forever-scanning handle (spec §7).
+            if let Some(h) = SCANS.get(&scan_id) {
+                *h.error.lock() = Some(format!("scan thread failed to spawn: {e}"));
+                h.set_status(ScanStatus::Error);
+            }
+            tracing::warn!("corepilot-scan-{scan_id} thread failed to spawn: {e}");
+        }
+        started.push(scan_id);
+    }
+    Ok(started)
+}
+
+/// Flip the per-disk cancel atomic. O(1); the walk drains promptly (checked when
+/// popping the queue AND inside the per-entry loop). No-op for an unknown key.
+#[tauri::command]
+pub fn disk_scan_cancel(scan_id: ScanId) -> CoreResult<()> {
+    if let Some(h) = SCANS.get(&scan_id) {
+        h.cancel.store(true, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// Read the per-disk progress atomics. O(1). The event is the live channel; this
+/// is for cold reads / reconnect (spec §7). Errors for an unknown key.
+#[tauri::command]
+pub fn disk_scan_status(scan_id: ScanId) -> CoreResult<ScanProgress> {
+    match SCANS.get(&scan_id) {
+        Some(h) => Ok(h.build_progress()),
+        None => Err(crate::error::CoreError::Msg(format!(
+            "no scan for {scan_id}"
+        ))),
+    }
+}
+
+/// Internal accessor for the per-disk handle (Phase 2 `disk_tree` / `disk_top_items`
+/// clone the published `Arc<DiskTree>` through this).
+pub fn scan_handle(scan_id: &str) -> Option<Arc<ScanHandle>> {
+    SCANS.get(scan_id).map(|h| Arc::clone(&h))
 }
