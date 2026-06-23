@@ -63,7 +63,7 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
 
   // The store entry can be momentarily undefined during a close re-target.
   const metric: Metric = view?.metric ?? "alloc";
-  const colorMode: ColorMode = view?.colorMode ?? "depth";
+  const colorMode: ColorMode = view?.colorMode ?? "cushion";
   const paused = view?.paused ?? false;
   const lod = view?.lod ?? 3;
   const stack = view?.stack ?? [{ path: null, label: "" }];
@@ -215,6 +215,7 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
             value={colorMode}
             onChange={(v) => patch({ colorMode: v })}
             options={[
+              { value: "cushion", label: "软垫" },
               { value: "depth", label: "按层级" },
               { value: "type", label: "按类型" },
             ]}
@@ -254,6 +255,7 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
               view={tree}
               metric={metric}
               colorMode={colorMode}
+              scanning={scanning}
               onPick={(node) => onPick(node)}
               onHover={(node) => setHovered(node ?? null)}
             />
