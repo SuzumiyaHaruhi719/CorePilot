@@ -63,10 +63,13 @@ function freshView(scanId: string, rootLabel: string, usedBytes = 0): PerDiskVie
     metric: "alloc",
     colorMode: "cushion",
     paused: false,
-    // Densest by default (no min-bytes floor) so the treemap shows a full-disk
-    // overview like SpaceSniffer; the client pixel-LOD collapses sub-pixel rects,
-    // and the backend caps the slice, so "show everything" stays bounded.
-    lod: 1,
+    // Mid floor (lod 5 ≈ 1MB): lod 1 (no floor) FLOODED the slice with tiny
+    // shallow nodes and hit the node cap BEFORE reaching inside big folders, so
+    // they rendered as solid blocks ("only one giant folder"). A real floor prunes
+    // sub-pixel tails so the bounded slice descends DEEP into the big folders —
+    // giving the nested SpaceSniffer-style detail. Client pixel-LOD still collapses
+    // whatever's left below a pixel.
+    lod: 5,
     stack: [{ path: null, label: rootLabel }],
   };
 }
