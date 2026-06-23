@@ -56,6 +56,21 @@ use windows::Win32::Graphics::Gdi::{
     FW_BOLD, FW_NORMAL, GetDC, HBRUSH, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, TRANSPARENT,
 };
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+};
+use windows::Win32::Graphics::Direct2D::{
+    D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, ID2D1SolidColorBrush,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+};
+use windows::Win32::Graphics::DirectWrite::{
+    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL, DWRITE_TEXT_METRICS,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{
     SHAppBarMessage, SHQueryUserNotificationState, ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP,
@@ -498,7 +513,7 @@ impl Readings {
             "cpu.temp" => self.cpu_temp.map(|v| ("CPU", format!("{:.1}°C", v))),
             "cpu.freq" => self
                 .cpu_clock
-                .map(|v| ("CCLK", format!("{:.2}GHz", v / 1000.0))),
+                .map(|v| ("CCLK", format!("{:.0}MHz", v))),
             "cpu.power" => None, // not in the default set; sensors carry W if added
             "mem.used" => self
                 .mem_used
@@ -559,6 +574,23 @@ struct RenderState {
     rows_layout: Vec<Vec<Group>>,
     /// Per-row height in device px (the tallest measured segment).
     row_h: i32,
+
+    // === Direct2D / DirectWrite text engine (browser-grade glyphs). ===
+    /// When true, measure + paint go through D2D/DWrite; when false (any D2D
+    /// creation failed), the GDI `HFONT`/`HBRUSH` path above is the fallback.
+    use_d2d: bool,
+    /// D2D factory (single-threaded — this thread only). `None` until created.
+    d2d_factory: Option<ID2D1Factory>,
+    /// DirectWrite factory (shared). `None` until created.
+    dwrite_factory: Option<IDWriteFactory>,
+    /// DC render target bound to the window DC each paint. `None` until created.
+    dc_target: Option<ID2D1DCRenderTarget>,
+    /// Cached text format for the current (size,bold,dpi). Rebuilt on change.
+    text_format: Option<IDWriteTextFormat>,
+    /// (size, bold, dpi) the cached text format was built for.
+    fmt_key: (i32, bool, u32),
+    /// Cached solid brush whose color is re-set per drawn segment.
+    d2d_brush: Option<ID2D1SolidColorBrush>,
 }
 
 impl Drop for RenderState {
@@ -658,6 +690,134 @@ unsafe fn rebuild_brush(rs: &mut RenderState, bg: COLORREF) {
     let _ = SetLayeredWindowAttributes(rs.hwnd, bg, 0, LWA_COLORKEY);
 }
 
+/// Convert a Win32 `COLORREF` (0x00BBGGRR) into a D2D `D2D1_COLOR_F` (opaque).
+fn colorref_to_d2d(c: COLORREF) -> D2D1_COLOR_F {
+    let v = c.0;
+    D2D1_COLOR_F {
+        r: (v & 0xFF) as f32 / 255.0,
+        g: ((v >> 8) & 0xFF) as f32 / 255.0,
+        b: ((v >> 16) & 0xFF) as f32 / 255.0,
+        a: 1.0,
+    }
+}
+
+/// Create the D2D factory, DWrite factory, DC render target and solid brush ONCE.
+/// Any failure leaves `use_d2d = false` (the GDI fallback then runs) and NEVER
+/// panics — every COM Result is matched. Idempotent: returns early if already set.
+unsafe fn init_d2d(rs: &mut RenderState) {
+    if rs.d2d_factory.is_some() && rs.dwrite_factory.is_some() && rs.dc_target.is_some() {
+        return;
+    }
+    let factory: ID2D1Factory =
+        match D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("taskbar monitor: D2D1CreateFactory failed: {e}");
+                rs.use_d2d = false;
+                return;
+            }
+        };
+    let dwrite: IDWriteFactory = match DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!("taskbar monitor: DWriteCreateFactory failed: {e}");
+            rs.use_d2d = false;
+            return;
+        }
+    };
+    // DC render target: B8G8R8A8 / ALPHA_IGNORE, 96 dpi (1 DIP = 1 px) so all the
+    // device-px layout math is unchanged.
+    let props = D2D1_RENDER_TARGET_PROPERTIES {
+        r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_IGNORE,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        usage: D2D1_RENDER_TARGET_USAGE_NONE,
+        minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+    };
+    let target = match factory.CreateDCRenderTarget(&props) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("taskbar monitor: CreateDCRenderTarget failed: {e}");
+            rs.use_d2d = false;
+            return;
+        }
+    };
+    // White brush; color is re-set per segment in paint.
+    let brush = match target.CreateSolidColorBrush(
+        &D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+        None,
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("taskbar monitor: CreateSolidColorBrush failed: {e}");
+            rs.use_d2d = false;
+            return;
+        }
+    };
+    target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    rs.d2d_factory = Some(factory);
+    rs.dwrite_factory = Some(dwrite);
+    rs.dc_target = Some(target);
+    rs.d2d_brush = Some(brush);
+    rs.use_d2d = true;
+}
+
+/// (Re)build the cached `IDWriteTextFormat` for size(pt)+bold at the window DPI.
+/// Size in DIPs = pt * dpi / 72 (the render target runs at 96 dpi so 1 DIP = 1
+/// device px, matching the GDI sizing). Returns false on any failure (no format).
+unsafe fn rebuild_text_format(rs: &mut RenderState, size_pt: i32, bold: bool, dpi: u32) -> bool {
+    let Some(dwrite) = rs.dwrite_factory.as_ref() else {
+        return false;
+    };
+    let weight = if bold {
+        DWRITE_FONT_WEIGHT_BOLD
+    } else {
+        DWRITE_FONT_WEIGHT_NORMAL
+    };
+    let size_dip = size_pt as f32 * dpi as f32 / 72.0;
+    let family = wide("Segoe UI");
+    let locale = wide("");
+    match dwrite.CreateTextFormat(
+        PCWSTR(family.as_ptr()),
+        None,
+        weight,
+        DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL,
+        size_dip,
+        PCWSTR(locale.as_ptr()),
+    ) {
+        Ok(fmt) => {
+            rs.text_format = Some(fmt);
+            rs.fmt_key = (size_pt, bold, dpi);
+            true
+        }
+        Err(e) => {
+            tracing::warn!("taskbar monitor: CreateTextFormat failed: {e}");
+            rs.text_format = None;
+            false
+        }
+    }
+}
+
+/// Measure `s` with the cached DirectWrite text format via an `IDWriteTextLayout`,
+/// returning (w, h) in device px (ceil) — the D2D replacement for `measure()`.
+/// `None` on any failure (the caller then uses the GDI `measure()` fallback).
+unsafe fn measure_d2d(rs: &RenderState, s: &str) -> Option<(i32, i32)> {
+    let dwrite = rs.dwrite_factory.as_ref()?;
+    let fmt = rs.text_format.as_ref()?;
+    let text: Vec<u16> = s.encode_utf16().collect();
+    let layout = dwrite
+        .CreateTextLayout(&text, fmt, f32::MAX, f32::MAX)
+        .ok()?;
+    let mut m = DWRITE_TEXT_METRICS::default();
+    layout.GetMetrics(&mut m).ok()?;
+    Some((m.width.ceil() as i32, m.height.ceil() as i32))
+}
+
 /// True when a fullscreen app (exclusive D3D / presentation mode, or a borderless
 /// window covering its whole monitor) is in the foreground — we HIDE the taskbar
 /// plate then so this `WS_EX_TOPMOST` surface never draws over a game. Cheap;
@@ -725,13 +885,26 @@ unsafe fn tick() {
         let dpi = dpi_of(rs.hwnd);
 
         // Refresh cached GDI objects only when their inputs changed (never per
-        // paint — that was the leak).
+        // paint — that was the leak). These stay live as the D2D fallback.
         if rs.font.is_invalid() || rs.font_key != (cfg.size, cfg.bold, dpi) {
             rebuild_font(rs, cfg.size, cfg.bold, dpi);
         }
         if rs.bg_brush.is_invalid() || rs.brush_key != cfg.bg {
             rebuild_brush(rs, cfg.bg);
         }
+
+        // Bring up the D2D/DWrite text engine once (idempotent). On any failure
+        // `use_d2d` stays false and the GDI path above renders instead.
+        init_d2d(rs);
+        // Refresh the cached DirectWrite text format on a (size,bold,dpi) change.
+        // If it fails, drop back to GDI for this tick (don't ship a blank plate).
+        if rs.use_d2d
+            && (rs.text_format.is_none() || rs.fmt_key != (cfg.size, cfg.bold, dpi))
+            && !rebuild_text_format(rs, cfg.size, cfg.bold, dpi)
+        {
+            rs.use_d2d = false;
+        }
+        let use_d2d = rs.use_d2d;
 
         // Build category GROUPS from the live readings (OSD-plate style: one
         // themed category label, then that category's values), measured with the
@@ -764,7 +937,12 @@ unsafe fn tick() {
             } else {
                 white
             };
-            let (vw, vh) = measure(hdc, &disp);
+            // Measure via DirectWrite when the D2D engine is up, else GDI.
+            let (vw, vh) = if use_d2d {
+                measure_d2d(rs, &disp).unwrap_or_else(|| measure(hdc, &disp))
+            } else {
+                measure(hdc, &disp)
+            };
             row_h = row_h.max(vh);
             let vseg = Seg {
                 w16: disp.encode_utf16().collect(),
@@ -774,7 +952,11 @@ unsafe fn tick() {
             if let Some((_, g)) = groups.iter_mut().find(|(c, _)| *c == cat) {
                 g.values.push(vseg);
             } else {
-                let (lw, lh) = measure(hdc, cat_label);
+                let (lw, lh) = if use_d2d {
+                    measure_d2d(rs, cat_label).unwrap_or_else(|| measure(hdc, cat_label))
+                } else {
+                    measure(hdc, cat_label)
+                };
                 row_h = row_h.max(lh);
                 let label = Seg {
                     w16: cat_label.encode_utf16().collect(),
@@ -1001,15 +1183,101 @@ unsafe fn dock_xy(
 
 /// Owner-draw the plate: fill the color-keyed background, then per cell draw the
 /// label (label color) + value (threshold color), columns flowing horizontally,
-/// rows stacked. Cached `HFONT`/`HBRUSH` are reused (never created here).
+/// rows stacked. Tries the Direct2D/DirectWrite engine first (browser-grade
+/// glyphs); on any D2D failure falls back to the GDI `HFONT`/`HBRUSH` path. The
+/// color-key bg + same (x,y) positions are identical between the two engines.
 unsafe fn paint(rs: &RenderState) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(rs.hwnd, &mut ps);
 
     let mut rect = RECT::default();
     let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(rs.hwnd, &mut rect);
+
+    // Direct2D path (preferred). Returns false on any failure → GDI fallback below.
+    let drawn = if rs.use_d2d {
+        paint_d2d(rs, hdc, &rect)
+    } else {
+        false
+    };
+
+    if !drawn {
+        paint_gdi(rs, hdc, &rect);
+    }
+
+    let _ = EndPaint(rs.hwnd, &ps);
+}
+
+/// Direct2D/DirectWrite owner-draw. Binds the cached DC render target to the
+/// window DC, clears to the color-key bg, then draws each segment with the cached
+/// solid brush (its color re-set per segment) at the SAME device-px positions the
+/// GDI path uses. Returns `false` (→ GDI fallback) on any D2D error; never panics.
+unsafe fn paint_d2d(rs: &RenderState, hdc: HDC, rect: &RECT) -> bool {
+    let (Some(target), Some(fmt), Some(brush)) = (
+        rs.dc_target.as_ref(),
+        rs.text_format.as_ref(),
+        rs.d2d_brush.as_ref(),
+    ) else {
+        return false;
+    };
+
+    if target.BindDC(hdc, rect).is_err() {
+        return false;
+    }
+    target.BeginDraw();
+    // Same bg the LWA_COLORKEY keys out → plate clears to transparent on the bar.
+    target.Clear(Some(&colorref_to_d2d(rs.cfg.bg)));
+
+    let pad = rs.cfg.padding.max(0);
+    let item = rs.cfg.item_space.max(0);
+    let inner = rs.cfg.inner_space.max(0);
+    // Generous per-segment layout rect; left/top is the draw origin, right/bottom
+    // are slack so DirectWrite never wraps/clips (we already measured each width).
+    let max_r = rect.right as f32;
+    let max_b = rect.bottom as f32;
+
+    let draw = |x: i32, y: i32, w16: &[u16], color: COLORREF| {
+        brush.SetColor(&colorref_to_d2d(color));
+        let lr = D2D_RECT_F {
+            left: x as f32,
+            top: y as f32,
+            right: max_r,
+            bottom: max_b,
+        };
+        target.DrawText(
+            w16,
+            fmt,
+            &lr,
+            brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+    };
+
+    for (r, groups) in rs.rows_layout.iter().enumerate() {
+        let cy = pad + r as i32 * (rs.row_h + inner);
+        let mut cx = pad;
+        for g in groups {
+            draw(cx, cy, &g.label.w16, g.label.color);
+            cx += g.label.width;
+            for v in &g.values {
+                cx += inner;
+                draw(cx, cy, &v.w16, v.color);
+                cx += v.width;
+            }
+            cx += item;
+        }
+    }
+
+    // A device loss (D2DERR_RECREATE_TARGET) returns an Err here; report failure so
+    // the caller draws GDI this frame and we keep the resources for next paint.
+    target.EndDraw(None, None).is_ok()
+}
+
+/// GDI owner-draw fallback (the original engine). Fills the color-keyed bg with
+/// the cached brush, selects the cached font, and `TextOutW`s each segment.
+unsafe fn paint_gdi(rs: &RenderState, hdc: HDC, rect: &RECT) {
     // The whole client rect is the color-key bg (so it shows through the taskbar).
-    FillRect(hdc, &rect, rs.bg_brush);
+    FillRect(hdc, rect, rs.bg_brush);
 
     let old = SelectObject(hdc, rs.font.into());
     SetBkMode(hdc, TRANSPARENT);
@@ -1040,7 +1308,6 @@ unsafe fn paint(rs: &RenderState) {
     }
 
     SelectObject(hdc, old);
-    let _ = EndPaint(rs.hwnd, &ps);
 }
 
 /// Window procedure. Runs on the render thread (the only thread that pumps this
@@ -1146,6 +1413,13 @@ pub fn start(app: AppHandle) {
                     cfg: TickCfg::read(),
                     rows_layout: Vec::new(),
                     row_h: 0,
+                    use_d2d: false,
+                    d2d_factory: None,
+                    dwrite_factory: None,
+                    dc_target: None,
+                    text_format: None,
+                    fmt_key: (0, false, 0),
+                    d2d_brush: None,
                 });
             });
 
