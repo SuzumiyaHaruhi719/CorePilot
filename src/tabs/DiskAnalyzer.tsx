@@ -95,19 +95,24 @@ export function DiskAnalyzer() {
   useEffect(() => {
     if (autoScanned.current || !volumes) return;
     autoScanned.current = true;
-    const restorable = order.filter((id) =>
-      volumes.some((v) => v.scanId === id && v.supported),
-    );
-    if (restorable.length > 0) {
-      startScan(restorable);
-      return;
-    }
     void api.startupDirective().then((d) => {
-      if (!d || !d.toLowerCase().startsWith("disk")) return;
-      const sys =
-        volumes.find((v) => v.supported && (v.letter ?? "").toUpperCase().startsWith("C")) ??
-        volumes.find((v) => v.supported);
-      if (sys) startScan([sys.scanId]);
+      // DIRECTIVE (COREPILOT_STARTUP=disk): always start a FRESH scan of the
+      // system drive — deterministic, ignores any stale persisted tabs.
+      if (d && d.toLowerCase().startsWith("disk")) {
+        const sys =
+          volumes.find((v) => v.supported && (v.letter ?? "").toUpperCase().startsWith("C")) ??
+          volumes.find((v) => v.supported);
+        if (sys) {
+          startScan([sys.scanId]);
+          return;
+        }
+      }
+      // NORMAL launch: re-scan persisted tabs (their in-memory backend scan died
+      // on relaunch → empty "no data" husks), so reopening lands on a live scan.
+      const restorable = order.filter((id) =>
+        volumes.some((v) => v.scanId === id && v.supported),
+      );
+      if (restorable.length > 0) startScan(restorable);
     });
   }, [volumes, order, startScan]);
 
