@@ -428,7 +428,7 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
 
       {/* Workspace: treemap (left ~70%) + detail panel (right). */}
       <div className="flex min-h-0 flex-1">
-        <div ref={zoomRef} className="relative min-w-0 flex-1">
+        <div ref={zoomRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
           {tree && tree.nodes.length > 0 ? (
             <TreemapCanvas
               view={tree}

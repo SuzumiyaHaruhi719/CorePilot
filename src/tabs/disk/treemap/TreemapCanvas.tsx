@@ -722,7 +722,7 @@ export function TreemapCanvas({
   const hoverNode = hover ? nodeOf(hover.rect.nodeId) : null;
 
   return (
-    <div ref={wrapRef} className="relative h-full w-full overflow-hidden">
+    <div ref={wrapRef} className="relative min-h-0 w-full flex-1 overflow-hidden">
       <canvas
         ref={canvasRef}
         style={{ width: size.w, height: size.h, display: "block" }}
