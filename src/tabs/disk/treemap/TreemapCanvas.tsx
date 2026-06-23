@@ -70,12 +70,25 @@ export interface TreemapCanvasProps {
   /** True while the backend scan is still streaming — shows the live "Scanning…"
    *  pill over the canvas; the layout tween animates the growing snapshots. */
   scanning?: boolean;
+  /** The currently-selected node (drawn with a bright outline). Owned by the
+   *  workspace so selection survives a re-layout / snapshot tick. */
+  selected?: TreeNode | null;
   /**
-   * A rect was activated (click): a drillable container (path != null) → caller
-   * should re-`diskTree(node.path)`; a leaf → caller selects it. Local node id is
-   * -1 for a "… N more" bucket (caller may re-layout that bucket — Phase 4).
+   * SINGLE-CLICK — select a box (spec §3.3). Caller sets `selected` + the side
+   * DetailPanel shows it. No navigation. `localId` is -1 for a "… N more" bucket.
    */
-  onPick?: (node: TreeNode | null, localId: number) => void;
+  onSelect?: (node: TreeNode | null, localId: number) => void;
+  /**
+   * DOUBLE-CLICK on a drillable container — zoom into it (spec §3.3). Caller
+   * pushes the drill stack + plays the zoom tween. A double-click on a leaf falls
+   * back to a plain select (handled here → `onSelect`).
+   */
+  onZoom?: (node: TreeNode | null, origin: { x: number; y: number; w: number; h: number }) => void;
+  /**
+   * RIGHT-CLICK — open a context menu (spec §3.3). Caller builds the `MenuItem[]`
+   * and renders `<ContextMenu>` at (clientX, clientY).
+   */
+  onContext?: (node: TreeNode | null, localId: number, clientX: number, clientY: number) => void;
   /** Hover changed (for an external detail/preview); null when the pointer leaves. */
   onHover?: (node: TreeNode | null, localId: number) => void;
 }
@@ -112,6 +125,8 @@ interface Drawn {
   w: number;
   h: number;
   alpha: number;
+  /** Stable rect key (for the selected-outline match — spec §3.3). */
+  key: string;
 }
 
 export function TreemapCanvas({
@@ -119,7 +134,10 @@ export function TreemapCanvas({
   metric = "alloc",
   colorMode = "cushion",
   scanning = false,
-  onPick,
+  selected = null,
+  onSelect,
+  onZoom,
+  onContext,
   onHover,
 }: TreemapCanvasProps) {
   const tf = useTf();
@@ -134,12 +152,20 @@ export function TreemapCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [hover, setHover] = useState<Hover | null>(null);
+  // Single- vs double-click disambiguation (spec §3.3): a single click arms a
+  // ~220ms timer that commits the SELECT; a second click within the window cancels
+  // it and runs the ZOOM instead, so select never flashes before a drill.
+  const clickTimer = useRef(0);
 
   // Keep callbacks fresh without forcing relayout.
-  const onPickRef = useRef(onPick);
+  const onSelectRef = useRef(onSelect);
+  const onZoomRef = useRef(onZoom);
+  const onContextRef = useRef(onContext);
   const onHoverRef = useRef(onHover);
   useEffect(() => {
-    onPickRef.current = onPick;
+    onSelectRef.current = onSelect;
+    onZoomRef.current = onZoom;
+    onContextRef.current = onContext;
     onHoverRef.current = onHover;
   });
 
@@ -192,6 +218,11 @@ export function TreemapCanvas({
   const sizeRef = useRef(size);
   const gpuRef = useRef(gpuRender);
   const tfRef = useRef(tf);
+  // The selected rect's stable key (spec §3.3) — paint draws its bright outline.
+  // Match by the node's absolute `path` (stable across snapshots); leaves with no
+  // path fall back to the synthesized `parentKey/name` key the layout uses, so we
+  // resolve it from the live rects by node identity below.
+  const selectedKeyRef = useRef<string | null>(null);
   targetRef.current = rects;
   paletteRef.current = palette;
   colorModeRef.current = colorMode;
@@ -200,6 +231,19 @@ export function TreemapCanvas({
   sizeRef.current = size;
   gpuRef.current = gpuRender;
   tfRef.current = tf;
+
+  // Resolve the selected node → its rect key against the CURRENT layout. A node's
+  // `path` is the stable key when present; otherwise find the live rect whose
+  // backing node is referentially the selected one and reuse its synthesized key.
+  const selectedKey = useMemo<string | null>(() => {
+    if (!selected) return null;
+    if (selected.path != null) return selected.path;
+    for (const r of rects) {
+      if (r.nodeId >= 0 && view.nodes[r.nodeId] === selected) return r.key;
+    }
+    return null;
+  }, [selected, rects, view]);
+  selectedKeyRef.current = selectedKey;
 
   // Paint one frame from an explicit interpolated rect list. Pure draw — no layout.
   const paint = useCallback((draw: Drawn[]) => {
@@ -343,6 +387,19 @@ export function TreemapCanvas({
       ctx.lineWidth = 1.5;
       ctx.strokeRect(r.x + 0.75, r.y + 0.75, r.w - 1.5, r.h - 1.5);
     }
+
+    // Pass 4: SELECTION outline (spec §3.3) — a bright 2px white frame, distinct
+    // from the thinner accent hover stroke, drawn last so it sits on top. Matched
+    // by the stable rect key against the interpolated geometry (tween-friendly).
+    const selKey = selectedKeyRef.current;
+    if (selKey) {
+      const sel = draw.find((d) => d.key === selKey);
+      if (sel && sel.w > 1 && sel.h > 1) {
+        ctx.strokeStyle = p.light ? "oklch(18% 0.02 285)" : "oklch(100% 0 0 / 0.92)";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(sel.x + 1, sel.y + 1, sel.w - 2, sel.h - 2);
+      }
+    }
   }, [nodeOf]);
 
   // Drive the tween toward `targetRef`. Critically-damped lerp of geometry+alpha
@@ -395,6 +452,7 @@ export function TreemapCanvas({
           w: a.w,
           h: a.h,
           alpha: a.alpha,
+          key: t.key,
         });
       }
 
@@ -420,6 +478,7 @@ export function TreemapCanvas({
           w: a.w,
           h: a.h,
           alpha: a.alpha,
+          key,
         });
       }
 
@@ -502,6 +561,7 @@ export function TreemapCanvas({
           w: t.w,
           h: t.h,
           alpha: 1,
+          key: t.key,
         });
       }
       prevByKey.current = map;
@@ -534,10 +594,11 @@ export function TreemapCanvas({
         w: a ? a.w : t.w,
         h: a ? a.h : t.h,
         alpha: 1,
+        key: t.key,
       });
     }
     paint(draw);
-  }, [hover, colorMode, paint, rects]);
+  }, [hover, colorMode, selectedKey, paint, rects]);
 
   // Cleanup the loop on unmount.
   useEffect(() => {
@@ -574,16 +635,78 @@ export function TreemapCanvas({
     }
   }, [hover]);
 
+  // Hit-test the live `rects` (NOT the interpolated geometry) at a client point.
+  const hitAt = useCallback(
+    (clientX: number, clientY: number): DrawRect | null => {
+      const el = wrapRef.current;
+      if (!el) return null;
+      const box = el.getBoundingClientRect();
+      return hitTest(rects, clientX - box.left, clientY - box.top);
+    },
+    [rects],
+  );
+
+  // SINGLE-CLICK → select (deferred ~220ms so a double-click can pre-empt it).
   const onClick = useCallback(
     (e: React.MouseEvent) => {
-      const el = wrapRef.current;
-      if (!el) return;
-      const box = el.getBoundingClientRect();
-      const hit = hitTest(rects, e.clientX - box.left, e.clientY - box.top);
-      if (hit) onPickRef.current?.(nodeOf(hit.nodeId), hit.nodeId);
+      const hit = hitAt(e.clientX, e.clientY);
+      const node = hit ? nodeOf(hit.nodeId) : null;
+      const localId = hit ? hit.nodeId : -1;
+      if (clickTimer.current) window.clearTimeout(clickTimer.current);
+      clickTimer.current = window.setTimeout(() => {
+        clickTimer.current = 0;
+        onSelectRef.current?.(node, localId);
+      }, 220);
     },
-    [rects, nodeOf],
+    [hitAt, nodeOf],
   );
+
+  // DOUBLE-CLICK → zoom a drillable container (else fall back to select). Cancels
+  // the pending single-click select so it doesn't fire first.
+  const onDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (clickTimer.current) {
+        window.clearTimeout(clickTimer.current);
+        clickTimer.current = 0;
+      }
+      const hit = hitAt(e.clientX, e.clientY);
+      const node = hit ? nodeOf(hit.nodeId) : null;
+      const localId = hit ? hit.nodeId : -1;
+      const drillable =
+        node != null &&
+        node.path != null &&
+        (node.hasMore || (node.flags & DISK_FLAG.isDir) !== 0);
+      if (drillable && hit) {
+        onZoomRef.current?.(node, { x: hit.x, y: hit.y, w: hit.w, h: hit.h });
+      } else {
+        onSelectRef.current?.(node, localId);
+      }
+    },
+    [hitAt, nodeOf],
+  );
+
+  // RIGHT-CLICK → context menu at the cursor.
+  const onContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      if (clickTimer.current) {
+        window.clearTimeout(clickTimer.current);
+        clickTimer.current = 0;
+      }
+      const hit = hitAt(e.clientX, e.clientY);
+      const node = hit ? nodeOf(hit.nodeId) : null;
+      const localId = hit ? hit.nodeId : -1;
+      onContextRef.current?.(node, localId, e.clientX, e.clientY);
+    },
+    [hitAt, nodeOf],
+  );
+
+  // Clear any pending click timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (clickTimer.current) window.clearTimeout(clickTimer.current);
+    };
+  }, []);
 
   const hoverNode = hover ? nodeOf(hover.rect.nodeId) : null;
 
@@ -595,6 +718,8 @@ export function TreemapCanvas({
         onPointerMove={onMove}
         onPointerLeave={onLeave}
         onClick={onClick}
+        onDoubleClick={onDoubleClick}
+        onContextMenu={onContextMenu}
         className="cursor-pointer"
       />
       {hover && (
