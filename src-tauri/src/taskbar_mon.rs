@@ -57,7 +57,7 @@ use windows::Win32::Graphics::Gdi::{
     OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, TRANSPARENT,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+    D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, ID2D1SolidColorBrush,
@@ -66,9 +66,10 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL, DWRITE_TEXT_METRICS,
+    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout, IDWriteTypography,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_LINING_FIGURES,
+    DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -101,6 +102,9 @@ struct Seg {
     w16: Vec<u16>,
     color: COLORREF,
     width: i32,
+    /// Numeric field class (drives fixed worst-case field sizing). Labels use
+    /// `FieldClass::Other`; it's only consulted for value segments.
+    class: FieldClass,
 }
 
 /// One category GROUP, OSD-plate style: a single themed category label (e.g.
@@ -113,29 +117,84 @@ struct Group {
     width: i32,
 }
 
-/// One drawable unit in the aligned column grid (LiteMonitor `Column` model port):
-/// a label or a value, assigned a flat COLUMN INDEX so the same column index in
-/// row 0 and row 1 shares an x-band. Owns its UTF-16 text so `WM_PAINT` never
-/// allocates. `is_value` selects right-alignment (values) vs left-alignment
-/// (labels) within the column band, exactly like LiteMonitor's renderer.
+/// One drawable unit with its ABSOLUTE field geometry, precomputed in `tick`.
+///
+/// The plate is laid out as a cursor walk (see `tick`): every label and every
+/// value gets an absolute left edge `x` and a fixed field width `field_w`. Labels
+/// are LEFT-aligned at `x`; values are RIGHT-aligned inside `[x, x+field_w]` so
+/// digits/decimal points/units stack on a constant right edge with one uniform
+/// gutter. Field widths come from WORST-CASE template strings (e.g. `100.0%`),
+/// not the live reading, so the gutter never breathes tick-to-tick. Corresponding
+/// fields across the two rows (CPU util ↔ GPU util, temp ↔ temp, clock ↔ power)
+/// share one `x`/`field_w`, so they column-lock; trailing groups (NET/RAM/…) all
+/// start at a common `block_b_x`, so their left edges line up too. Owns its UTF-16
+/// text so `WM_PAINT` never allocates.
 struct Cell {
     w16: Vec<u16>,
     color: COLORREF,
+    /// Measured device-px width of THIS cell's live text.
     width: i32,
-    /// Flat column index (0-based) shared across both rows.
-    col: usize,
-    /// true = value cell (right-aligned in its column), false = label (left).
+    /// Absolute left edge (device px) of this cell's field box.
+    x: i32,
+    /// Field-box width (device px). For values, the cell is right-aligned inside
+    /// `[x, x+field_w]`; for labels `field_w == width` (left-aligned at `x`).
+    field_w: i32,
+    /// true = value cell (right-aligned in its field), false = label (left at `x`).
     is_value: bool,
-    /// true when this cell STARTS a new category group (drives the column gap:
-    /// `item_space` at a group boundary, `inner_space` between label↔value /
-    /// value↔value inside a group).
-    group_start: bool,
 }
 
 /// OSD category index (matches osdPalette.ts order fps,cpu,gpu,mem,disk,net) →
 /// the per-theme color array pushed from the frontend.
 const CAT_CPU: usize = 1;
 const CAT_GPU: usize = 2;
+
+/// The kind of numeric field a value occupies, used to size its fixed field box
+/// from a WORST-CASE template string (so the right-align gutter never breathes as
+/// the live reading changes). `ClockPower` is shared by CPU clock and GPU power so
+/// those two column-lock across rows even though their magnitudes differ.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FieldClass {
+    /// Utilization %, e.g. `100.0%`.
+    Percent,
+    /// Temperature, e.g. `100.0°C`.
+    Temp,
+    /// CPU clock OR GPU power — the shared Block-A 3rd field, e.g. `9999MHz`/`999W`.
+    ClockPower,
+    /// Memory amount, e.g. `999.9 GB`.
+    Mem,
+    /// Net rate (normalized to MB/s), e.g. `999.9 MB/s`.
+    NetRate,
+    /// Anything else — sized to the live string only (no worst-case template).
+    Other,
+}
+
+/// Map a metric key to its numeric field class (for worst-case field sizing).
+fn field_class(key: &str) -> FieldClass {
+    match key {
+        "cpu.util" | "gpu.util" | "mem.util" => FieldClass::Percent,
+        "cpu.temp" | "gpu.temp" => FieldClass::Temp,
+        "cpu.freq" | "gpu.power" => FieldClass::ClockPower,
+        "mem.used" => FieldClass::Mem,
+        "net.up" | "net.down" => FieldClass::NetRate,
+        _ => FieldClass::Other,
+    }
+}
+
+/// Worst-case template string for a field class, measured once per tick to fix
+/// that field's box width. `None` for `Other` (sized to the live string). The
+/// templates are the widest the formatter can produce (`{:.1}%` ≤ `100.0%`, etc.).
+fn field_template(class: FieldClass) -> Option<&'static str> {
+    match class {
+        FieldClass::Percent => Some("100.0%"),
+        FieldClass::Temp => Some("100.0\u{00B0}C"),
+        FieldClass::ClockPower => Some("9999MHz"), // wider than "999W"
+        FieldClass::Mem => Some("999.9 GB"),
+        // The ▲/▼ glyph is drawn inline with the rate, so the template includes it
+        // (both arrows measure alike → up/down rates right-align on the same edge).
+        FieldClass::NetRate => Some("\u{25B2}999.9 MB/s"),
+        FieldClass::Other => None,
+    }
+}
 
 /// Map a metric key to its (category index, display label). The category label
 /// is shown once per group (OSD-plate style); the index selects the theme color.
@@ -431,11 +490,14 @@ fn threshold_temp(key: &str) -> Option<bool> {
     None
 }
 
-/// Format a byte rate the way `osd.ts` `rate()` does: `"<n> <unit>/s"` (0 digits
-/// under 1 MiB, else 1). Returns `None` for an unavailable value (→ no cell).
+/// Format a NET byte rate in a SINGLE fixed unit (always `MB/s`, 1 decimal) so
+/// up and down share one field width and align on the decimal point — instead of
+/// the old per-magnitude unit (`MB/s` for up, `KB/s` for down) that produced
+/// different widths → ragged columns. Sub-0.1 MB/s shows as `0.0 MB/s` (the field
+/// stays uniform). Returns `None` for an unavailable value (→ no cell).
 fn fmt_rate(v: Option<u64>) -> Option<String> {
-    let v = v? as f64;
-    Some(format!("{}/s", fmt_bytes(v, if v < 1024.0 * 1024.0 { 0 } else { 1 })))
+    let mb = v? as f64 / (1024.0 * 1024.0);
+    Some(format!("{:.1} MB/s", mb))
 }
 
 /// Port of `format.ts` `formatBytes`: largest fitting binary unit, `digits`
@@ -587,15 +649,12 @@ struct RenderState {
     /// The bg the cached brush + color-key were set for.
     brush_key: COLORREF,
     cfg: TickCfg,
-    /// The aligned column grid consumed by `WM_PAINT` (1 or 2 rows). Each row is a
-    /// flat sequence of `Cell`s (label + values), each tagged with a shared COLUMN
-    /// INDEX so corresponding columns line up vertically across both rows
-    /// (LiteMonitor `Column` model). CPU anchors row 0, GPU anchors row 1.
+    /// The laid-out plate consumed by `WM_PAINT` (1 or 2 rows). Each row is a flat
+    /// sequence of `Cell`s (label + values) carrying ABSOLUTE field geometry
+    /// (`x`/`field_w`) computed by the cursor walk in `tick`. Corresponding fields
+    /// across rows share `x`/`field_w` (column-lock); trailing groups share a
+    /// common `block_b_x`. CPU anchors row 0, GPU anchors row 1.
     cells_layout: Vec<Vec<Cell>>,
-    /// Shared x-offset (device px) of each column's left edge, indexed by column.
-    col_x: Vec<i32>,
-    /// Width (device px) of each column = max cell width across the rows there.
-    col_w: Vec<i32>,
     /// Per-row height in device px (the tallest measured segment).
     row_h: i32,
     /// Last GOOD dock geometry `(x, y, plate_w, plate_h)`. On a TRANSIENT dock
@@ -619,6 +678,9 @@ struct RenderState {
     fmt_key: (i32, bool, u32),
     /// Cached solid brush whose color is re-set per drawn segment.
     d2d_brush: Option<ID2D1SolidColorBrush>,
+    /// Cached typography object (tabular + lining figures) applied to every drawn
+    /// and measured segment so digits are column-stable. Built once in `init_d2d`.
+    d2d_typography: Option<IDWriteTypography>,
 }
 
 impl Drop for RenderState {
@@ -787,11 +849,65 @@ unsafe fn init_d2d(rs: &mut RenderState) {
         }
     };
     target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+
+    // Typography: tabular figures (uniform digit advance) + lining figures (no
+    // old-style descenders), applied to every measured + drawn segment so numbers
+    // are column-stable tick-to-tick. Any failure → GDI fallback (no typography,
+    // but Segoe UI's GDI digits are already near-uniform and the fixed-field
+    // layout below keeps it tidy).
+    let typo: IDWriteTypography = match dwrite.CreateTypography() {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("taskbar monitor: CreateTypography failed: {e}");
+            rs.use_d2d = false;
+            return;
+        }
+    };
+    if typo
+        .AddFontFeature(DWRITE_FONT_FEATURE {
+            nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+            parameter: 1,
+        })
+        .is_err()
+        || typo
+            .AddFontFeature(DWRITE_FONT_FEATURE {
+                nameTag: DWRITE_FONT_FEATURE_TAG_LINING_FIGURES,
+                parameter: 1,
+            })
+            .is_err()
+    {
+        tracing::warn!("taskbar monitor: AddFontFeature failed");
+        rs.use_d2d = false;
+        return;
+    }
+
     rs.d2d_factory = Some(factory);
     rs.dwrite_factory = Some(dwrite);
     rs.dc_target = Some(target);
     rs.d2d_brush = Some(brush);
+    rs.d2d_typography = Some(typo);
     rs.use_d2d = true;
+}
+
+/// Build a short-lived `IDWriteTextLayout` for `s` with the cached typography
+/// (tabular + lining figures) applied over the whole string, so measured width ==
+/// drawn width and digits are column-stable. `None` on any failure (the caller
+/// falls back to the GDI `measure()` / `TextOutW` path). Shared by `measure_d2d`
+/// and `paint_d2d`.
+unsafe fn layout_seg(rs: &RenderState, text: &[u16]) -> Option<IDWriteTextLayout> {
+    let dwrite = rs.dwrite_factory.as_ref()?;
+    let fmt = rs.text_format.as_ref()?;
+    let layout = dwrite
+        .CreateTextLayout(text, fmt, f32::MAX, f32::MAX)
+        .ok()?;
+    if let Some(typo) = rs.d2d_typography.as_ref() {
+        let range = DWRITE_TEXT_RANGE {
+            startPosition: 0,
+            length: text.len() as u32,
+        };
+        let _ = layout.SetTypography(typo, range);
+    }
+    Some(layout)
 }
 
 /// (Re)build the cached `IDWriteTextFormat` for size(pt)+bold at the window DPI.
@@ -835,12 +951,8 @@ unsafe fn rebuild_text_format(rs: &mut RenderState, size_pt: i32, bold: bool, dp
 /// returning (w, h) in device px (ceil) — the D2D replacement for `measure()`.
 /// `None` on any failure (the caller then uses the GDI `measure()` fallback).
 unsafe fn measure_d2d(rs: &RenderState, s: &str) -> Option<(i32, i32)> {
-    let dwrite = rs.dwrite_factory.as_ref()?;
-    let fmt = rs.text_format.as_ref()?;
     let text: Vec<u16> = s.encode_utf16().collect();
-    let layout = dwrite
-        .CreateTextLayout(&text, fmt, f32::MAX, f32::MAX)
-        .ok()?;
+    let layout = layout_seg(rs, &text)?;
     let mut m = DWRITE_TEXT_METRICS::default();
     layout.GetMetrics(&mut m).ok()?;
     Some((m.width.ceil() as i32, m.height.ceil() as i32))
@@ -1006,6 +1118,7 @@ unsafe fn tick() {
                 w16: disp.encode_utf16().collect(),
                 color: vcolor,
                 width: vw,
+                class: field_class(key),
             };
             if let Some((_, g)) = groups.iter_mut().find(|(c, _)| *c == cat) {
                 g.values.push(vseg);
@@ -1020,10 +1133,43 @@ unsafe fn tick() {
                     w16: cat_label.encode_utf16().collect(),
                     color: cfg.theme[cat],
                     width: lw,
+                    class: FieldClass::Other,
                 };
                 groups.push((cat, Group { label, values: vec![vseg], width: 0 }));
             }
         }
+
+        // Measure the worst-case template width of each numeric field class ONCE
+        // (with the same engine/typography as the live values, so the field box is
+        // the true digit max). The live value right-aligns into this fixed box, so
+        // the right-align gutter is constant tick-to-tick. A class whose template
+        // measures NARROWER than the live string still uses the live width (the
+        // `.max` below), so a freak over-wide reading can never clip.
+        let measure_w = |s: &str| -> i32 {
+            if use_d2d {
+                measure_d2d(rs, s).map(|(w, _)| w).unwrap_or_else(|| measure(hdc, s).0)
+            } else {
+                measure(hdc, s).0
+            }
+        };
+        let tmpl_percent = measure_w(field_template(FieldClass::Percent).unwrap());
+        let tmpl_temp = measure_w(field_template(FieldClass::Temp).unwrap());
+        let tmpl_clockpower = measure_w(field_template(FieldClass::ClockPower).unwrap());
+        let tmpl_mem = measure_w(field_template(FieldClass::Mem).unwrap());
+        let tmpl_netrate = measure_w(field_template(FieldClass::NetRate).unwrap());
+        // Worst-case field width for a value: its class template (if any) vs the
+        // live measured width — never smaller than the live string.
+        let class_w = move |class: FieldClass, live: i32| -> i32 {
+            let t = match class {
+                FieldClass::Percent => tmpl_percent,
+                FieldClass::Temp => tmpl_temp,
+                FieldClass::ClockPower => tmpl_clockpower,
+                FieldClass::Mem => tmpl_mem,
+                FieldClass::NetRate => tmpl_netrate,
+                FieldClass::Other => 0,
+            };
+            t.max(live)
+        };
         SelectObject(hdc, old);
         let _ = ReleaseDC(Some(rs.hwnd), hdc);
 
@@ -1031,15 +1177,20 @@ unsafe fn tick() {
         if groups.is_empty() {
             let _ = ShowWindow(rs.hwnd, SW_HIDE);
             rs.cells_layout = Vec::new();
-            rs.col_x = Vec::new();
-            rs.col_w = Vec::new();
             rs.cfg = cfg;
             return;
         }
 
-        // Finalize each group's drawn width (label + inner-spaced values).
+        // Finalize each group's drawn width (label + inner-spaced FIXED fields), so
+        // the row-balancing distribution below weighs the real on-screen footprint
+        // (worst-case field widths, not the momentary live string widths).
         for (_, g) in groups.iter_mut() {
-            g.width = g.label.width + g.values.iter().map(|v| inner + v.width).sum::<i32>();
+            g.width = g.label.width
+                + g
+                    .values
+                    .iter()
+                    .map(|v| inner + class_w(v.class, v.width))
+                    .sum::<i32>();
         }
 
         // Distribute groups across rows. CPU anchors row 0, GPU anchors row 1, and
@@ -1078,80 +1229,132 @@ unsafe fn tick() {
             }
         };
 
-        // === Aligned column grid (LiteMonitor `Column` model port). ===
+        // === Two-block field layout (the aesthetic fix). ===
         //
-        // Flatten each row of GROUPS into an ordered list of `Cell`s — the group
-        // label is one cell, each value another — and assign every cell a flat
-        // COLUMN INDEX by its position in the row. Column k pairs row-0's k-th
-        // cell with row-1's k-th cell; the column's width is the MAX of the two
-        // (LiteMonitor `Math.Max(widthTop, widthBottom)`), and both rows draw at
-        // the shared `col_x[k]` band, so corresponding columns line up vertically
-        // (CPU/GPU labels align, util% under util%, temp under temp, …).
+        // Each group renders as `[LABEL] [field_0] [field_1] …` where every field
+        // is a fixed-width right-aligned box (worst-case template width). Two
+        // sub-blocks per plate resolve the "column-lock vs uniform-gutter" tension:
+        //
+        //   * Block A — the aligned CORE (CPU row 0, GPU row 1). These two groups
+        //     correspond field-by-field (util↔util, temp↔temp, clock↔power), so
+        //     they share one label width `lw_a` and one set of field widths
+        //     `fw_a[i]` (max across both rows) → their columns lock vertically.
+        //   * Block B — TRAILING groups (NET/RAM/DISK/…). They do NOT correspond
+        //     across rows, so they flow independently; but every Block-B group on
+        //     every row STARTS at one shared x-origin `block_b_x`, so their left
+        //     edges line up. Within a group, fields stay fixed-width.
+        //
+        // Exactly two spacings are used everywhere: `inner` (label→field and
+        // field→field inside a group) and `item` (between groups / Block A→B), so
+        // every gap on the plate is one of two constants → uniform spacing.
+        //
+        // `single_line` has no cross-row column to lock: groups simply flow left to
+        // right with `item` gutters, fields still fixed-width per group.
         let nrows = rows_layout.len() as i32;
+
+        // Is a group the Block-A anchor? (Only when not single-line; CPU/GPU each
+        // anchor one row and are known to be the first group on their row.)
+        let is_block_a = |g: &Group| -> bool {
+            !cfg.single_line
+                && g.label
+                    .w16
+                    .first()
+                    .map(|&c| c == b'C' as u16 || c == b'G' as u16)
+                    .unwrap_or(false)
+                && (g.label.w16 == "CPU".encode_utf16().collect::<Vec<u16>>()
+                    || g.label.w16 == "GPU".encode_utf16().collect::<Vec<u16>>())
+        };
+
+        // Block-A shared geometry: label width = max(CPU,GPU); field i width =
+        // max template/live across both anchors at position i.
+        let mut lw_a = 0i32;
+        let mut fw_a: Vec<i32> = Vec::new();
+        for groups in &rows_layout {
+            if let Some(g) = groups.first() {
+                if is_block_a(g) {
+                    lw_a = lw_a.max(g.label.width);
+                    for (i, v) in g.values.iter().enumerate() {
+                        let w = class_w(v.class, v.width);
+                        if i < fw_a.len() {
+                            fw_a[i] = fw_a[i].max(w);
+                        } else {
+                            fw_a.push(w);
+                        }
+                    }
+                }
+            }
+        }
+        // Block-B origin: just past Block A (label + its fixed fields) + one gutter.
+        // Rows with no Block-A anchor start Block B at `pad` (single-line, or a row
+        // whose first group isn't CPU/GPU).
+        let block_a_w = lw_a + fw_a.iter().map(|w| inner + w).sum::<i32>();
+        let block_b_x = if lw_a > 0 { pad + block_a_w + item } else { pad };
+
+        // Cursor walk → absolute `x`/`field_w` per cell. Returns the row's end x.
         let mut cells_layout: Vec<Vec<Cell>> = Vec::with_capacity(rows_layout.len());
-        let mut ncols = 0usize;
+        let mut max_end = pad;
         for groups in &rows_layout {
             let mut row_cells: Vec<Cell> = Vec::new();
-            let mut col = 0usize;
-            for g in groups {
-                // Label cell starts the group (→ item_space gap before it).
+            let mut x = pad;
+            let mut entered_block_b = false;
+            for (gi, g) in groups.iter().enumerate() {
+                let a = is_block_a(g);
+                if gi == 0 {
+                    // First group: Block-A anchors start at `pad`; a non-anchor
+                    // first group is Block B → start at the shared `block_b_x`.
+                    if !a {
+                        x = block_b_x;
+                        entered_block_b = true;
+                    }
+                } else {
+                    // Entering Block B for the first time on this row → jump to the
+                    // shared origin so trailing groups line up across rows; else a
+                    // normal `item` gutter between groups.
+                    if !a && !entered_block_b {
+                        x = block_b_x;
+                        entered_block_b = true;
+                    } else {
+                        x += item;
+                    }
+                }
+                // Label (left-aligned). Block A uses the shared `lw_a`.
+                let lw = if a { lw_a } else { g.label.width };
                 row_cells.push(Cell {
                     w16: g.label.w16.clone(),
                     color: g.label.color,
                     width: g.label.width,
-                    col,
+                    x,
+                    field_w: lw,
                     is_value: false,
-                    group_start: true,
                 });
-                col += 1;
-                for v in &g.values {
+                x += lw;
+                // Fields (right-aligned in fixed boxes). Block A uses shared fw_a[i].
+                for (i, v) in g.values.iter().enumerate() {
+                    x += inner;
+                    let fw = if a && i < fw_a.len() {
+                        fw_a[i]
+                    } else {
+                        class_w(v.class, v.width)
+                    };
                     row_cells.push(Cell {
                         w16: v.w16.clone(),
                         color: v.color,
                         width: v.width,
-                        col,
+                        x,
+                        field_w: fw,
                         is_value: true,
-                        group_start: false,
                     });
-                    col += 1;
+                    x += fw;
                 }
             }
-            ncols = ncols.max(col);
+            max_end = max_end.max(x);
             cells_layout.push(row_cells);
         }
 
-        // Per-column width = max cell width across the rows at that column. Per-
-        // column-boundary gap = max across rows of (item_space if the column's
-        // cell starts a group, else inner_space) — so both rows share one x grid
-        // and the existing item_space/inner_space spacing semantics are preserved.
-        let mut col_w = vec![0i32; ncols];
-        let mut col_gap = vec![inner; ncols]; // gap that PRECEDES column k
-        for row_cells in &cells_layout {
-            for cell in row_cells {
-                col_w[cell.col] = col_w[cell.col].max(cell.width);
-                let g = if cell.group_start { item } else { inner };
-                col_gap[cell.col] = col_gap[cell.col].max(g);
-            }
-        }
-        // Shared x-offset of each column's left edge. Column 0 sits at `pad`; its
-        // leading gap (a group boundary) is folded into the padding, not added.
-        let mut col_x = vec![0i32; ncols];
-        let mut x = pad;
-        for k in 0..ncols {
-            if k > 0 {
-                x += col_gap[k];
-            }
-            col_x[k] = x;
-            x += col_w[k];
-        }
-        let row_w = if ncols > 0 { col_x[ncols - 1] + col_w[ncols - 1] - pad } else { 0 };
-
-        let plate_w = pad * 2 + row_w;
+        let plate_w = max_end + pad;
         let plate_h = pad * 2 + nrows * row_h + (nrows - 1).max(0) * inner;
 
         rs.cells_layout = cells_layout;
-        rs.col_x = col_x;
-        rs.col_w = col_w;
         rs.row_h = row_h;
         rs.cfg = cfg;
 
@@ -1348,6 +1551,8 @@ unsafe fn paint_d2d(rs: &RenderState, hdc: HDC, rect: &RECT) -> bool {
         return false;
     };
 
+    let _ = fmt; // format is used via `layout_seg`; kept in the tuple for the guard.
+
     if target.BindDC(hdc, rect).is_err() {
         return false;
     }
@@ -1357,41 +1562,33 @@ unsafe fn paint_d2d(rs: &RenderState, hdc: HDC, rect: &RECT) -> bool {
 
     let pad = rs.cfg.padding.max(0);
     let inner = rs.cfg.inner_space.max(0);
-    // Generous per-segment layout rect; left/top is the draw origin, right/bottom
-    // are slack so DirectWrite never wraps/clips (we already measured each width).
-    let max_r = rect.right as f32;
-    let max_b = rect.bottom as f32;
 
+    // Draw one segment at device-px (x,y) via a typography-enabled IDWriteTextLayout
+    // (tabular + lining figures) → DrawTextLayout, so digits are column-stable and
+    // measured width == drawn width. `DrawTextLayout`'s origin is a
+    // `windows_numerics::Vector2` (a transitive type we can't name here); it's a
+    // `#[repr(C)]` pair of f32, so we build it by transmuting `[x as f32, y as f32]`
+    // (size/layout identical; the target type is inferred from the parameter).
     let draw = |x: i32, y: i32, w16: &[u16], color: COLORREF| {
-        brush.SetColor(&colorref_to_d2d(color));
-        let lr = D2D_RECT_F {
-            left: x as f32,
-            top: y as f32,
-            right: max_r,
-            bottom: max_b,
+        let Some(layout) = layout_seg(rs, w16) else {
+            return;
         };
-        target.DrawText(
-            w16,
-            fmt,
-            &lr,
-            brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-            DWRITE_MEASURING_MODE_NATURAL,
-        );
+        brush.SetColor(&colorref_to_d2d(color));
+        let origin = core::mem::transmute::<[f32; 2], _>([x as f32, y as f32]);
+        target.DrawTextLayout(origin, &layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
     };
 
-    // Aligned column grid: every cell draws inside its shared column band
-    // [col_x[k], col_x[k]+col_w[k]] — labels LEFT-aligned at the band start,
-    // values RIGHT-aligned to the band end (so decimal points / units stack).
+    // Two-block field layout (computed in `tick`): labels LEFT-aligned at `cell.x`,
+    // values RIGHT-aligned inside the fixed field `[cell.x, cell.x+cell.field_w]`
+    // (so decimal points / units stack on a constant edge with a uniform gutter).
+    // Vertically center the row's text in its band (no-op at one font, but safe).
     for (r, cells) in rs.cells_layout.iter().enumerate() {
         let cy = pad + r as i32 * (rs.row_h + inner);
         for cell in cells {
-            let band_x = rs.col_x.get(cell.col).copied().unwrap_or(pad);
-            let band_w = rs.col_w.get(cell.col).copied().unwrap_or(cell.width);
             let cx = if cell.is_value {
-                band_x + (band_w - cell.width).max(0)
+                cell.x + (cell.field_w - cell.width).max(0)
             } else {
-                band_x
+                cell.x
             };
             draw(cx, cy, &cell.w16, cell.color);
         }
@@ -1414,17 +1611,19 @@ unsafe fn paint_gdi(rs: &RenderState, hdc: HDC, rect: &RECT) {
     let pad = rs.cfg.padding.max(0);
     let inner = rs.cfg.inner_space.max(0);
 
-    // Same aligned column grid as `paint_d2d`: labels left-aligned at the column
-    // band start, values right-aligned to the band end, both rows sharing col_x.
+    // SAME two-block field layout as `paint_d2d` (identical `cell.x`/`field_w`),
+    // so the two engines draw pixel-identically: labels left-aligned at `cell.x`,
+    // values right-aligned inside `[cell.x, cell.x+cell.field_w]`. GDI can't apply
+    // OpenType tabular figures, but Segoe UI's GDI digit advances are already
+    // near-uniform and the fixed-field boxes keep columns tidy regardless — the
+    // only difference from the D2D path is sub-pixel digit jitter, not layout.
     for (r, cells) in rs.cells_layout.iter().enumerate() {
         let cy = pad + r as i32 * (rs.row_h + inner);
         for cell in cells {
-            let band_x = rs.col_x.get(cell.col).copied().unwrap_or(pad);
-            let band_w = rs.col_w.get(cell.col).copied().unwrap_or(cell.width);
             let cx = if cell.is_value {
-                band_x + (band_w - cell.width).max(0)
+                cell.x + (cell.field_w - cell.width).max(0)
             } else {
-                band_x
+                cell.x
             };
             // Reuse the cached UTF-16 buffer built in `tick` — no per-paint alloc.
             SetTextColor(hdc, cell.color);
@@ -1537,8 +1736,6 @@ pub fn start(app: AppHandle) {
                     brush_key: COLORREF(0xFFFF_FFFF),
                     cfg: TickCfg::read(),
                     cells_layout: Vec::new(),
-                    col_x: Vec::new(),
-                    col_w: Vec::new(),
                     row_h: 0,
                     last_good: None,
                     use_d2d: false,
@@ -1548,6 +1745,7 @@ pub fn start(app: AppHandle) {
                     text_format: None,
                     fmt_key: (0, false, 0),
                     d2d_brush: None,
+                    d2d_typography: None,
                 });
             });
 
