@@ -1,6 +1,7 @@
 pub mod affinity;
 pub mod commands;
 pub mod debug_log;
+pub mod disk_scan;
 pub mod error;
 pub mod fan;
 pub mod fan_autotune;
@@ -249,6 +250,7 @@ pub fn run() {
             commands::end_task,
             commands::get_sensors,
             commands::reveal_in_explorer,
+            disk_scan::disk_list_volumes,
             commands::get_power_plan,
             commands::set_power_plan,
             commands::list_services,

@@ -526,8 +526,36 @@ export interface SmuStatus {
   lastReplyOk: boolean;
 }
 
+/**
+ * One fixed/removable volume for the Disk Analyzer picker (Zone A). Mirrors the
+ * Rust `disk_scan::VolumeInfo` (camelCase). `total`/`free` are bytes; the picker
+ * derives `used = total - free`. `supported` false → greyed/disabled row.
+ */
+export interface VolumeInfo {
+  /** Stable scan key — volume GUID path (`\\?\Volume{guid}\`) or the drive root. */
+  scanId: string;
+  /** Friendly display root, e.g. "C:\\". */
+  root: string;
+  /** Drive letter without separator, e.g. "C:". */
+  letter: string;
+  /** Volume label (may be empty). */
+  label: string;
+  /** File system, e.g. "NTFS" (may be empty). */
+  fileSystem: string;
+  /** "fixed" | "removable" | "remote" | "cdrom" | "ramdisk" | "unknown". */
+  driveType: string;
+  /** Total size in bytes (0 when unavailable). */
+  total: number;
+  /** Free bytes (0 when unavailable). */
+  free: number;
+  /** True when the volume can be scanned (has size info + a filesystem). */
+  supported: boolean;
+}
+
 export const api = {
   getOverview: () => invoke<Overview>("get_overview"),
+  /** Enumerate fixed + removable volumes for the Disk Analyzer picker (Zone A). */
+  diskListVolumes: () => invoke<VolumeInfo[]>("disk_list_volumes"),
   getTopology: async (): Promise<CpuTopology> => {
     const raw = await invoke<RawCpuTopology>("get_topology");
     return {

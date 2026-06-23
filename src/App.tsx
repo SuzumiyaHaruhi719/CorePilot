@@ -19,6 +19,7 @@ import { FanControl } from "./tabs/FanControl";
 import { GpuTune } from "./tabs/GpuTune";
 import { Monitor } from "./tabs/Monitor";
 import { Optimize } from "./tabs/Optimize";
+import { DiskAnalyzer } from "./tabs/DiskAnalyzer";
 import { OsdConfig } from "./tabs/OsdConfig";
 import { Settings } from "./tabs/Settings";
 import { TaskManager } from "./tabs/TaskManager";
@@ -40,6 +41,7 @@ const TABS: Record<TabId, () => ReactElement> = {
   gpu: GpuTune,
   fans: FanControl,
   optimize: Optimize,
+  disk: DiskAnalyzer,
   tuning: Tuning,
   amd: AmdTuning,
   settings: Settings,

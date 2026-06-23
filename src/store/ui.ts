@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import { tauriStorage } from "../lib/persist";
 
-export type TabId = "cores" | "taskmgr" | "monitor" | "osd" | "gpu" | "fans" | "optimize" | "tuning" | "amd" | "settings";
+export type TabId = "cores" | "taskmgr" | "monitor" | "osd" | "gpu" | "fans" | "optimize" | "disk" | "tuning" | "amd" | "settings";
 
 /** Monitor tab sub-views: live dashboard vs. saved session reports. */
 export type MonitorSub = "live" | "history";
