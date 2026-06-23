@@ -10,6 +10,7 @@ import { useSettings } from "./store/settings";
 import { useAffinityEnforcer } from "./hooks/useAffinityEnforcer";
 import { useOsdHotkey } from "./hooks/useOsdHotkey";
 import { usePerfRecorder } from "./hooks/usePerfRecorder";
+import { useDiskScanEvents } from "./hooks/useDiskScanEvents";
 import { useOverlayInjection } from "./hooks/useOverlayInjection";
 import { useLiveHistoryRecorder } from "./hooks/useSharedTelemetry";
 import { useGlobalI18n } from "./lib/i18n";
@@ -61,6 +62,7 @@ function App() {
   useAffinityEnforcer(overview ? (1n << BigInt(overview.logicalCpus)) - 1n : 0n);
   useOsdHotkey();
   usePerfRecorder();
+  useDiskScanEvents();
   useOverlayInjection();
   useLiveHistoryRecorder();
   useGlobalI18n();

@@ -1,10 +1,11 @@
-import { ArrowLeft, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Segmented } from "../../components/ui/Segmented";
 import { Slider } from "../../components/ui/Slider";
 import { Toggle } from "../../components/ui/Toggle";
 import { useTf } from "../../lib/i18n";
-import { api, type TreeNode, type TreeView } from "../../lib/ipc";
+import { api, withTimeout, type TreeNode, type TreeView } from "../../lib/ipc";
+import { useDiskScan, type PerDiskView } from "../../store/diskScan";
 import { TreemapCanvas } from "./treemap/TreemapCanvas";
 import { Breadcrumb, type CrumbSegment } from "./treemap/Breadcrumb";
 import { DetailPanel } from "./DetailPanel";
@@ -12,71 +13,73 @@ import type { Metric } from "./treemap/layout";
 import type { ColorMode } from "./treemap/colors";
 
 /**
- * Per-disk treemap workspace (spec §4.2 Zone C + §3.4 drill + §4.5 toolbar +
- * §4.6 detail). Phase 4 wires:
+ * Per-disk treemap workspace (spec §4.2 Zone C + §3.4 drill + §3.8 live fill-in +
+ * §4.5 toolbar + §4.6 detail).
  *
- *  - Breadcrumb drill: `onPick` of a drillable container (`path != null`) pushes
- *    its path onto a focus stack and re-pulls `disk_tree(scanId, path)`; the
- *    breadcrumb ascends by popping. A leaf pick selects it for the detail panel.
- *  - A one-shot ~220ms zoom tween on drill (the canvas scales toward the picked
- *    rect, gated by `data-reduce-motion`; never a continuous animation, and the
- *    canvas stays out of any Motion `layout` container — MEMORY: group glow).
- *  - Toolbar controls: Show-by (alloc/logical metric), Color mode (depth/type),
- *    a LOD density slider (min-size knob), and a "pause live updates" toggle.
+ * PHASE 5 lifts all per-tab view-state (metric / color / pause / LOD / drill
+ * stack) into `diskScan.ts` keyed by `scanId`, so the `SecondaryTabs` strip can
+ * switch disks with a pure O(1) store read — no remount, no lost drill state —
+ * while every scan keeps running on its own backend thread. This component is now
+ * a CONTROLLED view of one `PerDiskView`:
+ *
+ *  - Drill / metric / color / pause / LOD all read from + write to the store.
+ *  - **Active-tab live polling (§3.8/§4.4):** while the scan is still running and
+ *    "pause live updates" is OFF, a backpressured ~3 Hz poller re-pulls
+ *    `disk_tree` on a NEW snapshot `generation` so folders visibly fill in. A
+ *    paused / finished tab stops polling. `mounted` only while this disk is the
+ *    active tab, so background tabs never poll (their scan still runs).
+ *  - A one-shot ~220ms zoom tween on drill (gated by `data-reduce-motion`; canvas
+ *    stays out of any Motion `layout` container — MEMORY: group glow).
  *  - The side detail panel (`disk_top_items` + selection).
  *
- * Phase 4 hosts ONE active scan; the per-disk `SecondaryTabs` strip, the live
- * `disk-scan://progress` listener, active-tab polling and the `diskScan.ts` store
- * are Phase 5 (this component takes a `scanId` + an initial `TreeView` and owns
- * only its own drill/view state until then).
- *
- * See docs/superpowers/specs/2026-06-23-disk-space-analyzer-design.md §3.4/§4.
+ * See docs/superpowers/specs/2026-06-23-disk-space-analyzer-design.md §3.4/§3.8/§4.
  */
 
 interface DiskWorkspaceProps {
   scanId: string;
-  /** Friendly disk root label for the breadcrumb root crumb (e.g. "C:"). */
-  rootLabel: string;
-  /** Return to the picker (Zone A). */
-  onBack: () => void;
 }
 
-/** One level on the drill stack: its absolute focus path + the slice shown there. */
-interface FocusLevel {
-  /** null = the disk root (whole-disk view). */
-  path: string | null;
-  label: string;
+/** LOD density → a `minBytes` floor below which children collapse server-side. */
+function minBytesFor(d: number): number {
+  // 1 → 0 (show everything); 10 → ~32 MB floor. Geometric so the low end is fine.
+  if (d <= 1) return 0;
+  return Math.round(64 * 1024 * (1 << (d - 1))); // 64KB..32MB across 2..10
 }
 
-export function DiskWorkspace({ scanId, rootLabel, onBack }: DiskWorkspaceProps) {
+export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
   const tf = useTf();
 
-  // Per-tab view state (Phase 5 lifts this into `diskScan.ts`).
-  const [metric, setMetric] = useState<Metric>("alloc");
-  const [colorMode, setColorMode] = useState<ColorMode>("depth");
-  const [paused, setPaused] = useState(false);
-  // LOD density 1..10 → min-bytes floor (higher = coarser, fewer tiny rects).
-  const [lod, setLod] = useState(3);
+  // The per-tab view-state lives in the store now (instant tab-switch, §4.3).
+  const view = useDiskScan((s) => s.views[scanId]);
+  const patchView = useDiskScan((s) => s.patchView);
 
-  // Drill stack: stack[0] is the disk root; the last entry is the current focus.
-  const [stack, setStack] = useState<FocusLevel[]>([{ path: null, label: rootLabel }]);
-  const [view, setView] = useState<TreeView | null>(null);
+  // Transient render state (NOT persisted across tab switches — re-pulled on focus).
+  const [tree, setTree] = useState<TreeView | null>(null);
   const [selected, setSelected] = useState<TreeNode | null>(null);
   const [hovered, setHovered] = useState<TreeNode | null>(null);
   const [loading, setLoading] = useState(true);
 
   const zoomRef = useRef<HTMLDivElement>(null);
 
-  /** LOD density → a `minBytes` floor below which children collapse server-side. */
-  const minBytesFor = useCallback((d: number): number => {
-    // 1 → 0 (show everything); 10 → ~64 MB floor. Geometric so the low end is fine.
-    if (d <= 1) return 0;
-    return Math.round(64 * 1024 * (1 << (d - 1))); // 64KB..32MB across 1..10
-  }, []);
-
-  // Pull the tree for the current focus (top of the drill stack). Re-runs on a
-  // drill/ascend or an LOD-knob change. Selection clears on a focus change.
+  // The store entry can be momentarily undefined during a close re-target.
+  const metric: Metric = view?.metric ?? "alloc";
+  const colorMode: ColorMode = view?.colorMode ?? "depth";
+  const paused = view?.paused ?? false;
+  const lod = view?.lod ?? 3;
+  const stack = view?.stack ?? [{ path: null, label: "" }];
   const focusPath = stack[stack.length - 1]?.path ?? null;
+  const progress = view?.progress ?? null;
+  const scanning = progress?.status === "scanning";
+  const generation = progress?.generation ?? 0;
+
+  const patch = useCallback(
+    (p: Partial<PerDiskView>) => patchView(scanId, p),
+    [patchView, scanId],
+  );
+
+  // Pull the tree for the current focus. Re-runs on a drill/ascend or an LOD-knob
+  // change. Selection clears on a focus change. This is the AUTHORITATIVE fetch;
+  // the live poller below only re-fetches the SAME focus on a new generation.
   useEffect(() => {
     let alive = true;
     setLoading(true);
@@ -84,7 +87,7 @@ export function DiskWorkspace({ scanId, rootLabel, onBack }: DiskWorkspaceProps)
       .diskTree(scanId, focusPath, { minBytes: minBytesFor(lod) })
       .then((tv) => {
         if (!alive) return;
-        setView(tv);
+        setTree(tv);
         setSelected(null);
         setHovered(null);
         setLoading(false);
@@ -96,7 +99,51 @@ export function DiskWorkspace({ scanId, rootLabel, onBack }: DiskWorkspaceProps)
     return () => {
       alive = false;
     };
-  }, [scanId, focusPath, lod, minBytesFor]);
+  }, [scanId, focusPath, lod]);
+
+  // Live fill-in (spec §3.8/§4.4): while THIS active tab's scan is still running
+  // and not paused, re-pull `disk_tree` for the CURRENT focus on a new snapshot
+  // `generation`, backpressured so a fast scan can't pile up invokes. The same
+  // metric/color the canvas already uses just animates the new (larger) sizes via
+  // the layout — folders grow as the scan fills in. Paused / done → no polling.
+  const lastFetchedGen = useRef(-1);
+  useEffect(() => {
+    if (!scanning || paused) return;
+    let alive = true;
+    let inFlight = false;
+    const tick = async () => {
+      if (!alive || inFlight) return;
+      // Only re-fetch when the published snapshot advanced past what we drew.
+      const g = useDiskScan.getState().views[scanId]?.progress?.generation ?? 0;
+      if (g <= lastFetchedGen.current) return;
+      inFlight = true;
+      try {
+        const fp = useDiskScan.getState().views[scanId]?.stack.slice(-1)[0]?.path ?? null;
+        const tv = await withTimeout(api.diskTree(scanId, fp, { minBytes: minBytesFor(lod) }));
+        if (!alive) return;
+        lastFetchedGen.current = tv.generation;
+        setTree(tv);
+        setLoading(false);
+      } catch {
+        /* transient — keep the last tree */
+      } finally {
+        inFlight = false;
+      }
+    };
+    const id = window.setInterval(() => void tick(), 320);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+    // Re-arm when the active scan status / pause / focus / LOD changes. `generation`
+    // is read live inside the tick (not a dep) so we don't thrash the interval.
+  }, [scanId, scanning, paused, focusPath, lod]);
+
+  // Reset the fill-in watermark whenever the focus changes (a fresh focus fetch
+  // above sets the baseline; the poller then chases gens beyond it).
+  useEffect(() => {
+    lastFetchedGen.current = generation;
+  }, [focusPath, generation]);
 
   /** One-shot ~220ms zoom tween toward a picked rect (gated by reduce-motion). */
   const playZoom = useCallback((origin: { x: number; y: number; w: number; h: number } | null) => {
@@ -105,7 +152,6 @@ export function DiskWorkspace({ scanId, rootLabel, onBack }: DiskWorkspaceProps)
     if (document.documentElement.dataset.reduceMotion === "true") return;
     const box = el.getBoundingClientRect();
     if (box.width <= 0 || box.height <= 0) return;
-    // Scale the source rect up to fill, anchored at its centre, then settle to 1.
     const sx = origin ? Math.max(0.001, origin.w / box.width) : 0.86;
     const sy = origin ? Math.max(0.001, origin.h / box.height) : 0.86;
     const ox = origin ? ((origin.x + origin.w / 2) / box.width) * 100 : 50;
@@ -121,27 +167,30 @@ export function DiskWorkspace({ scanId, rootLabel, onBack }: DiskWorkspaceProps)
   }, []);
 
   // Drill into a container, or select a leaf (spec §3.4). Bucket tiles (localId
-  // -1) are a no-op in Phase 4 (re-laying out a bucket is a later refinement).
+  // -1) are a no-op in v1 (re-laying out a bucket is a later refinement).
   const onPick = useCallback(
     (node: TreeNode | null) => {
       if (!node) return;
       const drillable = node.path != null && (node.hasMore || (node.flags & 1) !== 0);
       if (drillable && node.path) {
-        // Centred zoom tween (the picked rect's screen origin isn't surfaced by
-        // the Phase-3 canvas; a full-canvas settle reads as a clean drill-in).
         playZoom(null);
-        setStack((prev) => [...prev, { path: node.path, label: node.name }]);
+        const cur = useDiskScan.getState().views[scanId]?.stack ?? [];
+        patch({ stack: [...cur, { path: node.path, label: node.name }] });
       } else {
         setSelected(node);
       }
     },
-    [playZoom],
+    [playZoom, patch, scanId],
   );
 
   // Ascend to a breadcrumb depth (0 = disk root).
-  const navigate = useCallback((depth: number) => {
-    setStack((prev) => (depth < prev.length - 1 ? prev.slice(0, depth + 1) : prev));
-  }, []);
+  const navigate = useCallback(
+    (depth: number) => {
+      const cur = useDiskScan.getState().views[scanId]?.stack ?? [];
+      if (depth < cur.length - 1) patch({ stack: cur.slice(0, depth + 1) });
+    },
+    [patch, scanId],
+  );
 
   const crumbs: CrumbSegment[] = stack.map((lvl) => ({ label: lvl.label }));
 
@@ -149,32 +198,22 @@ export function DiskWorkspace({ scanId, rootLabel, onBack }: DiskWorkspaceProps)
     <div className="flex h-full min-h-0 flex-col">
       {/* Thin toolbar bar above the canvas (spec §4.5). */}
       <div className="flex flex-wrap items-center gap-2.5 border-b border-line px-4 py-2.5">
-        <button
-          type="button"
-          onClick={onBack}
-          title={tf("返回磁盘列表", "Back to disks")}
-          className="no-drag inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:border-line-strong hover:bg-surface3 hover:text-ink"
-        >
-          <ArrowLeft size={14} />
-          {tf("磁盘", "Disks")}
-        </button>
-
         <Breadcrumb segments={crumbs} onNavigate={navigate} />
 
         <div className="flex items-center gap-2.5">
           <Segmented
-            id="disk-metric"
+            id={`disk-metric-${scanId}`}
             value={metric}
-            onChange={(v) => setMetric(v)}
+            onChange={(v) => patch({ metric: v })}
             options={[
               { value: "alloc", label: "占用空间" },
               { value: "logical", label: "逻辑大小" },
             ]}
           />
           <Segmented
-            id="disk-color"
+            id={`disk-color-${scanId}`}
             value={colorMode}
-            onChange={(v) => setColorMode(v)}
+            onChange={(v) => patch({ colorMode: v })}
             options={[
               { value: "depth", label: "按层级" },
               { value: "type", label: "按类型" },
@@ -186,11 +225,15 @@ export function DiskWorkspace({ scanId, rootLabel, onBack }: DiskWorkspaceProps)
               value={lod}
               min={1}
               max={10}
-              onChange={setLod}
+              onChange={(v) => patch({ lod: v })}
             />
           </div>
           <label className="flex items-center gap-1.5 text-[11.5px] text-muted">
-            <Toggle checked={paused} onChange={setPaused} label={tf("暂停实时更新", "Pause live updates")} />
+            <Toggle
+              checked={paused}
+              onChange={(v) => patch({ paused: v })}
+              label={tf("暂停实时更新", "Pause live updates")}
+            />
             <span className="whitespace-nowrap">{tf("暂停", "Pause")}</span>
           </label>
         </div>
@@ -199,25 +242,22 @@ export function DiskWorkspace({ scanId, rootLabel, onBack }: DiskWorkspaceProps)
       {/* Workspace: treemap (left ~70%) + detail panel (right). */}
       <div className="flex min-h-0 flex-1">
         <div ref={zoomRef} className="relative min-w-0 flex-1">
-          {view && view.nodes.length > 0 ? (
+          {tree && tree.nodes.length > 0 ? (
             <TreemapCanvas
-              view={view}
+              view={tree}
               metric={metric}
               colorMode={colorMode}
               onPick={(node) => onPick(node)}
-              onHover={(node) => {
-                // Hover previews into the detail panel only when nothing is pinned
-                // (a click pins; clicking empty space / leaving clears via onPick).
-                if (node) setHovered(node);
-                else setHovered(null);
-              }}
+              onHover={(node) => setHovered(node ?? null)}
             />
           ) : (
             <div className="grid h-full place-items-center text-[13px] text-muted">
-              {loading ? (
+              {loading || scanning ? (
                 <span className="inline-flex items-center gap-2">
                   <Loader2 size={16} className="animate-spin" />
-                  {tf("正在加载树图…", "Loading treemap…")}
+                  {scanning
+                    ? tf("正在扫描…", "Scanning…")
+                    : tf("正在加载树图…", "Loading treemap…")}
                 </span>
               ) : (
                 tf("暂无可显示的数据", "Nothing to display")
@@ -226,10 +266,10 @@ export function DiskWorkspace({ scanId, rootLabel, onBack }: DiskWorkspaceProps)
           )}
         </div>
 
-        {view && view.nodes.length > 0 && (
+        {tree && tree.nodes.length > 0 && (
           <DetailPanel
             scanId={scanId}
-            view={view}
+            view={tree}
             selected={selected ?? hovered}
             metric={metric}
           />
