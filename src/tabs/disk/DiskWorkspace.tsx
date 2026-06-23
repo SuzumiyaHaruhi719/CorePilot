@@ -1,10 +1,29 @@
-import { AlertTriangle, Loader2, Layers, PlugZap } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronLeft,
+  Copy,
+  FolderOpen,
+  Loader2,
+  Layers,
+  PlugZap,
+  RefreshCw,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Segmented } from "../../components/ui/Segmented";
 import { Slider } from "../../components/ui/Slider";
 import { Toggle } from "../../components/ui/Toggle";
+import { ContextMenu, type MenuState } from "../../components/ui/ContextMenu";
 import { useTf } from "../../lib/i18n";
-import { api, withTimeout, type ScanProgress, type TreeNode, type TreeView } from "../../lib/ipc";
+import {
+  api,
+  withTimeout,
+  DISK_FLAG,
+  type ScanProgress,
+  type TreeNode,
+  type TreeView,
+} from "../../lib/ipc";
 import { useDiskScan, type PerDiskView } from "../../store/diskScan";
 import { TreemapCanvas } from "./treemap/TreemapCanvas";
 import { Breadcrumb, type CrumbSegment } from "./treemap/Breadcrumb";
@@ -58,24 +77,43 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
   const [selected, setSelected] = useState<TreeNode | null>(null);
   const [hovered, setHovered] = useState<TreeNode | null>(null);
   const [loading, setLoading] = useState(true);
+  const [menu, setMenu] = useState<MenuState | null>(null);
 
   const zoomRef = useRef<HTMLDivElement>(null);
 
   // The store entry can be momentarily undefined during a close re-target.
   const metric: Metric = view?.metric ?? "alloc";
-  const colorMode: ColorMode = view?.colorMode ?? "depth";
+  const colorMode: ColorMode = view?.colorMode ?? "cushion";
   const paused = view?.paused ?? false;
   const lod = view?.lod ?? 3;
   const stack = view?.stack ?? [{ path: null, label: "" }];
   const focusPath = stack[stack.length - 1]?.path ?? null;
   const progress = view?.progress ?? null;
   const scanning = progress?.status === "scanning";
-  const generation = progress?.generation ?? 0;
 
   const patch = useCallback(
     (p: Partial<PerDiskView>) => patchView(scanId, p),
     [patchView, scanId],
   );
+
+  // Cheap signature of the last committed view — guards against no-op publishes
+  // (a poll that returns a materially identical snapshot) forcing a full treemap
+  // relayout + tween cycle. Genuine growth changes the signature and still commits.
+  const lastTreeSig = useRef<string>("");
+  const treeSig = (tv: TreeView): string => {
+    const root = tv.nodes[0];
+    // Aggregate root bytes + file count + node count + focus + generation — any
+    // genuine growth moves one of these; a no-op republish leaves them identical.
+    const rootBytes = root ? root.allocSize + root.logicalSize : 0;
+    const rootFiles = root?.fileCount ?? 0;
+    return `${tv.generation}|${tv.focusPath}|${tv.nodes.length}|${rootFiles}|${rootBytes}`;
+  };
+  const commitTree = useCallback((tv: TreeView) => {
+    const sig = treeSig(tv);
+    if (sig === lastTreeSig.current) return; // no material change → skip relayout
+    lastTreeSig.current = sig;
+    setTree(tv);
+  }, []);
 
   // Pull the tree for the current focus. Re-runs on a drill/ascend or an LOD-knob
   // change. Selection clears on a focus change. This is the AUTHORITATIVE fetch;
@@ -87,7 +125,10 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
       .diskTree(scanId, focusPath, { minBytes: minBytesFor(lod) })
       .then((tv) => {
         if (!alive) return;
-        setTree(tv);
+        // A focus/LOD change is authoritative: always commit (reset the guard so a
+        // same-signature view across focuses isn't suppressed).
+        lastTreeSig.current = "";
+        commitTree(tv);
         setSelected(null);
         setHovered(null);
         setLoading(false);
@@ -99,13 +140,16 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
     return () => {
       alive = false;
     };
-  }, [scanId, focusPath, lod]);
+  }, [scanId, focusPath, lod, commitTree]);
 
   // Live fill-in (spec §3.8/§4.4): while THIS active tab's scan is still running
   // and not paused, re-pull `disk_tree` for the CURRENT focus on a new snapshot
   // `generation`, backpressured so a fast scan can't pile up invokes. The same
   // metric/color the canvas already uses just animates the new (larger) sizes via
   // the layout — folders grow as the scan fills in. Paused / done → no polling.
+  // Watermark = the last generation we ACTUALLY fetched + committed (NOT every
+  // progress tick). Advancing it only after a real fetch is what keeps the poller
+  // from treating an unfetched snapshot as already-drawn and silently skipping it.
   const lastFetchedGen = useRef(-1);
   useEffect(() => {
     if (!scanning || paused) return;
@@ -113,7 +157,8 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
     let inFlight = false;
     const tick = async () => {
       if (!alive || inFlight) return;
-      // Only re-fetch when the published snapshot advanced past what we drew.
+      // Only re-fetch when the latest published generation is beyond the last one
+      // we actually FETCHED — so a fresh snapshot during a scan always pulls.
       const g = useDiskScan.getState().views[scanId]?.progress?.generation ?? 0;
       if (g <= lastFetchedGen.current) return;
       inFlight = true;
@@ -121,11 +166,13 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
         const fp = useDiskScan.getState().views[scanId]?.stack.slice(-1)[0]?.path ?? null;
         const tv = await withTimeout(api.diskTree(scanId, fp, { minBytes: minBytesFor(lod) }));
         if (!alive) return;
+        // Advance the watermark to the generation we actually fetched, in the
+        // resolve path — only now is this snapshot truly "drawn".
         lastFetchedGen.current = tv.generation;
-        setTree(tv);
+        commitTree(tv);
         setLoading(false);
       } catch {
-        /* transient — keep the last tree */
+        /* transient — keep the last tree (watermark unchanged → we retry) */
       } finally {
         inFlight = false;
       }
@@ -137,60 +184,181 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
     };
     // Re-arm when the active scan status / pause / focus / LOD changes. `generation`
     // is read live inside the tick (not a dep) so we don't thrash the interval.
-  }, [scanId, scanning, paused, focusPath, lod]);
+  }, [scanId, scanning, paused, focusPath, lod, commitTree]);
 
-  // Reset the fill-in watermark whenever the focus changes (a fresh focus fetch
-  // above sets the baseline; the poller then chases gens beyond it).
+  // Reset the fill-in watermark on a scan switch / focus-path change / LOD baseline
+  // change — the authoritative focus fetch above re-pulls a fresh baseline, so the
+  // poller should start chasing generations from scratch. NOTE: do NOT couple this
+  // to `generation` — advancing the watermark on every progress tick is exactly the
+  // bug that made the poller skip live updates.
   useEffect(() => {
-    lastFetchedGen.current = generation;
-  }, [focusPath, generation]);
+    lastFetchedGen.current = -1;
+  }, [scanId, focusPath, lod]);
 
-  /** One-shot ~220ms zoom tween toward a picked rect (gated by reduce-motion). */
-  const playZoom = useCallback((origin: { x: number; y: number; w: number; h: number } | null) => {
-    const el = zoomRef.current;
-    if (!el) return;
-    if (document.documentElement.dataset.reduceMotion === "true") return;
-    const box = el.getBoundingClientRect();
-    if (box.width <= 0 || box.height <= 0) return;
-    const sx = origin ? Math.max(0.001, origin.w / box.width) : 0.86;
-    const sy = origin ? Math.max(0.001, origin.h / box.height) : 0.86;
-    const ox = origin ? ((origin.x + origin.w / 2) / box.width) * 100 : 50;
-    const oy = origin ? ((origin.y + origin.h / 2) / box.height) * 100 : 50;
-    el.style.transformOrigin = `${ox}% ${oy}%`;
-    el.animate(
-      [
-        { transform: `scale(${sx}, ${sy})`, opacity: 0.35 },
-        { transform: "scale(1, 1)", opacity: 1 },
-      ],
-      { duration: 220, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
-    );
+  /**
+   * One-shot ~220ms zoom tween (gated by reduce-motion). `dir: "in"` grows the
+   * new (deeper) view from the picked rect's footprint (spec §3.3); `dir: "out"`
+   * plays the inverse — the view shrinks-from-overscale back to 1, so ascending
+   * reads as zooming OUT from the child we left.
+   */
+  const playZoom = useCallback(
+    (
+      origin: { x: number; y: number; w: number; h: number } | null,
+      dir: "in" | "out" = "in",
+    ) => {
+      const el = zoomRef.current;
+      if (!el) return;
+      if (document.documentElement.dataset.reduceMotion === "true") return;
+      const box = el.getBoundingClientRect();
+      if (box.width <= 0 || box.height <= 0) return;
+      const sx = origin ? Math.max(0.001, origin.w / box.width) : 0.86;
+      const sy = origin ? Math.max(0.001, origin.h / box.height) : 0.86;
+      const ox = origin ? ((origin.x + origin.w / 2) / box.width) * 100 : 50;
+      const oy = origin ? ((origin.y + origin.h / 2) / box.height) * 100 : 50;
+      el.style.transformOrigin = `${ox}% ${oy}%`;
+      const frames =
+        dir === "in"
+          ? [
+              { transform: `scale(${sx}, ${sy})`, opacity: 0.35 },
+              { transform: "scale(1, 1)", opacity: 1 },
+            ]
+          : // Inverse: the parent view appears from an over-scaled state (as if we
+            // pulled back out of the child) and settles to 1.
+            [
+              {
+                transform: `scale(${1 / Math.max(0.2, sx)}, ${1 / Math.max(0.2, sy)})`,
+                opacity: 0.35,
+              },
+              { transform: "scale(1, 1)", opacity: 1 },
+            ];
+      el.animate(frames, { duration: 220, easing: "cubic-bezier(0.22, 1, 0.36, 1)" });
+    },
+    [],
+  );
+
+  // SINGLE-CLICK → select only (spec §3.3): no navigation, the DetailPanel shows
+  // it. Buckets (localId -1, node null) clear the selection.
+  const onSelect = useCallback((node: TreeNode | null) => {
+    setSelected(node);
   }, []);
 
-  // Drill into a container, or select a leaf (spec §3.4). Bucket tiles (localId
-  // -1) are a no-op in v1 (re-laying out a bucket is a later refinement).
-  const onPick = useCallback(
-    (node: TreeNode | null) => {
-      if (!node) return;
-      const drillable = node.path != null && (node.hasMore || (node.flags & 1) !== 0);
-      if (drillable && node.path) {
-        playZoom(null);
-        const cur = useDiskScan.getState().views[scanId]?.stack ?? [];
-        patch({ stack: [...cur, { path: node.path, label: node.name }] });
-      } else {
-        setSelected(node);
-      }
+  // DOUBLE-CLICK on a drillable container → zoom in (push the drill stack). The
+  // canvas already filtered to drillable nodes; we just push + tween (spec §3.3).
+  const onZoom = useCallback(
+    (node: TreeNode | null, origin: { x: number; y: number; w: number; h: number }) => {
+      if (!node || node.path == null) return;
+      playZoom(origin, "in");
+      const cur = useDiskScan.getState().views[scanId]?.stack ?? [];
+      patch({ stack: [...cur, { path: node.path, label: node.name }] });
     },
     [playZoom, patch, scanId],
   );
 
-  // Ascend to a breadcrumb depth (0 = disk root).
+  // Ascend to a breadcrumb depth (0 = disk root). Plays the inverse zoom-out.
   const navigate = useCallback(
     (depth: number) => {
       const cur = useDiskScan.getState().views[scanId]?.stack ?? [];
-      if (depth < cur.length - 1) patch({ stack: cur.slice(0, depth + 1) });
+      if (depth < cur.length - 1) {
+        playZoom(null, "out");
+        patch({ stack: cur.slice(0, depth + 1) });
+      }
     },
-    [patch, scanId],
+    [patch, scanId, playZoom],
   );
+
+  // Pop ONE level (the back-chevron / Esc / context "Zoom out"). No-op at root.
+  const ascend = useCallback(() => {
+    const cur = useDiskScan.getState().views[scanId]?.stack ?? [];
+    if (cur.length > 1) {
+      playZoom(null, "out");
+      patch({ stack: cur.slice(0, -1) });
+    }
+  }, [patch, scanId, playZoom]);
+
+  // Zoom INTO an arbitrary node from the context menu (no rect footprint → center).
+  const zoomToNode = useCallback(
+    (node: TreeNode | null) => {
+      if (!node || node.path == null) return;
+      playZoom(null, "in");
+      const cur = useDiskScan.getState().views[scanId]?.stack ?? [];
+      patch({ stack: [...cur, { path: node.path, label: node.name }] });
+    },
+    [playZoom, patch, scanId],
+  );
+
+  const atRoot = stack.length <= 1;
+
+  // RIGHT-CLICK → build the context menu (spec §3.3 table). Items with no backing
+  // (Open-file, Delete) are omitted; items whose `node.path` is null are disabled.
+  const onContext = useCallback(
+    (node: TreeNode | null, _localId: number, clientX: number, clientY: number) => {
+      // Selecting on right-click matches Explorer + keeps the DetailPanel in sync.
+      if (node) setSelected(node);
+      const hasPath = node != null && node.path != null;
+      const isDir = node != null && (node.flags & DISK_FLAG.isDir) !== 0;
+      const drillable = hasPath && node != null && (node.hasMore || isDir);
+      setMenu({
+        x: clientX,
+        y: clientY,
+        items: [
+          {
+            label: tf("放大进入", "Zoom in"),
+            icon: ZoomIn,
+            disabled: !drillable,
+            onClick: () => zoomToNode(node),
+          },
+          {
+            label: tf("缩小到上级", "Zoom out / to parent"),
+            icon: ZoomOut,
+            disabled: atRoot,
+            onClick: () => ascend(),
+          },
+          {
+            label: tf("在资源管理器中显示", "Reveal in Explorer"),
+            icon: FolderOpen,
+            disabled: !hasPath,
+            onClick: () => {
+              if (node?.path) void api.revealInExplorer(node.path).catch(() => {});
+            },
+          },
+          {
+            label: tf("复制路径", "Copy path"),
+            icon: Copy,
+            disabled: !hasPath,
+            onClick: () => {
+              if (node?.path) void navigator.clipboard?.writeText(node.path).catch(() => {});
+            },
+          },
+          {
+            label: tf("重新扫描", "Rescan"),
+            icon: RefreshCw,
+            onClick: () => {
+              void api.diskScanStart([scanId]).catch(() => {});
+            },
+          },
+        ],
+      });
+    },
+    [tf, atRoot, zoomToNode, ascend, scanId],
+  );
+
+  // Esc pops one level — active only when this disk tab is mounted and no context
+  // menu is open (the ContextMenu owns Esc while it's up). No-op at root.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || menu) return;
+      // Ignore while typing in a field (the toolbar has none today, but be safe).
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const cur = useDiskScan.getState().views[scanId]?.stack ?? [];
+      if (cur.length > 1) {
+        e.preventDefault();
+        ascend();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menu, scanId, ascend]);
 
   const crumbs: CrumbSegment[] = stack.map((lvl) => ({ label: lvl.label }));
 
@@ -198,6 +366,17 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
     <div className="flex h-full min-h-0 flex-col">
       {/* Thin toolbar bar above the canvas (spec §4.5). */}
       <div className="flex flex-wrap items-center gap-2.5 border-b border-line px-4 py-2.5">
+        {/* Back affordance (spec §3.3): pop one drill level; disabled at root. */}
+        <button
+          type="button"
+          onClick={ascend}
+          disabled={atRoot}
+          title={tf("返回上一级", "Back (up one level)")}
+          aria-label={tf("返回上一级", "Back")}
+          className="no-drag flex shrink-0 items-center justify-center rounded-md p-1 text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
+        >
+          <ChevronLeft size={16} />
+        </button>
         <Breadcrumb segments={crumbs} onNavigate={navigate} />
 
         <div className="flex items-center gap-2.5">
@@ -215,6 +394,7 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
             value={colorMode}
             onChange={(v) => patch({ colorMode: v })}
             options={[
+              { value: "cushion", label: "软垫" },
               { value: "depth", label: "按层级" },
               { value: "type", label: "按类型" },
             ]}
@@ -254,7 +434,11 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
               view={tree}
               metric={metric}
               colorMode={colorMode}
-              onPick={(node) => onPick(node)}
+              scanning={scanning}
+              selected={selected}
+              onSelect={(node) => onSelect(node)}
+              onZoom={(node, origin) => onZoom(node, origin)}
+              onContext={(node, id, x, y) => onContext(node, id, x, y)}
               onHover={(node) => setHovered(node ?? null)}
             />
           ) : progress?.disconnected ? (
@@ -299,6 +483,9 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
           />
         )}
       </div>
+
+      {/* Right-click context menu (spec §3.3) — portaled, closes on outside click. */}
+      <ContextMenu state={menu} onClose={() => setMenu(null)} />
     </div>
   );
 }

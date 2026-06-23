@@ -17,7 +17,7 @@ import { DISK_FLAG } from "../../../lib/ipc";
  * See docs/superpowers/specs/2026-06-23-disk-space-analyzer-design.md §3.5.
  */
 
-export type ColorMode = "depth" | "type";
+export type ColorMode = "cushion" | "depth" | "type";
 
 export interface Palette {
   /** Resolved literal colors (no `var()`), keyed by the token role. */
@@ -145,6 +145,29 @@ export function rectColor(
   }
   const isDir = (node.flags & DISK_FLAG.isDir) !== 0;
 
+  if (mode === "cushion") {
+    // SpaceSniffer look: warm tan/neutral folder frames, blue file fills (spec §3.2).
+    // Folders derive from the amber `--color-freq` token at LOW chroma so they read
+    // as a warm neutral frame (not a saturated band) and deepen in L as they nest —
+    // the frame recedes behind the content. Files take the cyan/blue token.
+    const [fL, , fH] = parseOklch(p.freq); // amber/tan hue (~70)
+    if (isDir) {
+      const step = Math.min(depth, 6);
+      // Warm tan: low chroma, L receding deeper (darker as nested, lighter in light mode).
+      const L = p.light
+        ? Math.max(78, fL - step * 2)
+        : Math.max(22, Math.min(46, 40 - step * 3));
+      const C = 0.03;
+      return `oklch(${L}% ${C} ${fH} / 0.62)`;
+    }
+    if ((node.flags & DISK_FLAG.aggregated) !== 0) return withAlpha(p.surface3, 0.6);
+    // Files: blue cushion from the cyan token, chroma-modulated for a flatter fill.
+    const [cL, cC, cH] = parseOklch(p.cyan);
+    const L = p.light ? Math.max(55, cL - 8) : Math.min(72, cL);
+    const C = Math.max(0.05, cC * 0.78);
+    return `oklch(${L}% ${C} ${cH} / 0.9)`;
+  }
+
   if (mode === "type") {
     if (isDir) {
       // Folder frames: neutral surface, slightly deeper as they nest.
@@ -185,4 +208,22 @@ export function strokeColor(p: Palette): string {
 /** Text color for labels drawn on rects. */
 export function labelColor(p: Palette, onContainer: boolean): string {
   return onContainer ? p.muted : p.ink;
+}
+
+/**
+ * Engraved 2-stroke bevel colors for the cushion look (spec §3.2): a LIGHT stroke
+ * on the top/left edges + a DARK stroke on the bottom/right edges give a cheap,
+ * DPR-stable 3D "pillow" without per-pixel gradients (no GPU-budget churn —
+ * MEMORY: box-shadow DPC storm). Light themes invert (dark catches the light).
+ */
+export function bevel(p: Palette): { light: string; dark: string } {
+  return p.light
+    ? { light: "oklch(100% 0 0 / 0.55)", dark: "oklch(0% 0 0 / 0.14)" }
+    : { light: "oklch(100% 0 0 / 0.16)", dark: "oklch(0% 0 0 / 0.28)" };
+}
+
+/** Header/title-bar fill for a top-level container — a faint band darker than the
+ *  frame fill so it reads as a header strip (spec §3.2). */
+export function titleBarColor(p: Palette): string {
+  return p.light ? "oklch(0% 0 0 / 0.07)" : "oklch(0% 0 0 / 0.22)";
 }

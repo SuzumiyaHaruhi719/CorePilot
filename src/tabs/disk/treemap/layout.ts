@@ -54,6 +54,15 @@ export interface DrawRect {
   bucketCount: number;
   /** Summed metric size this rect represents (a node's, or a bucket's total). */
   size: number;
+  /**
+   * Stable identity ACROSS snapshots — drives the tween's key-match so a box eases
+   * to its new geometry instead of popping when the tree grows (spec §3.1). Derived
+   * structurally (NOT the local `nodeId`, which is a slice-index that shifts as the
+   * tree grows): a node's absolute `path` if present, else `parentKey + "/" + name`,
+   * else `parentKey + "#bucket"`. Collisions are harmless — keys only match the
+   * animation, never correctness.
+   */
+  key: string;
 }
 
 export interface LayoutInput {
@@ -198,11 +207,14 @@ export function layoutTreemap(input: LayoutInput): LayoutResult {
     const rects: DrawRect[] = [];
     let culled = false;
 
-    const recurse = (localId: number, rect: Rect, depth: number): void => {
+    const recurse = (localId: number, rect: Rect, depth: number, parentKey: string): void => {
       if (rects.length >= MAX_DRAW_RECTS) return;
       const children = kids.get(localId);
       const node = view.nodes[localId];
       const short = Math.min(rect.w, rect.h);
+      // Stable structural key (spec §3.1): prefer the absolute path, else qualify
+      // the name under the parent's key so it survives re-slicing as the tree grows.
+      const selfKey = node.path != null ? node.path : `${parentKey}/${node.name}`;
 
       // No children, too small to subdivide, or budget hit → solid leaf block.
       const isDir = (node.flags & DISK_FLAG.isDir) !== 0;
@@ -226,6 +238,7 @@ export function layoutTreemap(input: LayoutInput): LayoutResult {
           isBucket: false,
           bucketCount: 0,
           size: sizeOf(node, metric),
+          key: selfKey,
         });
         // A dir we chose not to subdivide but still has un-expanded children is
         // a drillable leaf; the renderer marks it (hasMore handled at draw).
@@ -246,6 +259,7 @@ export function layoutTreemap(input: LayoutInput): LayoutResult {
         isBucket: false,
         bucketCount: 0,
         size: sizeOf(node, metric),
+        key: selfKey,
       });
 
       const inner: Rect = {
@@ -302,10 +316,11 @@ export function layoutTreemap(input: LayoutInput): LayoutResult {
               isBucket: true,
               bucketCount,
               size: it.size,
+              key: `${selfKey}#bucket`,
             });
             return;
           }
-          recurse(it.item, r, depth + 1);
+          recurse(it.item, r, depth + 1, selfKey);
         },
       );
     };
@@ -314,6 +329,8 @@ export function layoutTreemap(input: LayoutInput): LayoutResult {
     // inner box below the root label strip.
     const rootRect: Rect = { x: 0, y: 0, w: width, h: height };
     const rootChildren = kids.get(0);
+    // Root key: the focus root's absolute path (stable across snapshots).
+    const rootKey = view.nodes[0]?.path ?? view.focusPath ?? "root";
     if (!rootChildren || rootChildren.length === 0 || width <= 0 || height <= 0) {
       // Degenerate: nothing to nest — draw the root as a single block.
       rects.push({
@@ -327,6 +344,7 @@ export function layoutTreemap(input: LayoutInput): LayoutResult {
         isBucket: false,
         bucketCount: 0,
         size: sizeOf(view.nodes[0], metric),
+        key: rootKey,
       });
       return { rects, minRect, culled };
     }
@@ -376,10 +394,11 @@ export function layoutTreemap(input: LayoutInput): LayoutResult {
             isBucket: true,
             bucketCount,
             size: it.size,
+            key: `${rootKey}#bucket`,
           });
           return;
         }
-        recurse(it.item, r, 1);
+        recurse(it.item, r, 1, rootKey);
       },
     );
 

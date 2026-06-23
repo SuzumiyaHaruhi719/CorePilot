@@ -43,7 +43,7 @@ export interface PerDiskView {
   progress: ScanProgress | null;
   /** Per-tab size metric (spec §2.4). */
   metric: Metric;
-  /** Per-tab color scheme (default "depth" — owner §7). */
+  /** Per-tab color scheme (default "cushion" — SpaceSniffer warm-folder/blue-file, §7). */
   colorMode: ColorMode;
   /** Per-tab "pause live updates" — when true the active-tab poller stops re-pulling. */
   paused: boolean;
@@ -61,7 +61,7 @@ function freshView(scanId: string, rootLabel: string, usedBytes = 0): PerDiskVie
     usedBytes,
     progress: null,
     metric: "alloc",
-    colorMode: "depth",
+    colorMode: "cushion",
     paused: false,
     lod: 3,
     stack: [{ path: null, label: rootLabel }],
