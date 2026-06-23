@@ -83,13 +83,25 @@ export function DiskAnalyzer() {
     [volumes, openDisks],
   );
 
-  // Auto-scan the system drive ONCE when launched via COREPILOT_STARTUP=disk
-  // (a hook for automated/headless verification — opens straight into a live
-  // full-disk scan). No-op for normal launches and when a disk is already open.
+  // On mount (once, after volumes load):
+  //  1. RESTORE — persisted disk tabs from a previous session have NO live
+  //     backend scan (scans are in-memory and die with the process), so the
+  //     treemap shows a dead, empty "暂无可显示的数据" tab. Re-scan them so
+  //     reopening the Disk Analyzer lands on a FRESH live scan instead of a
+  //     stale husk (this was the core "ui 用不了" — reopening showed empty tabs).
+  //  2. DIRECTIVE — a fresh launch via COREPILOT_STARTUP=disk auto-scans the
+  //     system drive (a hook for automated verification).
   const autoScanned = useRef(false);
   useEffect(() => {
-    if (autoScanned.current || !volumes || order.length > 0) return;
+    if (autoScanned.current || !volumes) return;
     autoScanned.current = true;
+    const restorable = order.filter((id) =>
+      volumes.some((v) => v.scanId === id && v.supported),
+    );
+    if (restorable.length > 0) {
+      startScan(restorable);
+      return;
+    }
     void api.startupDirective().then((d) => {
       if (!d || !d.toLowerCase().startsWith("disk")) return;
       const sys =
@@ -97,7 +109,7 @@ export function DiskAnalyzer() {
         volumes.find((v) => v.supported);
       if (sys) startScan([sys.scanId]);
     });
-  }, [volumes, order.length, startScan]);
+  }, [volumes, order, startScan]);
 
   const toggle = useCallback((scanId: string) => {
     setSelected((prev) => {
