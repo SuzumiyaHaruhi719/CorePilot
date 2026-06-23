@@ -47,7 +47,7 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use tauri::AppHandle;
 
-use windows::core::{w, PCWSTR};
+use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
@@ -61,7 +61,8 @@ use windows::Win32::UI::Shell::{
     SHAppBarMessage, ABM_GETTASKBARPOS, ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, APPBARDATA,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows, FindWindowW,
+    GetClassNameW, GetMessageW, GetWindowRect, KillTimer,
     LoadCursorW, PostQuitMessage, RegisterClassW, SetLayeredWindowAttributes, SetTimer,
     SetWindowPos, ShowWindow, TranslateMessage, HWND_TOPMOST, IDC_ARROW, MSG,
     SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_PAINT,
@@ -78,16 +79,41 @@ const TICK_TIMER: usize = 1;
 /// Tick period (ms).
 const TICK_MS: u32 = 1000;
 
-/// One drawn metric cell: a white LABEL + a threshold-colored VALUE
-/// (e.g. label "CPU", value "26.7%").
-struct Cell {
-    label: String,
-    value: String,
-    /// UTF-16 (no trailing NUL) of `label` / `value`, precomputed in `tick` so
-    /// `WM_PAINT` reuses them instead of allocating a `Vec<u16>` every paint.
-    label_w: Vec<u16>,
-    value_w: Vec<u16>,
+/// One measured, colored text segment — UTF-16 (no trailing NUL) + device-px
+/// width, precomputed in `tick` so `WM_PAINT` reuses them (no per-paint alloc).
+struct Seg {
+    w16: Vec<u16>,
     color: COLORREF,
+    width: i32,
+}
+
+/// One category GROUP, OSD-plate style: a single themed category label (e.g.
+/// "CPU") followed by that category's value segments (e.g. "26.7%", "63°C",
+/// "5.5GHz"). Replaces the old per-metric label repetition.
+struct Group {
+    label: Seg,
+    values: Vec<Seg>,
+    /// label.width + Σ(inner_space + value.width) — the group's drawn width.
+    width: i32,
+}
+
+/// OSD category index (matches osdPalette.ts order fps,cpu,gpu,mem,disk,net) →
+/// the per-theme color array pushed from the frontend.
+const CAT_CPU: usize = 1;
+const CAT_GPU: usize = 2;
+
+/// Map a metric key to its (category index, display label). The category label
+/// is shown once per group (OSD-plate style); the index selects the theme color.
+fn cat_of(key: &str) -> (usize, &'static str) {
+    match key.split('.').next().unwrap_or("") {
+        "fps" => (0, "FPS"),
+        "cpu" => (CAT_CPU, "CPU"),
+        "gpu" => (CAT_GPU, "GPU"),
+        "mem" => (3, "RAM"),
+        "disk" => (4, "DISK"),
+        "net" => (5, "NET"),
+        _ => (CAT_CPU, "CPU"),
+    }
 }
 
 /// Taskbar-monitor config pushed from the frontend (the tb* OSD store fields).
@@ -124,6 +150,9 @@ struct TbConfig {
     safe: COLORREF,
     warn: COLORREF,
     crit: COLORREF,
+    /// Per-category OSD THEME colors (osdPalette.ts order fps,cpu,gpu,mem,disk,net),
+    /// pushed from the frontend so category labels inherit the active OSD theme.
+    theme: [COLORREF; 6],
     /// Load-% / temperature warn+crit thresholds (port of the frontend stateOf).
     warn_load: f64,
     crit_load: f64,
@@ -154,6 +183,9 @@ impl Default for TbConfig {
             safe: rgb(0x00, 0x80, 0x40),
             warn: rgb(0xB5, 0x75, 0x00),
             crit: rgb(0xC0, 0x30, 0x30),
+            // Neutral light-grey until the frontend pushes the real OSD theme
+            // colors (it does so on mount + on every theme change).
+            theme: [rgb(0xE6, 0xE6, 0xE6); 6],
             warn_load: 60.0,
             crit_load: 85.0,
             warn_temp: 50.0,
@@ -226,6 +258,12 @@ pub fn tbmon_config(
     safe: String,
     warn: String,
     crit: String,
+    theme_fps: String,
+    theme_cpu: String,
+    theme_gpu: String,
+    theme_mem: String,
+    theme_disk: String,
+    theme_net: String,
     warn_load: f64,
     crit_load: f64,
     warn_temp: f64,
@@ -254,6 +292,14 @@ pub fn tbmon_config(
     cfg.safe = parse_color(&safe, d.safe);
     cfg.warn = parse_color(&warn, d.warn);
     cfg.crit = parse_color(&crit, d.crit);
+    cfg.theme = [
+        parse_color(&theme_fps, d.theme[0]),
+        parse_color(&theme_cpu, d.theme[1]),
+        parse_color(&theme_gpu, d.theme[2]),
+        parse_color(&theme_mem, d.theme[3]),
+        parse_color(&theme_disk, d.theme[4]),
+        parse_color(&theme_net, d.theme[5]),
+    ];
     cfg.warn_load = warn_load;
     cfg.crit_load = crit_load;
     cfg.warn_temp = warn_temp;
@@ -279,6 +325,7 @@ struct TickCfg {
     safe: COLORREF,
     warn: COLORREF,
     crit: COLORREF,
+    theme: [COLORREF; 6],
     warn_load: f64,
     crit_load: f64,
     warn_temp: f64,
@@ -310,6 +357,7 @@ impl TickCfg {
             safe: cfg.safe,
             warn: cfg.warn,
             crit: cfg.crit,
+            theme: cfg.theme,
             warn_load: cfg.warn_load,
             crit_load: cfg.crit_load,
             warn_temp: cfg.warn_temp,
@@ -503,17 +551,13 @@ struct RenderState {
     font_key: (i32, bool, u32),
     /// The bg the cached brush + color-key were set for.
     brush_key: COLORREF,
-    cells: Vec<Cell>,
     cfg: TickCfg,
-    /// Number of columns and rows in the grid (rows = 1 or 2).
-    rows: i32,
-    cols: i32,
-    /// Column width (the widest column) and the per-row height, in device px.
-    col_w: i32,
+    /// The laid-out rows (1 or 2): each row is a sequence of category groups,
+    /// already measured/colored, ready for `WM_PAINT`. CPU anchors row 0, GPU
+    /// anchors row 1, remaining categories balance the two rows' widths.
+    rows_layout: Vec<Vec<Group>>,
+    /// Per-row height in device px (the tallest measured segment).
     row_h: i32,
-    /// Per-cell measured (label_w, value_w) so paint can place the value after
-    /// the label without re-measuring.
-    cell_dims: Vec<(i32, i32)>,
 }
 
 impl Drop for RenderState {
@@ -639,68 +683,119 @@ unsafe fn tick() {
             rebuild_brush(rs, cfg.bg);
         }
 
-        // Build the cells from the live readings.
+        // Build category GROUPS from the live readings (OSD-plate style: one
+        // themed category label, then that category's values), measured with the
+        // cached font in a window DC. Category labels inherit the active OSD theme
+        // color; values are white (or threshold-colored when `colors_enabled`).
         let readings = Readings::read();
-        let mut cells: Vec<Cell> = Vec::new();
-        for key in &cfg.metrics {
-            if let Some((label, value)) = readings.cell_text(key) {
-                let label_w = label.encode_utf16().collect();
-                let value_w = value.encode_utf16().collect();
-                cells.push(Cell {
-                    label: label.to_string(),
-                    value,
-                    label_w,
-                    value_w,
-                    color: readings.color_of(key, &cfg),
-                });
-            }
-        }
+        let white = rgb(0xF2, 0xF2, 0xF2);
+        let inner = cfg.inner_space.max(0);
+        let item = cfg.item_space.max(0);
+        let pad = cfg.padding.max(0);
 
-        // Nothing to show — hide rather than dock an empty plate.
-        if cells.is_empty() {
-            let _ = ShowWindow(rs.hwnd, SW_HIDE);
-            rs.cells = cells;
-            rs.cfg = cfg;
-            return;
-        }
-
-        // Measure every cell with the cached font in a window DC.
         let hdc = GetDC(Some(rs.hwnd));
         let old = SelectObject(hdc, rs.font.into());
-        let mut cell_dims: Vec<(i32, i32)> = Vec::with_capacity(cells.len());
-        let mut max_cell_w = 1;
-        let mut max_cell_h = 1;
-        let inner = cfg.inner_space.max(0);
-        for c in &cells {
-            let (lw, lh) = measure(hdc, &c.label);
-            let (vw, vh) = measure(hdc, &c.value);
-            let w = lw + inner + vw;
-            let h = lh.max(vh);
-            cell_dims.push((lw, vw));
-            max_cell_w = max_cell_w.max(w);
-            max_cell_h = max_cell_h.max(h);
+        let mut row_h = 1;
+        // Groups in first-seen category order; values appended within a category.
+        let mut groups: Vec<(usize, Group)> = Vec::new();
+        for key in &cfg.metrics {
+            let Some((mini_label, value)) = readings.cell_text(key) else {
+                continue;
+            };
+            let (cat, cat_label) = cat_of(key);
+            // net keeps its ▲/▼ glyph inline with the rate (e.g. "▲12KB/s").
+            let disp = if key.starts_with("net.") {
+                format!("{mini_label}{value}")
+            } else {
+                value
+            };
+            let vcolor = if cfg.colors_enabled {
+                readings.color_of(key, &cfg)
+            } else {
+                white
+            };
+            let (vw, vh) = measure(hdc, &disp);
+            row_h = row_h.max(vh);
+            let vseg = Seg {
+                w16: disp.encode_utf16().collect(),
+                color: vcolor,
+                width: vw,
+            };
+            if let Some((_, g)) = groups.iter_mut().find(|(c, _)| *c == cat) {
+                g.values.push(vseg);
+            } else {
+                let (lw, lh) = measure(hdc, cat_label);
+                row_h = row_h.max(lh);
+                let label = Seg {
+                    w16: cat_label.encode_utf16().collect(),
+                    color: cfg.theme[cat],
+                    width: lw,
+                };
+                groups.push((cat, Group { label, values: vec![vseg], width: 0 }));
+            }
         }
         SelectObject(hdc, old);
         let _ = ReleaseDC(Some(rs.hwnd), hdc);
 
-        // Grid: 2 rows by default (columns of 2, filled column-major), 1 row when
-        // single_line. Columns flow horizontally.
-        let rows: i32 = if cfg.single_line { 1 } else { 2 };
-        let n = cells.len() as i32;
-        let cols = (n + rows - 1) / rows;
-        let col_w = max_cell_w;
-        let row_h = max_cell_h;
+        // Nothing to show — hide rather than dock an empty plate.
+        if groups.is_empty() {
+            let _ = ShowWindow(rs.hwnd, SW_HIDE);
+            rs.rows_layout = Vec::new();
+            rs.cfg = cfg;
+            return;
+        }
 
-        let pad = cfg.padding.max(0);
-        let item = cfg.item_space.max(0);
-        let plate_w = pad * 2 + cols * col_w + (cols - 1).max(0) * item;
-        let plate_h = pad * 2 + rows * row_h + (rows - 1).max(0) * inner;
+        // Finalize each group's drawn width (label + inner-spaced values).
+        for (_, g) in groups.iter_mut() {
+            g.width = g.label.width + g.values.iter().map(|v| inner + v.width).sum::<i32>();
+        }
 
-        rs.cells = cells;
-        rs.cell_dims = cell_dims;
-        rs.rows = rows;
-        rs.cols = cols;
-        rs.col_w = col_w;
+        // Distribute groups across rows. CPU anchors row 0, GPU anchors row 1, and
+        // every other category is appended to whichever row is currently narrower,
+        // so the two rows stay roughly equal length. `single_line` → one row.
+        let rows_layout: Vec<Vec<Group>> = if cfg.single_line {
+            vec![groups.into_iter().map(|(_, g)| g).collect()]
+        } else {
+            let (mut r0, mut r1): (Vec<Group>, Vec<Group>) = (Vec::new(), Vec::new());
+            let (mut w0, mut w1) = (0i32, 0i32);
+            let mut rest: Vec<Group> = Vec::new();
+            for (cat, g) in groups {
+                if cat == CAT_CPU && r0.is_empty() {
+                    w0 += g.width;
+                    r0.push(g);
+                } else if cat == CAT_GPU && r1.is_empty() {
+                    w1 += g.width;
+                    r1.push(g);
+                } else {
+                    rest.push(g);
+                }
+            }
+            for g in rest {
+                if w0 <= w1 {
+                    w0 += g.width + item;
+                    r0.push(g);
+                } else {
+                    w1 += g.width + item;
+                    r1.push(g);
+                }
+            }
+            match (r0.is_empty(), r1.is_empty()) {
+                (false, false) => vec![r0, r1],
+                (true, false) => vec![r1],
+                _ => vec![r0],
+            }
+        };
+
+        let nrows = rows_layout.len() as i32;
+        let row_w = rows_layout
+            .iter()
+            .map(|gs| gs.iter().map(|g| g.width).sum::<i32>() + (gs.len() as i32 - 1).max(0) * item)
+            .max()
+            .unwrap_or(0);
+        let plate_w = pad * 2 + row_w;
+        let plate_h = pad * 2 + nrows * row_h + (nrows - 1).max(0) * inner;
+
+        rs.rows_layout = rows_layout;
         rs.row_h = row_h;
         rs.cfg = cfg;
 
@@ -724,6 +819,38 @@ unsafe fn tick() {
         let _ = ShowWindow(rs.hwnd, SW_SHOWNOACTIVATE);
         let _ = InvalidateRect(Some(rs.hwnd), None, true);
     });
+}
+
+/// `EnumChildWindows` callback: when it reaches the `TrayNotifyWnd` (system
+/// notification area), write its left edge to the `*mut i32` passed via `lparam`
+/// and stop. Runs on the render thread (called synchronously from `dock_xy`).
+unsafe extern "system" fn find_tray_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let mut buf = [0u16; 32];
+    let n = GetClassNameW(hwnd, &mut buf);
+    if n > 0 && String::from_utf16_lossy(&buf[..n as usize]) == "TrayNotifyWnd" {
+        let mut r = RECT::default();
+        if GetWindowRect(hwnd, &mut r).is_ok() {
+            *(lparam.0 as *mut i32) = r.left;
+            return BOOL(0); // found → stop enumerating
+        }
+    }
+    BOOL(1) // keep going
+}
+
+/// Left edge (physical px) of the system notification area (`TrayNotifyWnd`), so
+/// a right-docked plate can sit just LEFT of the clock/tray icons instead of
+/// overlapping them. On Win11 24H2 `TrayNotifyWnd` is a NESTED descendant of
+/// `Shell_TrayWnd` (not an immediate child), so we recurse via `EnumChildWindows`
+/// rather than `FindWindowEx` (which returns 0). `None` if it can't be located.
+unsafe fn tray_notify_left() -> Option<i32> {
+    let tray = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()).ok()?;
+    let mut left: i32 = i32::MIN;
+    let _ = EnumChildWindows(
+        Some(tray),
+        Some(find_tray_cb),
+        LPARAM(&mut left as *mut i32 as isize),
+    );
+    (left != i32::MIN).then_some(left)
 }
 
 /// Compute the top-left device-pixel position for a `plate_w` × `plate_h` plate
@@ -767,6 +894,13 @@ unsafe fn dock_xy(
     let margin: i32 = 8;
     let end_gap = margin.saturating_add(off_dev);
 
+    // Right-dock boundary for a horizontal bar: the LEFT edge of the notification
+    // area (clock/tray icons) so the plate never overlaps it; fall back to the
+    // bar's right edge when the tray can't be located.
+    let right_bound = tray_notify_left()
+        .filter(|&l| l > bar.left + 8 && l <= bar.right)
+        .unwrap_or(bar.right);
+
     if edge == ABE_LEFT || edge == ABE_RIGHT {
         // Vertical (side) taskbar: dock the plate at the top or bottom end of the
         // bar, centered horizontally across its width. `bar_right` → bottom end.
@@ -785,7 +919,7 @@ unsafe fn dock_xy(
         // vertically across its height.
         let y = bar.top + ((bh - plate_h).max(0)) / 2;
         let x = if bar_right {
-            bar.right.saturating_sub(plate_w).saturating_sub(end_gap)
+            right_bound.saturating_sub(plate_w).saturating_sub(end_gap)
         } else {
             bar.left.saturating_add(end_gap)
         };
@@ -806,7 +940,7 @@ unsafe fn dock_xy(
     } else {
         let y = bar.top + ((bh - plate_h).max(0)) / 2;
         let x = if bar_right {
-            bar.right.saturating_sub(plate_w).saturating_sub(end_gap)
+            right_bound.saturating_sub(plate_w).saturating_sub(end_gap)
         } else {
             bar.left.saturating_add(end_gap)
         };
@@ -834,23 +968,25 @@ unsafe fn paint(rs: &RenderState) {
     let item = rs.cfg.item_space.max(0);
     let inner = rs.cfg.inner_space.max(0);
 
-    for (i, cell) in rs.cells.iter().enumerate() {
-        // Column-major fill: cell i sits at column i/rows, row i%rows.
-        let col = (i as i32) / rs.rows;
-        let row = (i as i32) % rs.rows;
-        let cx = pad + col * (rs.col_w + item);
-        let cy = pad + row * (rs.row_h + inner);
-
-        let (label_w, _vw) = rs.cell_dims.get(i).copied().unwrap_or((0, 0));
-
-        // Label (white / configured label color). Reuse the cached UTF-16 buffer
-        // built in `tick` — no per-paint allocation.
-        SetTextColor(hdc, rs.cfg.label);
-        let _ = TextOutW(hdc, cx, cy, &cell.label_w);
-
-        // Value (threshold-colored), placed after the label + inner gap.
-        SetTextColor(hdc, cell.color);
-        let _ = TextOutW(hdc, cx + label_w + inner, cy, &cell.value_w);
+    for (r, groups) in rs.rows_layout.iter().enumerate() {
+        let cy = pad + r as i32 * (rs.row_h + inner);
+        let mut cx = pad;
+        for g in groups {
+            // Category label in its OSD-theme color. Reuse the cached UTF-16
+            // buffer built in `tick` — no per-paint allocation.
+            SetTextColor(hdc, g.label.color);
+            let _ = TextOutW(hdc, cx, cy, &g.label.w16);
+            cx += g.label.width;
+            // The category's values (white, or threshold-colored), each after an
+            // inner gap.
+            for v in &g.values {
+                cx += inner;
+                SetTextColor(hdc, v.color);
+                let _ = TextOutW(hdc, cx, cy, &v.w16);
+                cx += v.width;
+            }
+            cx += item; // gap before the next group
+        }
     }
 
     SelectObject(hdc, old);
@@ -957,13 +1093,9 @@ pub fn start(app: AppHandle) {
                     bg_brush: HBRUSH::default(),
                     font_key: (0, false, 0),
                     brush_key: COLORREF(0xFFFF_FFFF),
-                    cells: Vec::new(),
                     cfg: TickCfg::read(),
-                    rows: 2,
-                    cols: 0,
-                    col_w: 0,
+                    rows_layout: Vec::new(),
                     row_h: 0,
-                    cell_dims: Vec::new(),
                 });
             });
 

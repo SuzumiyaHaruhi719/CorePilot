@@ -5,7 +5,7 @@ import { NavRail } from "./components/shell/NavRail";
 import { StatusBar } from "./components/shell/StatusBar";
 import { TitleBar } from "./components/shell/TitleBar";
 import { api, type Overview } from "./lib/ipc";
-import { osdRowColorsRgba } from "./lib/osdPalette";
+import { osdCategoryColorFor, osdRowColorsRgba } from "./lib/osdPalette";
 import { useSettings } from "./store/settings";
 import { useAffinityEnforcer } from "./hooks/useAffinityEnforcer";
 import { useOsdHotkey } from "./hooks/useOsdHotkey";
@@ -179,6 +179,15 @@ function App() {
         safe: s.tbSafe ?? TASKBAR_DEFAULTS.tbSafe,
         warn: s.tbWarn ?? TASKBAR_DEFAULTS.tbWarn,
         crit: s.tbCrit ?? TASKBAR_DEFAULTS.tbCrit,
+        // Per-category OSD theme colors so the native plate's category labels
+        // inherit the active theme (re-pushed when `themeStyle` changes — it's in
+        // this effect's deps). Computed from the explicit theme, not the DOM.
+        themeFps: osdCategoryColorFor(themeStyle, "fps"),
+        themeCpu: osdCategoryColorFor(themeStyle, "cpu"),
+        themeGpu: osdCategoryColorFor(themeStyle, "gpu"),
+        themeMem: osdCategoryColorFor(themeStyle, "mem"),
+        themeDisk: osdCategoryColorFor(themeStyle, "disk"),
+        themeNet: osdCategoryColorFor(themeStyle, "net"),
         warnLoad: s.tbWarnLoad ?? TASKBAR_DEFAULTS.tbWarnLoad,
         critLoad: s.tbCritLoad ?? TASKBAR_DEFAULTS.tbCritLoad,
         warnTemp: s.tbWarnTemp ?? TASKBAR_DEFAULTS.tbWarnTemp,
@@ -202,7 +211,9 @@ function App() {
       unsub();
       unhydrate?.();
     };
-  }, []);
+    // themeStyle in deps: re-push so the native plate's category labels track the
+    // active OSD theme color when the user switches themes.
+  }, [themeStyle]);
 
   // Mirror the OSD store + target lists to the overlay webview WHENEVER they
   // change. Previously only the OSD config tab emitted these events, so the

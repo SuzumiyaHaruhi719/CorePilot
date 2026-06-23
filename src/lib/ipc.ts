@@ -801,6 +801,12 @@ export const api = {
     safe: string;
     warn: string;
     crit: string;
+    themeFps: string;
+    themeCpu: string;
+    themeGpu: string;
+    themeMem: string;
+    themeDisk: string;
+    themeNet: string;
     warnLoad: number;
     critLoad: number;
     warnTemp: number;

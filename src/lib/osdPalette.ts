@@ -44,6 +44,13 @@ export function osdPlateAccent(themeStyle?: ThemeStyle): string {
   return OSD_PALETTE[themeStyle ?? currentThemeStyle()].fps;
 }
 
+/** Themed category color for an EXPLICIT theme (no DOM read) — used to push the
+ *  per-category palette to the native taskbar monitor on theme change, where the
+ *  caller already has the reactive `themeStyle` and DOM-read ordering is unsafe. */
+export function osdCategoryColorFor(themeStyle: ThemeStyle, cat: OsdCategory): string {
+  return (OSD_PALETTE[themeStyle] ?? OSD_PALETTE.graphite)[cat];
+}
+
 /** Pack `#rrggbb` into a `0xRRGGBBAA` u32 (fully opaque) for the native overlay. */
 function hexToRgba(hex: string): number {
   const h = hex.replace("#", "");
