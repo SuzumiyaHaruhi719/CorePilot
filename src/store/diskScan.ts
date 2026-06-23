@@ -63,7 +63,10 @@ function freshView(scanId: string, rootLabel: string, usedBytes = 0): PerDiskVie
     metric: "alloc",
     colorMode: "cushion",
     paused: false,
-    lod: 3,
+    // Densest by default (no min-bytes floor) so the treemap shows a full-disk
+    // overview like SpaceSniffer; the client pixel-LOD collapses sub-pixel rects,
+    // and the backend caps the slice, so "show everything" stays bounded.
+    lod: 1,
     stack: [{ path: null, label: rootLabel }],
   };
 }
