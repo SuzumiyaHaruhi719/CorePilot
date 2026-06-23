@@ -1000,24 +1000,11 @@ function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
 /** The metric keys the native taskbar plate (taskbar_mon.rs) can render, in a
  *  sensible default offer order. The picker below offers ONLY these — writing the
  *  taskbar monitor's OWN `tbMetrics` list, independent of the OSD `metrics`. */
-const TB_METRIC_KEYS = [
-  "cpu.util",
-  "cpu.temp",
-  "cpu.freq",
-  "mem.used",
-  "mem.util",
-  "gpu.util",
-  "gpu.temp",
-  "gpu.power",
-  "net.up",
-  "net.down",
-] as const;
-
-/** Human labels/categories for the taskbar-supported keys, reusing OSD_METRICS
- *  (the catalog the corner OSD picker uses) so wording stays consistent. */
-const TB_METRIC_DEFS = TB_METRIC_KEYS.map(
-  (key) => OSD_METRICS.find((m) => m.key === key)!,
-);
+/** 1:1 with the desktop OSD content picker — offer EVERY OSD metric so the
+ *  taskbar's content options match the regular monitor exactly. The native plate
+ *  formats those that have desktop data; game-only metrics (fps / frametime)
+ *  simply render nothing on the desktop taskbar, the same as the OSD off-game. */
+const TB_METRIC_DEFS = OSD_METRICS;
 
 /** Group the taskbar-supported metrics by category, in OSD_CATEGORIES order, so
  *  the picker reads like the OSD content picker (CPU / GPU / 内存 / 网络). */
@@ -1070,7 +1057,7 @@ function TaskbarMonitorPanel() {
     const next = cur.includes(key)
       ? cur.filter((k) => k !== key)
       : // Insert in the canonical offer order so adding keeps pairs tidy.
-        TB_METRIC_KEYS.filter((k) => cur.includes(k) || k === key);
+        TB_METRIC_DEFS.map((m) => m.key).filter((k) => cur.includes(k) || k === key);
     update({ tbMetrics: [...next] });
   }
   function moveTbMetric(key: string, dir: -1 | 1) {
