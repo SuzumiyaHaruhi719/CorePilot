@@ -665,11 +665,12 @@ const NODE_CAP: u64 = 20_000_000;
 const TOP_N_PER_DIR: usize = 32;
 /// Progress-event throttle floor (spec §2.8 — ~4–10 Hz).
 const PROGRESS_THROTTLE: Duration = Duration::from_millis(200);
-/// Snapshot publish cadence during scanning (spec §2.8 — ~2–4 Hz). Each tick
-/// copies the arena under a SHORT lock, rolls up the copy OUTSIDE the lock, and
-/// pointer-swaps it in — the freeze-proof invariant (no roll-up under the lock,
-/// no lock across the swap).
-const PUBLISH_THROTTLE: Duration = Duration::from_millis(400);
+/// Snapshot publish cadence during scanning (~5 Hz). Each tick copies the arena
+/// under a SHORT lock, rolls up the copy OUTSIDE the lock, and pointer-swaps it
+/// in — the freeze-proof invariant (no roll-up under the lock, no lock across the
+/// swap). Tightened from 400ms so folders appear in the treemap noticeably faster
+/// during a scan (closer to SpaceSniffer's live growth).
+const PUBLISH_THROTTLE: Duration = Duration::from_millis(200);
 /// Process-wide walker-permit ceiling (spec §2.10 / owner decision 4). A flat
 /// global cap on the TOTAL number of directories being enumerated concurrently
 /// across ALL active scans, so N concurrent HDD scans can't thrash the I/O
