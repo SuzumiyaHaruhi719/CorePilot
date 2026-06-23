@@ -576,6 +576,80 @@ export interface ScanProgress {
   error: string | null;
 }
 
+/**
+ * One node of a bounded `disk_tree` LOD slice. Mirrors the Rust
+ * `disk_scan::TreeNode` (camelCase). Indices (`id`/`parent`) are LOCAL to the
+ * slice (NOT arena NodeIds); `nodes[0]` is the focus root (`parent === id`).
+ * Byte sizes are plain numbers (a disk can't hold > 2^53 bytes ≈ 9 PB), matching
+ * the `ScanProgress` precedent. The Phase 3 treemap layout re-nests these via
+ * `parent` + size-desc sibling order.
+ */
+export interface TreeNode {
+  /** Local index within `TreeView.nodes` (0 === the focus root). */
+  id: number;
+  /** Local index of the parent within this slice (self for the focus root). */
+  parent: number;
+  /** Display name (path component or synthetic aggregate label). */
+  name: string;
+  logicalSize: number;
+  allocSize: number;
+  fileCount: number;
+  /** Bit flags: IS_DIR(1) | REPARSE(2) | DENIED(4) | HIDDEN(8) | SYSTEM(16) | HARDLINK(32) | AGGREGATED(64). */
+  flags: number;
+  /** True when this directory has children the slice did not expand (LOD
+   *  collapsed by depth/min-bytes/max-nodes) → render as a drillable container. */
+  hasMore: boolean;
+  /** Absolute path — present for the focus root + directory containers (so a
+   *  drill can re-`diskTree` on it); null for ordinary leaves. */
+  path: string | null;
+}
+
+/**
+ * A bounded LOD slice of a scan tree for one focused container. Mirrors the Rust
+ * `disk_scan::TreeView` (camelCase) — the workhorse the treemap pulls via
+ * `diskTree`. The backend does the LOD slicing so a huge tree never crosses IPC
+ * whole; re-pull on a new `generation` (from the progress event), and drill by
+ * re-calling with a child's `path` as `focusPath`.
+ */
+export interface TreeView {
+  scanId: string;
+  /** Snapshot generation this slice came from (re-pull when it advances). */
+  generation: number;
+  /** Absolute path of the focus root (the disk root when `focusPath` was null). */
+  focusPath: string;
+  /** Flat slice nodes; `nodes[0]` is the focus root. */
+  nodes: TreeNode[];
+  /** True when LOD collapsed at least one subtree (some `hasMore` is set). */
+  truncated: boolean;
+}
+
+/**
+ * One row of the "what's eating my space" flat list (`diskTopItems`). Mirrors the
+ * Rust `disk_scan::ItemRow` (camelCase). Top-N largest items in the focused
+ * (sub)tree by allocation size.
+ */
+export interface ItemRow {
+  /** Absolute path of the item. */
+  path: string;
+  /** Leaf/aggregate name (last path component). */
+  name: string;
+  logicalSize: number;
+  allocSize: number;
+  fileCount: number;
+  flags: number;
+}
+
+/** Disk-Analyzer node flag bits (mirror `disk_scan.rs` FLAG_* constants). */
+export const DISK_FLAG = {
+  isDir: 1 << 0,
+  reparse: 1 << 1,
+  denied: 1 << 2,
+  hidden: 1 << 3,
+  system: 1 << 4,
+  hardlink: 1 << 5,
+  aggregated: 1 << 6,
+} as const;
+
 export const api = {
   getOverview: () => invoke<Overview>("get_overview"),
   /** Enumerate fixed + removable volumes for the Disk Analyzer picker (Zone A). */
@@ -586,6 +660,29 @@ export const api = {
   diskScanCancel: (scanId: string) => invoke<void>("disk_scan_cancel", { scanId }),
   /** Cold read of a scan's progress atomics (the event is the live channel). O(1). */
   diskScanStatus: (scanId: string) => invoke<ScanProgress>("disk_scan_status", { scanId }),
+  /**
+   * Pull a bounded LOD slice of a scan's published tree (the treemap workhorse).
+   * Backend clones the snapshot `Arc` + slices it off the IPC thread, so a huge
+   * tree never crosses whole. `focusPath` null/empty → the disk root; pass a
+   * child's `path` to drill. `depthLimit`/`minBytes`/`maxNodes` are the LOD knobs
+   * (omit to use backend defaults: depth 4, all sizes, 4096 nodes).
+   */
+  diskTree: (
+    scanId: string,
+    focusPath?: string | null,
+    opts?: { depthLimit?: number; minBytes?: number; maxNodes?: number },
+  ) =>
+    invoke<TreeView>("disk_tree", {
+      scanId,
+      focusPath: focusPath ?? null,
+      depthLimit: opts?.depthLimit ?? null,
+      minBytes: opts?.minBytes ?? null,
+      maxNodes: opts?.maxNodes ?? null,
+    }),
+  /** Top-N largest items in the focused (sub)tree by alloc size (the "what's
+   *  eating my space" flat list). `focusPath` null → whole disk; `n` defaults to 20. */
+  diskTopItems: (scanId: string, focusPath?: string | null, n?: number) =>
+    invoke<ItemRow[]>("disk_top_items", { scanId, focusPath: focusPath ?? null, n: n ?? null }),
   getTopology: async (): Promise<CpuTopology> => {
     const raw = await invoke<RawCpuTopology>("get_topology");
     return {

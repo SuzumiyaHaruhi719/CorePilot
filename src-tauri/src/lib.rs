@@ -254,6 +254,8 @@ pub fn run() {
             disk_scan::disk_scan_start,
             disk_scan::disk_scan_cancel,
             disk_scan::disk_scan_status,
+            disk_scan::disk_tree,
+            disk_scan::disk_top_items,
             commands::get_power_plan,
             commands::set_power_plan,
             commands::list_services,

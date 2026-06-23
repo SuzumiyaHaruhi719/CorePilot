@@ -11,9 +11,14 @@
 //! node cap with a truncation flag, the `disk_scan_start` / `disk_scan_cancel` /
 //! `disk_scan_status` commands, and the throttled `disk-scan://progress` event.
 //!
-//! Phase 2 adds incremental size roll-up + the LOD-sliced `disk_tree` /
-//! `disk_top_items` commands; this phase publishes one `Arc<DiskTree>` snapshot on
-//! completion so the registry shape is already in place.
+//! PHASE 2 (Snapshot + tree IPC) adds the periodic `Arc<DiskTree>` pointer-swap
+//! publisher (a scoped thread copying the arena under a short lock, rolling up the
+//! COPY outside the lock, and swapping it in at ~2–4 Hz so the frontend can pull a
+//! growing tree mid-scan), plus the two LOD commands `disk_tree` (depth /
+//! min-bytes / max-nodes-bounded slice — the treemap workhorse) and
+//! `disk_top_items` (the "what's eating my space" flat list). Both clone the
+//! published snapshot `Arc` (O(1)) and slice/walk the immutable copy on the
+//! blocking pool, so the IPC router never stalls.
 //!
 //! CRITICAL-PATH INVARIANT (mirrors sampler.rs / telemetry.rs): every Tauri
 //! command stays O(1) — clone an `Arc`, read/flip an atomic, or insert a handle —
@@ -153,6 +158,282 @@ impl DiskTree {
             }
         }
         out
+    }
+}
+
+// =============================================================================
+// LOD-sliced tree IPC (spec §2.9 / §3.3) — `disk_tree` / `disk_top_items`.
+// =============================================================================
+
+/// One node in a bounded `TreeView` slice. Flat (the layout module re-nests via
+/// `parent` / sibling order). Indices are LOCAL to the slice, NOT arena NodeIds,
+/// so the frontend never needs the full arena. `path` is filled only for the
+/// focus root + container nodes the UI may drill into (cheap; not every leaf).
+/// Serialized camelCase. Byte sizes are plain numbers (a disk can't hold > 2^53
+/// bytes ≈ 9 PB), matching the `ScanProgress` precedent.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeNode {
+    /// Local index of this node within `TreeView::nodes` (0 == the focus root).
+    pub id: u32,
+    /// Local index of the parent within this slice (self for the focus root).
+    pub parent: u32,
+    /// Display name (interned component, or the synthetic aggregate label).
+    pub name: String,
+    pub logical_size: u64,
+    pub alloc_size: u64,
+    pub file_count: u32,
+    /// Bit flags (IS_DIR | REPARSE | DENIED | HIDDEN | SYSTEM | HARDLINK | AGGREGATED).
+    pub flags: u8,
+    /// True when this node is a directory that HAS children the slice did not
+    /// expand (depth/min_bytes/max_nodes LOD collapsed it) — the UI shows it as a
+    /// drillable container even though no children crossed IPC.
+    pub has_more: bool,
+    /// Absolute path — present for the focus root + directory containers (so a
+    /// drill can re-`disk_tree` on it); `None` for ordinary leaves.
+    pub path: Option<String>,
+}
+
+/// A bounded LOD slice of a scan tree for one focused container (spec §2.9 /
+/// §3.3). `disk_tree` does the server-side LOD so a huge tree never crosses IPC
+/// whole. `nodes[0]` is the focus root; children follow in size-desc order.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeView {
+    /// The scan this slice came from.
+    pub scan_id: ScanId,
+    /// Snapshot generation this slice was sliced from (the frontend re-pulls when
+    /// the `disk-scan://progress` generation advances).
+    pub generation: u64,
+    /// Absolute path of the focus root (echoes the request's `focus_path`, or the
+    /// disk root when `None` was requested).
+    pub focus_path: String,
+    /// Flat slice nodes; `nodes[0]` is the focus root.
+    pub nodes: Vec<TreeNode>,
+    /// True when LOD collapsed at least one subtree (some `has_more` is set).
+    pub truncated: bool,
+}
+
+/// One row of the "what's eating my space" flat list (`disk_top_items`, spec
+/// §2.9 / §4.6). The top-N largest items in the focused (sub)tree by alloc size.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemRow {
+    /// Absolute path of the item.
+    pub path: String,
+    /// Leaf/aggregate name (last path component).
+    pub name: String,
+    pub logical_size: u64,
+    pub alloc_size: u64,
+    pub file_count: u32,
+    pub flags: u8,
+}
+
+impl DiskTree {
+    /// Resolve a `focus_path` to an arena NodeId. `None` (or the display root)
+    /// resolves to the root (node 0). A case-insensitive walk of the parent→child
+    /// links — only the handful of nodes the UI drills into pay this. Returns
+    /// `None` when the path doesn't resolve within this tree.
+    pub fn node_for_path(&self, focus_path: Option<&str>) -> Option<u32> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+        let Some(raw) = focus_path else {
+            return Some(0);
+        };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Some(0);
+        }
+        // The root's display name (e.g. "C:\\") prefixes every absolute path.
+        let root_name: &str = &self.names[self.nodes[0].name_id as usize];
+        let norm = raw.trim_end_matches('\\');
+        let root_norm = root_name.trim_end_matches('\\');
+        if norm.eq_ignore_ascii_case(root_norm) {
+            return Some(0);
+        }
+        // Strip the root prefix, then walk the remaining components child-by-child.
+        let rest = if norm.len() > root_norm.len()
+            && norm[..root_norm.len()].eq_ignore_ascii_case(root_norm)
+        {
+            norm[root_norm.len()..].trim_start_matches('\\')
+        } else {
+            // Not under this root.
+            return None;
+        };
+        let mut cur = 0u32;
+        for comp in rest.split('\\').filter(|c| !c.is_empty()) {
+            let mut child = self.nodes[cur as usize].first_child;
+            let mut found: Option<u32> = None;
+            while child != SENTINEL {
+                let n = &self.nodes[child as usize];
+                let cname: &str = &self.names[n.name_id as usize];
+                if cname.eq_ignore_ascii_case(comp) {
+                    found = Some(child);
+                    break;
+                }
+                child = n.next_sibling;
+            }
+            cur = found?;
+        }
+        Some(cur)
+    }
+
+    /// Build a bounded LOD slice rooted at `focus` (spec §2.9 / §3.3). BFS by
+    /// alloc size, honoring `depth_limit` (levels below the focus), `min_bytes`
+    /// (skip children whose alloc is below it — collapses long tails), and
+    /// `max_nodes` (hard ceiling on slice size). A directory with un-expanded
+    /// children is flagged `has_more` so the UI renders it as drillable.
+    pub fn slice(
+        &self,
+        scan_id: &str,
+        generation: u64,
+        focus: u32,
+        depth_limit: u8,
+        min_bytes: u64,
+        max_nodes: u32,
+    ) -> TreeView {
+        let focus_path = self.path_of(focus);
+        let cap = max_nodes.max(1) as usize;
+        let mut nodes: Vec<TreeNode> = Vec::new();
+        let mut truncated = false;
+
+        // (arena_id, local_parent, depth). Process largest-first so the cap keeps
+        // the biggest, most relevant subtrees.
+        let mut queue: std::collections::VecDeque<(u32, u32, u8)> =
+            std::collections::VecDeque::new();
+
+        // Push the focus root (local id 0, parent == self).
+        {
+            let n = &self.nodes[focus as usize];
+            nodes.push(self.make_tree_node(0, 0, n, true, Some(focus_path.clone())));
+            queue.push_back((focus, 0, 0));
+        }
+
+        while let Some((arena_id, local_parent, depth)) = queue.pop_front() {
+            if depth >= depth_limit {
+                // Past the depth budget: mark the parent drillable if it has kids.
+                if self.nodes[arena_id as usize].first_child != SENTINEL {
+                    nodes[local_parent as usize].has_more = true;
+                    truncated = true;
+                }
+                continue;
+            }
+
+            // Collect + size-sort this node's children (desc by alloc).
+            let mut kids: Vec<u32> = Vec::new();
+            let mut child = self.nodes[arena_id as usize].first_child;
+            while child != SENTINEL {
+                kids.push(child);
+                child = self.nodes[child as usize].next_sibling;
+            }
+            kids.sort_unstable_by(|&a, &b| {
+                self.nodes[b as usize]
+                    .alloc_size
+                    .cmp(&self.nodes[a as usize].alloc_size)
+            });
+
+            for kid in kids {
+                let kn = &self.nodes[kid as usize];
+                // min_bytes collapse: a child below the threshold (and any below
+                // it) folds away. Mark the parent drillable so the UI can zoom in.
+                if kn.alloc_size < min_bytes {
+                    nodes[local_parent as usize].has_more = true;
+                    truncated = true;
+                    continue;
+                }
+                if nodes.len() >= cap {
+                    nodes[local_parent as usize].has_more = true;
+                    truncated = true;
+                    break;
+                }
+                let local_id = nodes.len() as u32;
+                let is_dir = kn.is_dir();
+                let path = if is_dir {
+                    Some(self.path_of(kid))
+                } else {
+                    None
+                };
+                nodes.push(self.make_tree_node(local_id, local_parent, kn, false, path));
+                if is_dir && kn.first_child != SENTINEL {
+                    queue.push_back((kid, local_id, depth + 1));
+                }
+            }
+        }
+
+        TreeView {
+            scan_id: scan_id.to_string(),
+            generation,
+            focus_path,
+            nodes,
+            truncated,
+        }
+    }
+
+    /// Construct a `TreeNode` for the slice from an arena node.
+    fn make_tree_node(
+        &self,
+        local_id: u32,
+        local_parent: u32,
+        n: &Node,
+        is_focus: bool,
+        path: Option<String>,
+    ) -> TreeNode {
+        TreeNode {
+            id: local_id,
+            parent: local_parent,
+            name: self.names[n.name_id as usize].to_string(),
+            logical_size: n.logical_size,
+            alloc_size: n.alloc_size,
+            file_count: n.file_count,
+            flags: n.flags,
+            // The focus root with children is always drillable-from; otherwise
+            // `has_more` is set later when the slice can't expand a subtree.
+            has_more: is_focus && n.first_child != SENTINEL,
+            path,
+        }
+    }
+
+    /// Top-N largest direct + descendant items under `focus`, by alloc size
+    /// (spec §2.9 / §4.6 — the "what's eating my space" flat list). Walks the
+    /// whole subtree (cheap relative to the scan; only invoked on demand) and
+    /// keeps the N largest by alloc.
+    pub fn top_items(&self, focus: u32, n: u32) -> Vec<ItemRow> {
+        let want = n.max(1) as usize;
+        // Gather every descendant (excluding the focus root itself).
+        let mut all: Vec<u32> = Vec::new();
+        let mut stack = vec![focus];
+        let mut first = true;
+        while let Some(id) = stack.pop() {
+            if !first {
+                all.push(id);
+            }
+            first = false;
+            let mut child = self.nodes[id as usize].first_child;
+            while child != SENTINEL {
+                stack.push(child);
+                child = self.nodes[child as usize].next_sibling;
+            }
+        }
+        all.sort_unstable_by(|&a, &b| {
+            self.nodes[b as usize]
+                .alloc_size
+                .cmp(&self.nodes[a as usize].alloc_size)
+        });
+        all.into_iter()
+            .take(want)
+            .map(|id| {
+                let nd = &self.nodes[id as usize];
+                ItemRow {
+                    path: self.path_of(id),
+                    name: self.names[nd.name_id as usize].to_string(),
+                    logical_size: nd.logical_size,
+                    alloc_size: nd.alloc_size,
+                    file_count: nd.file_count,
+                    flags: nd.flags,
+                }
+            })
+            .collect()
     }
 }
 
@@ -346,6 +627,11 @@ const NODE_CAP: u64 = 20_000_000;
 const TOP_N_PER_DIR: usize = 32;
 /// Progress-event throttle floor (spec §2.8 — ~4–10 Hz).
 const PROGRESS_THROTTLE: Duration = Duration::from_millis(200);
+/// Snapshot publish cadence during scanning (spec §2.8 — ~2–4 Hz). Each tick
+/// copies the arena under a SHORT lock, rolls up the copy OUTSIDE the lock, and
+/// pointer-swaps it in — the freeze-proof invariant (no roll-up under the lock,
+/// no lock across the swap).
+const PUBLISH_THROTTLE: Duration = Duration::from_millis(400);
 
 // =============================================================================
 // Win32 walk (spec §2.3) — only compiled on Windows.
@@ -1017,6 +1303,20 @@ mod win {
         }
     }
 
+    /// Copy the live arena into an immutable `DiskTree` and roll up subtree sizes
+    /// — the publish step (spec §2.8). The arena `Mutex` is held ONLY for the
+    /// cheap `Vec` clone (no I/O, no roll-up); the O(N) roll-up runs on the COPY
+    /// outside the lock, so a worker never blocks on a slow read path. This is the
+    /// `sampler.rs` "lock only to copy, work on the clone" contract.
+    fn build_snapshot(arena: &Mutex<Arena>) -> DiskTree {
+        let (mut nodes, names) = {
+            let a = arena.lock();
+            (a.nodes.clone(), a.interner.table.clone())
+        };
+        rollup(&mut nodes);
+        DiskTree { nodes, names }
+    }
+
     /// Run the whole scan for one disk on this (already-dedicated) thread. Builds
     /// the arena via a small worker pool, rolls up sizes, publishes one snapshot.
     pub fn run_scan(handle: Arc<ScanHandle>, app: tauri::AppHandle) {
@@ -1085,7 +1385,11 @@ mod win {
                 .ok()
         };
 
-        // Fan out workers on dedicated threads scoped to this scan.
+        // Fan out workers + ONE incremental publisher on dedicated threads scoped
+        // to this scan. The publisher copies the arena under a short lock, rolls
+        // up the copy outside the lock, and pointer-swaps it in at ~2–4 Hz
+        // (spec §2.8) so the frontend can pull a growing tree mid-scan. It exits
+        // when the queue drains (`done`) or cancel is set; the scope then returns.
         std::thread::scope(|s| {
             for w in 0..workers {
                 let queue = &queue;
@@ -1097,17 +1401,33 @@ mod win {
                     .spawn_scoped(s, move || worker(queue, cv, arena, handle, cluster))
                     .ok();
             }
+            {
+                let queue = &queue;
+                let arena = &arena;
+                let handle = &handle;
+                std::thread::Builder::new()
+                    .name(format!("corepilot-scan-{}-pub", handle.scan_id))
+                    .spawn_scoped(s, move || loop {
+                        std::thread::sleep(PUBLISH_THROTTLE);
+                        let finished = handle.cancel.load(Ordering::Relaxed)
+                            || queue.lock().done;
+                        // Publish (even on the final iteration) so the last
+                        // mid-scan view reflects the latest growth; the post-scope
+                        // publish below produces the authoritative final tree.
+                        let tree = build_snapshot(arena);
+                        handle.publish(Arc::new(tree));
+                        if finished {
+                            return;
+                        }
+                    })
+                    .ok();
+            }
         });
 
-        // Walk done (or cancelled). Roll up + publish the final snapshot.
+        // Walk done (or cancelled). Roll up + publish the authoritative snapshot.
         let cancelled = handle.cancel.load(Ordering::Relaxed);
         {
-            let mut a = arena.lock();
-            rollup(&mut a.nodes);
-            let tree = DiskTree {
-                nodes: std::mem::take(&mut a.nodes),
-                names: std::mem::take(&mut a.interner.table),
-            };
+            let tree = build_snapshot(&arena);
             handle.publish(Arc::new(tree));
         }
 
@@ -1253,4 +1573,68 @@ pub fn disk_scan_status(scan_id: ScanId) -> CoreResult<ScanProgress> {
 /// clone the published `Arc<DiskTree>` through this).
 pub fn scan_handle(scan_id: &str) -> Option<Arc<ScanHandle>> {
     SCANS.get(scan_id).map(|h| Arc::clone(&h))
+}
+
+/// Default LOD knobs for `disk_tree` when the frontend omits them (the treemap's
+/// initial pull). The client tunes these via the toolbar LOD slider (spec §4.5).
+const DEFAULT_DEPTH_LIMIT: u8 = 4;
+const DEFAULT_MAX_NODES: u32 = 4096;
+
+/// Return a bounded LOD slice of a scan's published tree (spec §2.9). The backend
+/// does the slicing so a huge tree never crosses IPC whole; the workhorse for the
+/// treemap. Clones the published `Arc<DiskTree>` (O(1)) then slices on the COPY —
+/// no scan lock is held — on the blocking pool so the IPC router never stalls.
+///
+/// `focus_path` is `None`/empty for the disk root, else an absolute path under the
+/// root (drill-down). `depth_limit` caps levels below the focus; `min_bytes`
+/// collapses children below that alloc size; `max_nodes` hard-caps the slice.
+#[tauri::command]
+pub async fn disk_tree(
+    scan_id: ScanId,
+    focus_path: Option<String>,
+    depth_limit: Option<u8>,
+    min_bytes: Option<u64>,
+    max_nodes: Option<u32>,
+) -> CoreResult<TreeView> {
+    let handle = scan_handle(&scan_id)
+        .ok_or_else(|| crate::error::CoreError::Msg(format!("no scan for {scan_id}")))?;
+    let depth = depth_limit.unwrap_or(DEFAULT_DEPTH_LIMIT).max(1);
+    let min_bytes = min_bytes.unwrap_or(0);
+    let max_nodes = max_nodes.unwrap_or(DEFAULT_MAX_NODES).max(1);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        // O(1) Arc clone of the published snapshot; slice the immutable copy.
+        let tree = handle.snapshot();
+        let generation = handle.generation.load(Ordering::Relaxed);
+        let focus = tree
+            .node_for_path(focus_path.as_deref())
+            .ok_or_else(|| crate::error::CoreError::Msg("focus path not in tree".into()))?;
+        Ok(tree.slice(&scan_id, generation, focus, depth, min_bytes, max_nodes))
+    })
+    .await
+    .map_err(|e| crate::error::CoreError::Msg(format!("task failed: {e}")))?
+}
+
+/// Top-N largest items in a scan's focused (sub)tree, by alloc size (spec §2.9 /
+/// §4.6 — the "what's eating my space" flat list). Clones the published `Arc`
+/// (O(1)) and walks the immutable copy on the blocking pool.
+#[tauri::command]
+pub async fn disk_top_items(
+    scan_id: ScanId,
+    focus_path: Option<String>,
+    n: Option<u32>,
+) -> CoreResult<Vec<ItemRow>> {
+    let handle = scan_handle(&scan_id)
+        .ok_or_else(|| crate::error::CoreError::Msg(format!("no scan for {scan_id}")))?;
+    let n = n.unwrap_or(20).max(1);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let tree = handle.snapshot();
+        let focus = tree
+            .node_for_path(focus_path.as_deref())
+            .ok_or_else(|| crate::error::CoreError::Msg("focus path not in tree".into()))?;
+        Ok(tree.top_items(focus, n))
+    })
+    .await
+    .map_err(|e| crate::error::CoreError::Msg(format!("task failed: {e}")))?
 }
