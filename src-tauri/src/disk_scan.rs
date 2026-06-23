@@ -161,6 +161,24 @@ impl DiskTree {
     }
 }
 
+/// A complete, self-contained arena produced by the MFT fast-path
+/// (`disk_scan_mft::try_build_arena_from_mft`). The builder fills this entirely
+/// off the shared scan state, sanity-checks it, and returns it WHOLE — the caller
+/// only adopts a `Some(_)`, so a failed/partial MFT attempt never pollutes the
+/// fallback `FindFirstFileExW` walk. `nodes[0]` is the root; sizes are NOT yet
+/// rolled up (the existing publisher's `rollup` does that, exactly as for the
+/// walk), so node sizes here are own-sizes (files) / 0 (dirs).
+pub(crate) struct BuiltArena {
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) names: Vec<Box<str>>,
+    pub(crate) files_seen: u64,
+    pub(crate) dirs_seen: u64,
+    pub(crate) bytes_logical: u64,
+    pub(crate) bytes_alloc: u64,
+    pub(crate) node_count: u64,
+    pub(crate) truncated: bool,
+}
+
 // =============================================================================
 // LOD-sliced tree IPC (spec §2.9 / §3.3) — `disk_tree` / `disk_top_items`.
 // =============================================================================
@@ -439,19 +457,19 @@ impl DiskTree {
 
 /// Hand-rolled string interner (spec §2.6 — no new dep). Repeated path
 /// components (`node_modules`, `.git`, `.dll`) cost one copy.
-struct Interner {
-    table: Vec<Box<str>>,
+pub(crate) struct Interner {
+    pub(crate) table: Vec<Box<str>>,
     map: std::collections::HashMap<Box<str>, u32>,
 }
 
 impl Interner {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             table: Vec::new(),
             map: std::collections::HashMap::new(),
         }
     }
-    fn intern(&mut self, s: &str) -> u32 {
+    pub(crate) fn intern(&mut self, s: &str) -> u32 {
         if let Some(&id) = self.map.get(s) {
             return id;
         }
@@ -461,6 +479,16 @@ impl Interner {
         self.map.insert(boxed, id);
         id
     }
+}
+
+/// Round a logical size up to the next whole cluster (the on-disk footprint).
+/// Crate-level so both the walk and the MFT fast-path share one definition.
+#[inline]
+pub(crate) fn round_to_cluster(logical: u64, cluster: u64) -> u64 {
+    if cluster == 0 {
+        return logical;
+    }
+    logical.div_ceil(cluster) * cluster
 }
 
 // =============================================================================
@@ -505,6 +533,9 @@ pub struct ScanHandle {
     pub root_display: Box<str>,
     /// Filesystem root actually walked (the drive letter root "C:\\").
     walk_root: Box<str>,
+    /// Volume file system name ("NTFS"/"exFAT"/...), used to gate the MFT
+    /// fast-path. Empty when unavailable → the MFT path is skipped (walk runs).
+    file_system: Box<str>,
     status: AtomicU8,
     /// Flipped by `disk_scan_cancel`; checked when popping the queue AND inside
     /// the per-entry enumeration loop (spec §2.3).
@@ -541,11 +572,17 @@ pub struct ScanHandle {
 }
 
 impl ScanHandle {
-    fn new(scan_id: ScanId, root_display: String, walk_root: String) -> ScanHandle {
+    fn new(
+        scan_id: ScanId,
+        root_display: String,
+        walk_root: String,
+        file_system: String,
+    ) -> ScanHandle {
         ScanHandle {
             scan_id,
             root_display: root_display.into(),
             walk_root: walk_root.into(),
+            file_system: file_system.into(),
             status: AtomicU8::new(ScanStatus::Scanning as u8),
             cancel: Arc::new(AtomicBool::new(false)),
             files_seen: AtomicU64::new(0),
@@ -590,6 +627,23 @@ impl ScanHandle {
     /// O(1) latest snapshot — clone the `Arc` (Phase 2 LOD-slices it).
     pub fn snapshot(&self) -> Arc<DiskTree> {
         self.snapshot.lock().clone()
+    }
+
+    /// Publish running progress from the MFT bulk read so the chip animates during
+    /// a multi-second `$MFT` parse (spec §3.3). Scalars only, like the walk.
+    pub(crate) fn mft_set_progress(
+        &self,
+        files_seen: u64,
+        dirs_seen: u64,
+        bytes_logical: u64,
+        bytes_alloc: u64,
+        node_count: u64,
+    ) {
+        self.files_seen.store(files_seen, Ordering::Relaxed);
+        self.dirs_seen.store(dirs_seen, Ordering::Relaxed);
+        self.bytes_logical.store(bytes_logical, Ordering::Relaxed);
+        self.bytes_alloc.store(bytes_alloc, Ordering::Relaxed);
+        self.node_count.store(node_count, Ordering::Relaxed);
     }
 
     /// Swap in a freshly-built tree and bump `generation` (the publish step).
@@ -659,10 +713,10 @@ static SCANS: Lazy<DashMap<ScanId, Arc<ScanHandle>>> = Lazy::new(DashMap::new);
 
 /// Hard node ceiling — stop descending, mark truncated, finish clean. Never OOM.
 /// ~20M nodes ≈ 640 MB (spec §2.7, owner decision 2).
-const NODE_CAP: u64 = 20_000_000;
+pub(crate) const NODE_CAP: u64 = 20_000_000;
 /// Within a directory, keep the top-N largest files as real nodes; fold the rest
 /// into one synthetic `AGGREGATED` "(other M files)" leaf (spec §2.6).
-const TOP_N_PER_DIR: usize = 32;
+pub(crate) const TOP_N_PER_DIR: usize = 32;
 /// Progress-event throttle floor (spec §2.8 — ~4–10 Hz).
 const PROGRESS_THROTTLE: Duration = Duration::from_millis(200);
 /// Snapshot publish cadence during scanning (~5 Hz). Each tick copies the arena
@@ -881,15 +935,6 @@ mod win {
         }
     }
 
-    /// Round a logical size up to the next whole cluster (the on-disk footprint).
-    #[inline]
-    fn round_to_cluster(logical: u64, cluster: u64) -> u64 {
-        if cluster == 0 {
-            return logical;
-        }
-        logical.div_ceil(cluster) * cluster
-    }
-
     /// Enumerate the machine's logical drives (A:..Z:) and describe each as a
     /// `VolumeInfo`. Cheap Win32 calls; called from a `spawn_blocking` task so a
     /// slow removable/network probe never stalls the IPC router.
@@ -967,6 +1012,18 @@ mod win {
         } else {
             format!("{scan_id}\\")
         }
+    }
+
+    /// Query the volume's file-system name for a walk root ("C:\\" / GUID path).
+    /// Used to gate the MFT fast-path (NTFS only). Returns "" when unavailable.
+    pub fn volume_file_system(walk_root: &str) -> String {
+        let root = if walk_root.ends_with('\\') {
+            walk_root.to_string()
+        } else {
+            format!("{walk_root}\\")
+        };
+        let (_label, fs) = volume_information(&wide(&root));
+        fs
     }
 
     // -------------------------------------------------------------------------
@@ -1502,6 +1559,120 @@ mod win {
         DiskTree { nodes, names }
     }
 
+    /// Attempt the MFT fast-path for this scan. Returns `true` when the scan was
+    /// fully serviced from the `$MFT` (arena adopted, snapshot published, status
+    /// finalized) OR was cancelled mid-build; returns `false` when the MFT path is
+    /// unavailable/failed and the caller must run the `FindFirstFileExW` walk.
+    ///
+    /// On a `false` return NOTHING was published and the status is still
+    /// `Scanning`, so the walk proceeds exactly as today. While the (potentially
+    /// multi-second) bulk read runs, a throttled emitter animates the same
+    /// progress atomics the MFT builder updates — zero emitter changes.
+    fn try_run_mft(
+        handle: &Arc<ScanHandle>,
+        app: &tauri::AppHandle,
+        walk_root: &str,
+        root_display: &str,
+    ) -> bool {
+        // Capability gate #1 (cheap, no handle): NTFS only.
+        if !handle.file_system.eq_ignore_ascii_case("NTFS") {
+            return false;
+        }
+
+        // Drive the progress chip during the bulk read with the same throttled
+        // emitter the walk uses. It stops as soon as `mft_done` flips.
+        let mft_done = Arc::new(AtomicBool::new(false));
+        let emit_handle = {
+            let handle = Arc::clone(handle);
+            let app = app.clone();
+            let mft_done = Arc::clone(&mft_done);
+            std::thread::Builder::new()
+                .name(format!("corepilot-scan-mft-emit-{}", handle.scan_id))
+                .spawn(move || {
+                    use tauri::Emitter;
+                    let mut last = ScanProgressKey::default();
+                    while !mft_done.load(Ordering::Relaxed) {
+                        std::thread::sleep(PROGRESS_THROTTLE);
+                        let p = handle.build_progress();
+                        let key = ScanProgressKey::from(&p);
+                        if key != last {
+                            last = key;
+                            let _ = app.emit("disk-scan://progress", p);
+                        }
+                    }
+                })
+                .ok()
+        };
+
+        *handle.current_path.lock() = Arc::from("(reading $MFT…)");
+
+        // The whole unsafe NTFS path lives in `disk_scan_mft`; it builds into a
+        // LOCAL arena and returns it whole or `None` (capability/parse/sanity
+        // failure), polling the same cancel flag per chunk.
+        let built = crate::disk_scan_mft::try_build_arena_from_mft(
+            walk_root,
+            &handle.file_system,
+            root_display,
+            &handle.cancel,
+            handle.as_ref(),
+        );
+
+        // Stop the MFT emitter regardless of outcome.
+        mft_done.store(true, Ordering::Relaxed);
+        if let Some(h) = emit_handle {
+            let _ = h.join();
+        }
+        *handle.current_path.lock() = Arc::from("");
+
+        // User-cancelled mid-build: do NOT fall back to the walk. Let the caller's
+        // cancel branch finalize as Cancelled.
+        if handle.cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        let Some(built) = built else {
+            // Capability/parse/sanity failure → caller runs the proven walk. The
+            // builder left the shared state untouched; reset the progress atomics
+            // it may have bumped so the walk starts from a clean slate.
+            handle.files_seen.store(0, Ordering::Relaxed);
+            handle.dirs_seen.store(0, Ordering::Relaxed);
+            handle.bytes_logical.store(0, Ordering::Relaxed);
+            handle.bytes_alloc.store(0, Ordering::Relaxed);
+            handle.node_count.store(0, Ordering::Relaxed);
+            return false;
+        };
+
+        // Success — adopt the built arena. Mirror the walk's final publish: build
+        // the immutable `DiskTree`, roll subtree sizes UP the parent spine (the
+        // builder leaves own-sizes only, exactly like the live walk arena), and
+        // pointer-swap it into the publish channel.
+        let BuiltArena {
+            mut nodes,
+            names,
+            files_seen,
+            dirs_seen,
+            bytes_logical,
+            bytes_alloc,
+            node_count,
+            truncated,
+        } = built;
+        rollup(&mut nodes);
+        handle.files_seen.store(files_seen, Ordering::Relaxed);
+        handle.dirs_seen.store(dirs_seen, Ordering::Relaxed);
+        handle.bytes_logical.store(bytes_logical, Ordering::Relaxed);
+        handle.bytes_alloc.store(bytes_alloc, Ordering::Relaxed);
+        handle.node_count.store(node_count, Ordering::Relaxed);
+        if truncated {
+            handle.truncated.store(true, Ordering::Relaxed);
+        }
+        handle.publish(Arc::new(DiskTree { nodes, names }));
+        handle.set_status(ScanStatus::Done);
+
+        use tauri::Emitter;
+        let _ = app.emit("disk-scan://progress", handle.build_progress());
+        true
+    }
+
     /// Run the whole scan for one disk on this (already-dedicated) thread. Builds
     /// the arena via a small worker pool, rolls up sizes, publishes one snapshot.
     pub fn run_scan(handle: Arc<ScanHandle>, app: tauri::AppHandle) {
@@ -1509,6 +1680,27 @@ mod win {
         let root_display = handle.root_display.to_string();
         let root_w = ext_root_w(&walk_root);
         let cluster = cluster_size(&wide(&walk_root));
+
+        // --- MFT fast-path (spec §2/§3) ---------------------------------------
+        // Try the raw $MFT bulk read FIRST. It is gated behind every capability
+        // check (NTFS, elevation, FSCTL, parse + sanity), is side-effect-free on
+        // the shared scan state until it returns a complete, sanity-checked arena,
+        // and returns `None` for ANY failure → we fall through to the proven
+        // `FindFirstFileExW` walk below with ZERO behavior change. A user cancel
+        // mid-MFT finalizes as `Cancelled` WITHOUT falling back (capability
+        // failures fall back; user cancel does not — spec §3.3).
+        if try_run_mft(&handle, &app, &walk_root, &root_display) {
+            return;
+        }
+        if handle.cancel.load(Ordering::Relaxed) {
+            // Cancelled during the MFT attempt before any partial build — finalize
+            // as Cancelled rather than running the walk on a cancelled scan.
+            handle.publish(Arc::new(DiskTree::default()));
+            handle.set_status(ScanStatus::Cancelled);
+            use tauri::Emitter;
+            let _ = app.emit("disk-scan://progress", handle.build_progress());
+            return;
+        }
 
         // Seed the arena with the root node (name = display root, e.g. "C:\\").
         let mut interner = Interner::new();
@@ -1679,6 +1871,9 @@ mod win {
     pub fn resolve_walk_root(scan_id: &str) -> String {
         scan_id.to_string()
     }
+    pub fn volume_file_system(_walk_root: &str) -> String {
+        String::new()
+    }
     pub fn run_scan(handle: Arc<ScanHandle>, _app: tauri::AppHandle) {
         handle.set_status(ScanStatus::Done);
     }
@@ -1725,10 +1920,12 @@ pub fn disk_scan_start(app: tauri::AppHandle, scan_ids: Vec<ScanId>) -> CoreResu
         }
         let walk_root = win::resolve_walk_root(&scan_id);
         let root_display = walk_root.clone();
+        let file_system = win::volume_file_system(&walk_root);
         let handle = Arc::new(ScanHandle::new(
             scan_id.clone(),
             root_display,
             walk_root,
+            file_system,
         ));
         SCANS.insert(scan_id.clone(), Arc::clone(&handle));
 
