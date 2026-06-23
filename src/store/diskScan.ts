@@ -35,6 +35,10 @@ export interface PerDiskView {
   scanId: string;
   /** Friendly root label for the breadcrumb root + the tab strip (e.g. "C:"). */
   rootLabel: string;
+  /** The volume's used bytes (`total - free`) at scan-start, threaded from the
+   *  picker so the tab can show a real progress % (scanned bytes / used bytes).
+   *  0 when unknown (then the tab falls back to an indeterminate spinner). */
+  usedBytes: number;
   /** Latest scalar progress (fed by the coalesced `disk-scan://progress` listener). */
   progress: ScanProgress | null;
   /** Per-tab size metric (spec §2.4). */
@@ -50,10 +54,11 @@ export interface PerDiskView {
 }
 
 /** A fresh per-disk view at the disk root with the default knobs. */
-function freshView(scanId: string, rootLabel: string): PerDiskView {
+function freshView(scanId: string, rootLabel: string, usedBytes = 0): PerDiskView {
   return {
     scanId,
     rootLabel,
+    usedBytes,
     progress: null,
     metric: "alloc",
     colorMode: "depth",
@@ -72,9 +77,9 @@ interface DiskScanStore {
   active: string | null;
 
   /** Open (or focus) a disk tab. Idempotent — re-opening keeps existing view state. */
-  openDisk: (scanId: string, rootLabel: string) => void;
+  openDisk: (scanId: string, rootLabel: string, usedBytes?: number) => void;
   /** Open several disks at once (concurrent multi-disk start) and focus the first. */
-  openDisks: (disks: { scanId: string; rootLabel: string }[]) => void;
+  openDisks: (disks: { scanId: string; rootLabel: string; usedBytes?: number }[]) => void;
   /** Switch the active inner tab (O(1); the scan keeps running). */
   setActive: (scanId: string | null) => void;
   /** Close a disk tab (after the backend `disk_scan_close`); re-targets `active`. */
@@ -91,11 +96,18 @@ export const useDiskScan = create<DiskScanStore>()((set) => ({
   order: [],
   active: null,
 
-  openDisk: (scanId, rootLabel) =>
+  openDisk: (scanId, rootLabel, usedBytes = 0) =>
     set((s) => {
-      if (s.views[scanId]) return { active: scanId };
+      // Re-opening (e.g. a rescan) keeps view state but refreshes the denominator.
+      if (s.views[scanId]) {
+        const v = s.views[scanId];
+        return {
+          views: { ...s.views, [scanId]: { ...v, usedBytes: usedBytes || v.usedBytes } },
+          active: scanId,
+        };
+      }
       return {
-        views: { ...s.views, [scanId]: freshView(scanId, rootLabel) },
+        views: { ...s.views, [scanId]: freshView(scanId, rootLabel, usedBytes) },
         order: [...s.order, scanId],
         active: scanId,
       };
@@ -108,8 +120,11 @@ export const useDiskScan = create<DiskScanStore>()((set) => ({
       const order = [...s.order];
       for (const d of disks) {
         if (!views[d.scanId]) {
-          views[d.scanId] = freshView(d.scanId, d.rootLabel);
+          views[d.scanId] = freshView(d.scanId, d.rootLabel, d.usedBytes ?? 0);
           order.push(d.scanId);
+        } else if (d.usedBytes) {
+          // Refresh the denominator on a re-open without clobbering view state.
+          views[d.scanId] = { ...views[d.scanId], usedBytes: d.usedBytes };
         }
       }
       return { views, order, active: disks[0].scanId };
@@ -138,15 +153,22 @@ export const useDiskScan = create<DiskScanStore>()((set) => ({
       const v = s.views[scanId];
       if (!v) return s;
       // No-op skip: identical generation + status + counters → don't churn React
-      // (the event fires faster than anything visibly changes).
+      // (the event fires faster than anything visibly changes). The live-path chip
+      // (`currentPath`) is deliberately part of the comparison so the antivirus-slow
+      // "still working" indicator + the skipped/disconnect surfaces stay current,
+      // but the backend already throttles the event to ~5 Hz so this never floods.
       const p = v.progress;
       if (
         p &&
         p.generation === progress.generation &&
         p.status === progress.status &&
         p.filesSeen === progress.filesSeen &&
+        p.dirsSeen === progress.dirsSeen &&
         p.bytesAlloc === progress.bytesAlloc &&
-        p.truncated === progress.truncated
+        p.skipped === progress.skipped &&
+        p.truncated === progress.truncated &&
+        p.disconnected === progress.disconnected &&
+        p.currentPath === progress.currentPath
       ) {
         return s;
       }

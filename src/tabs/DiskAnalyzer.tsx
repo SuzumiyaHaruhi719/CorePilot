@@ -71,7 +71,10 @@ export function DiskAnalyzer() {
       });
       const disks = scanIds.map((id) => {
         const vol = (volumes ?? []).find((v) => v.scanId === id);
-        return { scanId: id, rootLabel: vol?.letter ?? vol?.root ?? id };
+        // Thread the volume's used bytes so the tab + workspace can show a REAL
+        // progress % (scanned alloc / used bytes) instead of an indeterminate "…".
+        const usedBytes = vol ? Math.max(0, vol.total - vol.free) : 0;
+        return { scanId: id, rootLabel: vol?.letter ?? vol?.root ?? id, usedBytes };
       });
       openDisks(disks);
       setSelected(new Set());
@@ -271,9 +274,11 @@ function DiskTab({ scanId, active, onSelect, onClose }: DiskTabProps) {
   const view = useDiskScan((s) => s.views[scanId]);
   const progress = view?.progress ?? null;
   const label = view?.rootLabel ?? scanId;
+  const usedBytes = view?.usedBytes ?? 0;
   const status = progress?.status ?? "scanning";
   const scanning = status === "scanning";
-  const pct = scanProgressPct(progress);
+  const disconnected = progress?.disconnected ?? false;
+  const pct = scanProgressPct(progress, usedBytes);
 
   return (
     <div
@@ -289,13 +294,20 @@ function DiskTab({ scanId, active, onSelect, onClose }: DiskTabProps) {
       >
         <span className="display tracking-wide">{label}</span>
         {scanning ? (
-          <span className="nums text-[10.5px] text-accent">{pct != null ? `${pct}%` : "…"}</span>
+          // A real progress ring when the volume's used bytes are known; an
+          // indeterminate pulse otherwise (Phase 6 threads usedBytes from the picker).
+          <span className="inline-flex items-center gap-1">
+            <ProgressRing pct={pct} />
+            {pct != null && <span className="nums text-[10px] text-accent">{pct}%</span>}
+          </span>
         ) : status === "done" ? (
           <span className="nums text-[10.5px] text-dim">
             {formatBytes(progress?.bytesAlloc ?? 0)}
           </span>
         ) : status === "error" ? (
-          <span className="text-[10.5px] text-warn">{tf("错误", "error")}</span>
+          <span className="text-[10.5px] text-warn">
+            {disconnected ? tf("已断开", "offline") : tf("错误", "error")}
+          </span>
         ) : (
           <span className="text-[10.5px] text-dim">{tf("已取消", "cancelled")}</span>
         )}
@@ -322,17 +334,47 @@ function DiskTab({ scanId, active, onSelect, onClose }: DiskTabProps) {
   );
 }
 
-/** Scan completion % from bytes-scanned vs the disk's used bytes (best-effort;
- *  null until there's a denominator). The progress event carries scanned bytes;
- *  the picker knows total/free, but the store tab only has the scan scalars, so we
- *  show a coarse files-based pulse fallback when no byte denominator is known. */
-function scanProgressPct(p: ScanProgress | null): number | null {
+/** Scan completion % from scanned alloc bytes vs the disk's used bytes (Phase 6
+ *  threads `usedBytes` from the picker). Returns null when no denominator is known
+ *  (then the ring shows indeterminate). Clamped to [0,99] while scanning so it
+ *  never claims 100% before the walk actually finishes. */
+function scanProgressPct(p: ScanProgress | null, usedBytes: number): number | null {
   if (!p) return null;
   if (p.status === "done") return 100;
-  // No total-bytes denominator in the scan scalars → show an indeterminate "…"
-  // rather than a misleading number. (A precise ring needs the volume's used
-  // bytes, which the picker has; Phase 6 can thread it through if desired.)
-  return null;
+  if (p.status !== "scanning") return null;
+  if (usedBytes <= 0) return null;
+  return Math.min(99, Math.max(0, Math.round((p.bytesAlloc / usedBytes) * 100)));
+}
+
+/** Tiny inline SVG progress ring for the tab strip. `pct` null → indeterminate
+ *  (a spinning arc). Honors reduce-motion: the indeterminate spin is CSS-driven
+ *  via `animate-spin`, which the global `data-reduce-motion` block neuters. */
+function ProgressRing({ pct }: { pct: number | null }) {
+  const r = 6;
+  const c = 2 * Math.PI * r;
+  const dash = pct != null ? (Math.min(100, Math.max(0, pct)) / 100) * c : c * 0.28;
+  return (
+    <svg
+      width={15}
+      height={15}
+      viewBox="0 0 16 16"
+      className={pct == null ? "animate-spin text-accent" : "text-accent"}
+      aria-hidden
+    >
+      <circle cx="8" cy="8" r={r} fill="none" stroke="currentColor" strokeWidth="2" opacity={0.2} />
+      <circle
+        cx="8"
+        cy="8"
+        r={r}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeDasharray={`${dash} ${c}`}
+        transform="rotate(-90 8 8)"
+      />
+    </svg>
+  );
 }
 
 // --- volume list (shared by Zone A + the "+" Modal) ------------------------------

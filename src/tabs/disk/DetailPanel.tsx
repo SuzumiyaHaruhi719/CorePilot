@@ -1,11 +1,21 @@
 import { motion } from "motion/react";
-import { ExternalLink, FolderOpen, Folder, FileText, Link2, ListTree } from "lucide-react";
+import {
+  ChevronRight,
+  ExternalLink,
+  FolderOpen,
+  Folder,
+  FileText,
+  Link2,
+  ListTree,
+  ShieldAlert,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { cn } from "../../lib/cn";
 import { formatBytes } from "../../lib/format";
 import { useTf } from "../../lib/i18n";
 import { api, DISK_FLAG, type ItemRow, type TreeNode, type TreeView } from "../../lib/ipc";
 import type { Metric } from "./treemap/layout";
+import { displayName } from "./treemap/names";
 
 /**
  * Side detail panel (spec §4.6). Shows the selected item's resolved path, alloc
@@ -28,9 +38,12 @@ interface DetailPanelProps {
   /** Selected node (leaf or container) or null → summarise the focus root. */
   selected: TreeNode | null;
   metric: Metric;
+  /** Permission-denied / unreadable entries skipped during the scan (spec §6.2)
+   *  — surfaced in a collapsible panel, never silently dropped. */
+  skipped: number;
 }
 
-export function DetailPanel({ scanId, view, selected, metric }: DetailPanelProps) {
+export function DetailPanel({ scanId, view, selected, metric, skipped }: DetailPanelProps) {
   const tf = useTf();
   const root = view.nodes[0];
   const focus = selected ?? root;
@@ -50,6 +63,7 @@ export function DetailPanel({ scanId, view, selected, metric }: DetailPanelProps
   // re-pulled when the focus path or generation advances. Mirrors the SpaceSniffer
   // "what's eating my space" answer at this level.
   const [topItems, setTopItems] = useState<ItemRow[]>([]);
+  const [skippedOpen, setSkippedOpen] = useState(false);
   useEffect(() => {
     let alive = true;
     api
@@ -92,7 +106,7 @@ export function DetailPanel({ scanId, view, selected, metric }: DetailPanelProps
           </div>
           <div className="min-w-0 flex-1">
             <div className="truncate text-[13.5px] font-semibold text-ink" title={focus.name}>
-              {focus.name}
+              {displayName(focus, tf)}
             </div>
             {focus.path && (
               <div className="truncate text-[10.5px] text-dim" title={focus.path}>
@@ -197,7 +211,9 @@ export function DetailPanel({ scanId, view, selected, metric }: DetailPanelProps
                         ) : (
                           <FileText size={13} className="shrink-0 text-dim" />
                         )}
-                        <span className="min-w-0 flex-1 truncate text-[12px] text-ink">{row.name}</span>
+                        <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
+                          {displayName(row, tf)}
+                        </span>
                         <span className="nums shrink-0 text-[11px] text-muted">{formatBytes(s)}</span>
                       </div>
                     </button>
@@ -208,6 +224,37 @@ export function DetailPanel({ scanId, view, selected, metric }: DetailPanelProps
           )}
         </div>
       </div>
+
+      {/* Skipped-items panel (spec §6.2) — permission-denied / unreadable entries
+          are counted, never silently dropped; surfaced in a collapsible footer. */}
+      {skipped > 0 && (
+        <div className="shrink-0 border-t border-line">
+          <button
+            type="button"
+            onClick={() => setSkippedOpen((o) => !o)}
+            className="no-drag flex w-full items-center gap-1.5 px-4 py-2.5 text-left text-[11.5px] text-muted transition-colors hover:bg-surface3"
+          >
+            <ShieldAlert size={13} className="shrink-0 text-warn" />
+            <span className="flex-1">
+              {tf("已跳过", "Skipped")}{" "}
+              <span className="nums text-ink">{skipped.toLocaleString()}</span>{" "}
+              {tf("项", "items")}
+            </span>
+            <ChevronRight
+              size={13}
+              className={cn("shrink-0 transition-transform", skippedOpen && "rotate-90")}
+            />
+          </button>
+          {skippedOpen && (
+            <div className="px-4 pb-3 text-[11px] leading-relaxed text-dim">
+              {tf(
+                "这些条目因权限不足、文件被占用或共享冲突而无法读取,已从统计中跳过(扫描不会因此中断)。它们的大小未计入树图。",
+                "These entries could not be read (access denied, in-use, or a sharing conflict) and were skipped — the scan continued regardless. Their size is not counted in the treemap.",
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

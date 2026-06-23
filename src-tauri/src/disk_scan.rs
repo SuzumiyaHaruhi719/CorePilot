@@ -520,11 +520,22 @@ pub struct ScanHandle {
     node_count: AtomicU64,
     /// Set when the node cap stopped descent — drives the truncation banner.
     truncated: AtomicBool,
+    /// Set when a sustained I/O-error streak tripped the drive-disconnect
+    /// transition (spec §2.5.5 / §7) — distinguishes "drive ejected" from a plain
+    /// user cancel even though both flip `cancel` to drain the workers.
+    disconnected: AtomicBool,
+    /// Consecutive hard-device-error count; reset by any successful/denied read.
+    /// Crossing `DISCONNECT_ERROR_STREAK` trips the disconnect transition.
+    io_error_streak: AtomicU64,
     started_at: Instant,
     /// Bumped on each published snapshot swap (the frontend pulls on a new gen).
     generation: AtomicU64,
     /// Optional error message for the `Error` state.
     error: Mutex<Option<String>>,
+    /// The directory currently being enumerated (display path) — surfaced in the
+    /// progress chip so a slow scan looks visibly working (spec §7). Tiny: just
+    /// the one dir, swapped under a short lock, never the tree.
+    current_path: Mutex<Arc<str>>,
     /// Pointer-swap publish channel (sampler.rs `PROC_SNAPSHOT` contract).
     snapshot: Mutex<Arc<DiskTree>>,
 }
@@ -544,11 +555,29 @@ impl ScanHandle {
             skipped: AtomicU64::new(0),
             node_count: AtomicU64::new(0),
             truncated: AtomicBool::new(false),
+            disconnected: AtomicBool::new(false),
+            io_error_streak: AtomicU64::new(0),
             started_at: Instant::now(),
             generation: AtomicU64::new(0),
             error: Mutex::new(None),
+            current_path: Mutex::new(Arc::from("")),
             snapshot: Mutex::new(Arc::new(DiskTree::default())),
         }
+    }
+
+    /// Publish the directory currently being walked (spec §7 antivirus-slow UX).
+    /// Strips the `\\?\` extended-length prefix for display. Tiny lock — only the
+    /// `Arc<str>` pointer is swapped, never held across I/O.
+    #[cfg(target_os = "windows")]
+    fn set_current_path(&self, wpath: &[u16]) {
+        let end = wpath.iter().position(|&c| c == 0).unwrap_or(wpath.len());
+        let s = String::from_utf16_lossy(&wpath[..end]);
+        let disp = s
+            .strip_prefix("\\\\?\\UNC\\")
+            .map(|r| format!("\\\\{r}"))
+            .or_else(|| s.strip_prefix("\\\\?\\").map(|r| r.to_string()))
+            .unwrap_or(s);
+        *self.current_path.lock() = Arc::from(disp.as_str());
     }
 
     fn status(&self) -> ScanStatus {
@@ -583,6 +612,8 @@ impl ScanHandle {
             node_count: self.node_count.load(Ordering::Relaxed),
             generation: self.generation.load(Ordering::Relaxed),
             truncated: self.truncated.load(Ordering::Relaxed),
+            disconnected: self.disconnected.load(Ordering::Relaxed),
+            current_path: self.current_path.lock().to_string(),
             elapsed_ms: self.started_at.elapsed().as_millis() as u64,
             error: self.error.lock().clone(),
         }
@@ -606,6 +637,13 @@ pub struct ScanProgress {
     pub node_count: u64,
     pub generation: u64,
     pub truncated: bool,
+    /// True when a sustained I/O-error streak tripped the drive-disconnect
+    /// transition (spec §2.5.5 / §7) — the UI surfaces a dedicated disconnect
+    /// banner rather than a plain "cancelled" chip.
+    pub disconnected: bool,
+    /// The directory currently being walked (display path; empty when idle/done).
+    /// Surfaced in the progress chip so a slow scan looks visibly working (spec §7).
+    pub current_path: String,
     pub elapsed_ms: u64,
     pub error: Option<String>,
 }
@@ -632,6 +670,76 @@ const PROGRESS_THROTTLE: Duration = Duration::from_millis(200);
 /// pointer-swaps it in — the freeze-proof invariant (no roll-up under the lock,
 /// no lock across the swap).
 const PUBLISH_THROTTLE: Duration = Duration::from_millis(400);
+/// Process-wide walker-permit ceiling (spec §2.10 / owner decision 4). A flat
+/// global cap on the TOTAL number of directories being enumerated concurrently
+/// across ALL active scans, so N concurrent HDD scans can't thrash the I/O
+/// subsystem into a stall. Each worker acquires a permit before its slow
+/// `FindFirstFileExW` pass and releases it after. v1 is a flat cap; mapping
+/// partitions→physical disks is a noted later refinement.
+const GLOBAL_WALKER_PERMITS: usize = 6;
+/// Drive-disconnect detection (spec §2.5.5 / §7): when this many consecutive
+/// directory enumerations fail with a hard (non-permission) I/O error, the volume
+/// is treated as disconnected — the scan transitions to `Error` cleanly, its
+/// threads stop, and every OTHER concurrent scan is left untouched.
+const DISCONNECT_ERROR_STREAK: u32 = 64;
+
+/// The hand-rolled global walker-permit counter (spec §2.10, owner decision 1 —
+/// `parking_lot::Mutex<usize>` + `Condvar`, no new dep). A worker acquires a
+/// permit before descending into a slow directory enumeration and releases it
+/// after, so the total in-flight walker count across all scans stays ≤
+/// `GLOBAL_WALKER_PERMITS`. RAII via `WalkerPermit` guarantees release even on an
+/// early return / panic-unwind.
+static WALKER_PERMITS: Lazy<WalkerSemaphore> =
+    Lazy::new(|| WalkerSemaphore::new(GLOBAL_WALKER_PERMITS));
+
+/// A counting semaphore: `available` permits guarded by a `Mutex`, waiters parked
+/// on a `Condvar`. Hand-rolled (no `tokio::sync::Semaphore` — these are blocking
+/// `std::thread` workers, not async tasks).
+struct WalkerSemaphore {
+    available: Mutex<usize>,
+    cv: parking_lot::Condvar,
+}
+
+impl WalkerSemaphore {
+    fn new(n: usize) -> WalkerSemaphore {
+        WalkerSemaphore {
+            available: Mutex::new(n),
+            cv: parking_lot::Condvar::new(),
+        }
+    }
+
+    /// Block until a permit is free, decrement, and hand back an RAII guard. The
+    /// `cancel` flag is polled while parked so a cancelled scan's workers don't
+    /// wait forever for a permit (they bail and drain). Returns `None` if cancel
+    /// fired before a permit was acquired.
+    fn acquire(&self, cancel: &AtomicBool) -> Option<WalkerPermit<'_>> {
+        let mut avail = self.available.lock();
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            if *avail > 0 {
+                *avail -= 1;
+                return Some(WalkerPermit { sem: self });
+            }
+            // Wake periodically to re-check the cancel flag even with no release.
+            self.cv
+                .wait_for(&mut avail, Duration::from_millis(50));
+        }
+    }
+}
+
+/// RAII permit — returns one slot to the global pool on drop (spec §2.10).
+struct WalkerPermit<'a> {
+    sem: &'a WalkerSemaphore,
+}
+
+impl Drop for WalkerPermit<'_> {
+    fn drop(&mut self) {
+        *self.sem.available.lock() += 1;
+        self.sem.cv.notify_one();
+    }
+}
 
 // =============================================================================
 // Win32 walk (spec §2.3) — only compiled on Windows.
@@ -642,7 +750,7 @@ mod win {
     use super::*;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, GetLastError, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE,
     };
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW,
@@ -943,16 +1051,36 @@ mod win {
         ok.is_ok().then_some(info)
     }
 
+    // Win32 error codes (winerror.h) used to tell a benign permission/sharing
+    // failure (skip the entry, keep scanning) from a hard device error that, in a
+    // sustained streak, means the volume disconnected (spec §2.5.5 / §7).
+    const ERROR_ACCESS_DENIED: u32 = 5;
+    const ERROR_SHARING_VIOLATION: u32 = 32;
+    const ERROR_LOCK_VIOLATION: u32 = 33;
+
+    /// Why a directory enumeration failed (spec §2.5). `Denied` is benign — flag
+    /// the node, bump `skipped`, continue. `Device` is a hard I/O error (the
+    /// volume may have been ejected mid-scan); a sustained streak of these trips
+    /// the disconnect transition.
+    enum EnumError {
+        /// Permission / sharing / lock — degrade this one entry, keep scanning.
+        Denied,
+        /// Hard device / path error — counts toward the disconnect streak.
+        Device,
+    }
+
     /// Enumerate ONE directory's entries in a single `FindFirstFileExW` pass.
-    /// Returns the per-entry results; permission/sharing failures bump `skipped`
-    /// on the handle and return an empty list (the dir node is flagged DENIED by
-    /// the caller). Cancel is checked inside the loop (spec §2.3 / §2.5).
+    /// Returns the per-entry results; a benign permission/sharing failure bumps
+    /// `skipped` and returns `Err(EnumError::Denied)` (the dir node is flagged
+    /// DENIED by the caller); a hard device error returns `Err(EnumError::Device)`
+    /// so the caller can detect a drive disconnect. Cancel is checked inside the
+    /// loop (spec §2.3 / §2.5).
     fn enumerate_dir(
         dir_wpath: &[u16],
         cluster: u64,
         handle: &ScanHandle,
         arena: &Mutex<Arena>,
-    ) -> Result<Vec<ChildResult>, ()> {
+    ) -> Result<Vec<ChildResult>, EnumError> {
         // Build the search pattern: "<dir>\*".
         let mut pattern: Vec<u16> = dir_wpath.to_vec();
         // dir_wpath is NUL-terminated; drop the NUL, append "\*\0".
@@ -980,9 +1108,18 @@ mod win {
         let hfind = match find {
             Ok(h) if h != INVALID_HANDLE_VALUE => h,
             _ => {
-                // Permission denied / unreadable directory — count and degrade.
-                handle.skipped.fetch_add(1, Ordering::Relaxed);
-                return Err(());
+                // Classify: a benign permission/sharing failure is skipped+continue;
+                // anything else is a hard device error (counts toward disconnect).
+                // SAFETY: GetLastError takes no args and reads thread-local state.
+                let code = unsafe { GetLastError() }.0;
+                if matches!(
+                    code,
+                    ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION
+                ) {
+                    handle.skipped.fetch_add(1, Ordering::Relaxed);
+                    return Err(EnumError::Denied);
+                }
+                return Err(EnumError::Device);
             }
         };
 
@@ -1123,9 +1260,56 @@ mod win {
                 continue;
             }
 
-            // --- enumerate (NO locks held across this slow I/O) ---------------
-            let children = enumerate_dir(&task.wpath, cluster, handle, arena);
+            // Publish the directory we're about to walk so a slow (e.g.
+            // antivirus-throttled) scan looks visibly *working*, not hung
+            // (spec §7 antivirus-slow UX). Tiny lock, swapped only here.
+            handle.set_current_path(&task.wpath);
+
+            // --- acquire a GLOBAL walker permit before the slow I/O ----------
+            // Caps total concurrent enumerations across ALL scans (spec §2.10),
+            // so N concurrent HDD scans can't thrash the I/O subsystem. The
+            // permit is held ONLY across the enumeration and released (RAII)
+            // before the arena merge. A cancelled scan stops waiting (None).
+            let children = {
+                let Some(_permit) = WALKER_PERMITS.acquire(&handle.cancel) else {
+                    // Cancelled while waiting for a permit — account + drain.
+                    let mut q = queue.lock();
+                    q.pending -= 1;
+                    cv.notify_all();
+                    continue;
+                };
+                // --- enumerate (NO arena/queue lock held across this slow I/O) -
+                enumerate_dir(&task.wpath, cluster, handle, arena)
+            };
             handle.dirs_seen.fetch_add(1, Ordering::Relaxed);
+
+            // Drive-disconnect detection (spec §2.5.5 / §7): a sustained streak of
+            // hard device errors (NOT permission denials) means the volume was
+            // ejected/disconnected mid-scan. Trip the disconnect → the scan ends
+            // as `Error`; every OTHER concurrent scan is untouched.
+            match &children {
+                Err(EnumError::Device) => {
+                    let streak = handle.io_error_streak.fetch_add(1, Ordering::Relaxed) + 1;
+                    if streak as u32 >= DISCONNECT_ERROR_STREAK
+                        && !handle.cancel.load(Ordering::Relaxed)
+                    {
+                        *handle.error.lock() = Some(
+                            "drive disconnected (sustained I/O errors)".to_string(),
+                        );
+                        handle.disconnected.store(true, Ordering::Relaxed);
+                        // Flip cancel so all this scan's workers drain promptly.
+                        handle.cancel.store(true, Ordering::Relaxed);
+                        let mut q = queue.lock();
+                        q.pending -= 1;
+                        cv.notify_all();
+                        continue;
+                    }
+                }
+                _ => {
+                    // A successful (or merely-denied) read clears the streak.
+                    handle.io_error_streak.store(0, Ordering::Relaxed);
+                }
+            }
 
             let denied = children.is_err();
             let mut children = children.unwrap_or_default();
@@ -1424,18 +1608,26 @@ mod win {
             }
         });
 
-        // Walk done (or cancelled). Roll up + publish the authoritative snapshot.
+        // Walk done (or cancelled / disconnected). Roll up + publish the
+        // authoritative snapshot so the partial tree is still viewable.
         let cancelled = handle.cancel.load(Ordering::Relaxed);
+        let disconnected = handle.disconnected.load(Ordering::Relaxed);
         {
             let tree = build_snapshot(&arena);
             handle.publish(Arc::new(tree));
         }
 
-        handle.set_status(if cancelled {
+        // A drive disconnect ends as Error (its own banner); a user cancel ends as
+        // Cancelled; a clean drain ends as Done (spec §2.5.5 / §7).
+        handle.set_status(if disconnected {
+            ScanStatus::Error
+        } else if cancelled {
             ScanStatus::Cancelled
         } else {
             ScanStatus::Done
         });
+        // Clear the live-path chip once the walk ends.
+        *handle.current_path.lock() = Arc::from("");
 
         // Stop the emitter and fire one final progress event.
         walk_done.store(true, Ordering::Relaxed);

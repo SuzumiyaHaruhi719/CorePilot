@@ -572,6 +572,13 @@ export interface ScanProgress {
   generation: number;
   /** True once the node cap stopped descent (truncation banner). */
   truncated: boolean;
+  /** True when a sustained I/O-error streak tripped the drive-disconnect
+   *  transition (spec §2.5.5 / §7) — the UI shows a dedicated disconnect surface. */
+  disconnected: boolean;
+  /** The directory currently being walked (display path; empty when idle/done).
+   *  Surfaced in the progress chip so a slow (e.g. antivirus-throttled) scan looks
+   *  visibly working rather than hung (spec §7). */
+  currentPath: string;
   elapsedMs: number;
   error: string | null;
 }

@@ -1,10 +1,10 @@
-import { Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2, Layers, PlugZap } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Segmented } from "../../components/ui/Segmented";
 import { Slider } from "../../components/ui/Slider";
 import { Toggle } from "../../components/ui/Toggle";
 import { useTf } from "../../lib/i18n";
-import { api, withTimeout, type TreeNode, type TreeView } from "../../lib/ipc";
+import { api, withTimeout, type ScanProgress, type TreeNode, type TreeView } from "../../lib/ipc";
 import { useDiskScan, type PerDiskView } from "../../store/diskScan";
 import { TreemapCanvas } from "./treemap/TreemapCanvas";
 import { Breadcrumb, type CrumbSegment } from "./treemap/Breadcrumb";
@@ -236,8 +236,15 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
             />
             <span className="whitespace-nowrap">{tf("暂停", "Pause")}</span>
           </label>
+
+          {/* Live progress chip (spec §4.5 / §7): files/sec + elapsed + skipped —
+              makes a slow (antivirus-throttled) scan visibly *working*. */}
+          <ScanProgressChip progress={progress} />
         </div>
       </div>
+
+      {/* Hardening banners (spec §2.7 truncation / §2.5.5 disconnect). */}
+      <ScanBanners progress={progress} />
 
       {/* Workspace: treemap (left ~70%) + detail panel (right). */}
       <div className="flex min-h-0 flex-1">
@@ -250,6 +257,22 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
               onPick={(node) => onPick(node)}
               onHover={(node) => setHovered(node ?? null)}
             />
+          ) : progress?.disconnected ? (
+            // Dedicated drive-disconnect surface (spec §2.5.5 / §7).
+            <div className="grid h-full place-items-center px-6 text-center">
+              <div className="flex max-w-sm flex-col items-center gap-2">
+                <PlugZap size={28} className="text-warn" />
+                <div className="text-[14px] font-semibold text-ink">
+                  {tf("驱动器已断开连接", "Drive disconnected")}
+                </div>
+                <div className="text-[12px] text-muted">
+                  {tf(
+                    "扫描期间该卷被弹出或断开,已停止。其它磁盘的扫描不受影响。",
+                    "The volume was ejected or went offline mid-scan, so this scan stopped. Other disks are unaffected.",
+                  )}
+                </div>
+              </div>
+            </div>
           ) : (
             <div className="grid h-full place-items-center text-[13px] text-muted">
               {loading || scanning ? (
@@ -272,9 +295,84 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
             view={tree}
             selected={selected ?? hovered}
             metric={metric}
+            skipped={progress?.skipped ?? 0}
           />
         )}
       </div>
     </div>
   );
+}
+
+/** Live progress chip (spec §4.5 / §7) — files-per-sec + elapsed + skipped, fed
+ *  by the throttled progress event. The files/sec + live count make a slow
+ *  (e.g. antivirus-throttled) scan visibly *working*, not hung. Hidden once the
+ *  scan settles (done/cancelled/error) so it doesn't linger. */
+function ScanProgressChip({ progress }: { progress: ScanProgress | null }) {
+  const tf = useTf();
+  if (!progress || progress.status !== "scanning") return null;
+  const secs = progress.elapsedMs / 1000;
+  const fps = secs > 0 ? Math.round(progress.filesSeen / secs) : 0;
+  return (
+    <div className="nums ml-auto flex items-center gap-3 whitespace-nowrap text-[10.5px] text-dim">
+      <span>
+        <span className="text-muted">{progress.filesSeen.toLocaleString()}</span>{" "}
+        {tf("文件", "files")}
+      </span>
+      <span>
+        <span className="text-muted">{fps.toLocaleString()}</span>/s
+      </span>
+      <span>{formatElapsed(secs)}</span>
+      {progress.skipped > 0 && (
+        <span className="text-warn">
+          {progress.skipped.toLocaleString()} {tf("跳过", "skipped")}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Truncation (memory-cap) + drive-disconnect banners (spec §2.7 / §2.5.5). */
+function ScanBanners({ progress }: { progress: ScanProgress | null }) {
+  const tf = useTf();
+  if (!progress) return null;
+  const showTrunc = progress.truncated;
+  const showDisc = progress.disconnected;
+  if (!showTrunc && !showDisc) return null;
+  return (
+    <div className="flex flex-col gap-px">
+      {showDisc && (
+        <div className="flex items-center gap-2 border-b border-warn/30 bg-warn/10 px-4 py-1.5 text-[11.5px] text-warn">
+          <PlugZap size={13} className="shrink-0" />
+          <span>
+            {tf(
+              "驱动器在扫描期间断开连接 — 显示的是断开前的部分结果。",
+              "Drive disconnected mid-scan — showing the partial result captured before it went offline.",
+            )}
+          </span>
+        </div>
+      )}
+      {showTrunc && (
+        <div className="flex items-center gap-2 border-b border-line bg-surface2/60 px-4 py-1.5 text-[11.5px] text-muted">
+          <Layers size={13} className="shrink-0 text-accent" />
+          <span>
+            {tf(
+              "扫描已截断 — 超出节点上限的最深层目录已聚合为占位项。",
+              "Scan truncated — directories beyond the node limit were aggregated into placeholders.",
+            )}
+          </span>
+          <AlertTriangle size={12} className="shrink-0 opacity-50" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Compact mm:ss / hh:mm:ss elapsed formatter for the progress chip. */
+function formatElapsed(secs: number): string {
+  const s = Math.floor(secs);
+  const hh = Math.floor(s / 3600);
+  const mm = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return hh > 0 ? `${hh}:${pad(mm)}:${pad(ss)}` : `${mm}:${pad(ss)}`;
 }

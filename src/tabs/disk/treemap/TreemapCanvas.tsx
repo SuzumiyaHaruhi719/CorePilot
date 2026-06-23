@@ -12,6 +12,7 @@ import {
   type Metric,
 } from "./layout";
 import { readPalette, rectColor, strokeColor, labelColor, type ColorMode, type Palette } from "./colors";
+import { displayName } from "./names";
 
 /**
  * Canvas 2D squarified treemap renderer (spec §3.1/§3.2/§3.6/§3.7).
@@ -27,9 +28,15 @@ import { readPalette, rectColor, strokeColor, labelColor, type ColorMode, type P
  * component already surfaces `onPick` (folder→drill, file→select) so the Phase-4
  * shell can wire breadcrumb navigation without touching the renderer.
  *
- * Honors `data-gpu-render` / `data-reduce-motion` implicitly: it draws only on
- * demand (no continuous rAF here in Phase 3) and uses no box-shadow/keyframes, so
- * it never pegs the compositor (MEMORY: claude-monitor box-shadow DPC storm).
+ * Honors `data-gpu-render` / `data-reduce-motion` (spec §3 / §5 GPU budget):
+ *  - It draws only on demand (no continuous rAF) and uses no box-shadow/keyframes,
+ *    so it never pegs the compositor (MEMORY: claude-monitor box-shadow DPC storm).
+ *  - When the in-app `gpuRender` escape hatch is OFF (the "省电 / gaming" mode that
+ *    strips blur+orbs to spare the GPU), the retina backing store is capped at 1×
+ *    DPR — far fewer pixels to fill per redraw on a 4K panel, so a hover-driven
+ *    repaint can't claw back the GPU budget the user just freed.
+ *  - The hover overlay is a cheap single-rect repaint (no relayout), and the
+ *    drill zoom tween (in `DiskWorkspace`) is already gated by `reduceMotion`.
  *
  * See docs/superpowers/specs/2026-06-23-disk-space-analyzer-design.md §3.
  */
@@ -79,6 +86,9 @@ export function TreemapCanvas({
   // Re-read theme tokens when the theme / style flips (palette is theme-derived).
   const theme = useSettings((s) => s.theme);
   const themeStyle = useSettings((s) => s.themeStyle);
+  // GPU-budget escape hatch: when OFF, cap the retina backing store at 1× DPR so
+  // a hover repaint can't peg the GPU the "省电" mode just freed (spec §3 / §5).
+  const gpuRender = useSettings((s) => s.gpuRender);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -130,7 +140,9 @@ export function TreemapCanvas({
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // Cap DPR at 2× normally; at 1× when the GPU-render escape hatch is off so a
+    // 4K panel fills a quarter of the pixels per redraw (spec §3 / §5 GPU budget).
+    const dpr = gpuRender ? Math.min(window.devicePixelRatio || 1, 2) : 1;
     const W = size.w;
     const H = size.h;
     if (W <= 0 || H <= 0) return;
@@ -177,7 +189,7 @@ export function TreemapCanvas({
         if (r.w >= STRIP_MIN_W && r.h >= LABEL_STRIP + 6) {
           ctx.fillStyle = labelColor(palette, true);
           ctx.font = STRIP_FONT;
-          drawClipped(ctx, node.name, r.x + 4, r.y + 3, r.w - 8);
+          drawClipped(ctx, displayName(node, tf), r.x + 4, r.y + 3, r.w - 8);
         }
         continue;
       }
@@ -187,7 +199,7 @@ export function TreemapCanvas({
         ctx.fillStyle = labelColor(palette, false);
         ctx.font = NAME_FONT;
         ctx.textAlign = "left";
-        drawClipped(ctx, node.name, r.x + 4, r.y + 4, r.w - 8);
+        drawClipped(ctx, displayName(node, tf), r.x + 4, r.y + 4, r.w - 8);
         ctx.fillStyle = palette.muted;
         ctx.font = SIZE_FONT;
         drawClipped(
@@ -220,7 +232,7 @@ export function TreemapCanvas({
       ctx.lineWidth = 1.5;
       ctx.strokeRect(r.x + 0.75, r.y + 0.75, r.w - 1.5, r.h - 1.5);
     }
-  }, [rects, palette, colorMode, metric, size.w, size.h, hover, nodeOf, tf]);
+  }, [rects, palette, colorMode, metric, size.w, size.h, hover, nodeOf, tf, gpuRender]);
 
   // Hover hit-test (spec §3.7) — O(visible) reverse scan.
   const onMove = useCallback(
@@ -351,7 +363,9 @@ function TreemapTooltip({ tf, rect, node, metric, rootSize, cx, cy, boxW, boxH }
         </div>
       ) : (
         <>
-          <div className="mb-0.5 truncate font-semibold text-ink">{node?.name ?? "—"}</div>
+          <div className="mb-0.5 truncate font-semibold text-ink">
+            {node ? displayName(node, tf) : "—"}
+          </div>
           {node?.path && <div className="mb-1 truncate text-[10.5px] text-dim">{node.path}</div>}
         </>
       )}
