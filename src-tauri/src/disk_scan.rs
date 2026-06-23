@@ -1689,7 +1689,12 @@ mod win {
         // `FindFirstFileExW` walk below with ZERO behavior change. A user cancel
         // mid-MFT finalizes as `Cancelled` WITHOUT falling back (capability
         // failures fall back; user cancel does not — spec §3.3).
-        if try_run_mft(&handle, &app, &walk_root, &root_display) {
+        // MFT fast-path is OPT-IN (COREPILOT_MFT=1) until it's hardware-validated
+        // elevated — it's unvalidated raw $MFT parsing, so default to the proven
+        // FindFirstFileExW walk to avoid an empty/wrong tree on a regression.
+        if std::env::var("COREPILOT_MFT").is_ok()
+            && try_run_mft(&handle, &app, &walk_root, &root_display)
+        {
             return;
         }
         if handle.cancel.load(Ordering::Relaxed) {
