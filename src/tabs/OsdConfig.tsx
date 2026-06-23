@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  ChevronRight,
   FolderOpen,
   Gamepad2,
   ListPlus,
@@ -31,6 +32,7 @@ import {
   freePosStyle,
   type OsdCategory,
   type OsdData,
+  type OsdMetricDef,
 } from "../lib/osd";
 import {
   TASKBAR_DEFAULTS,
@@ -649,9 +651,12 @@ export function OsdConfig() {
 
         {/* Taskbar Monitor — an INDEPENDENT second overlay docked on the Windows
             taskbar, with its own enable toggle (coexists with the corner/free
-            OSD above; turning it on never moves that OSD). Always shown. */}
-        <TaskbarMonitorControls cfg={previewCfg} onChange={applyPatch} />
-        <TaskbarColorControls cfg={previewCfg} onChange={applyPatch} />
+            OSD above; turning it on never moves that OSD). All of its settings —
+            layout, custom layout, its own metric content, and colors — live in
+            ONE foldable panel. Binds DIRECTLY to the global useOsd store (not the
+            per-game previewCfg/applyPatch path), because the native taskbar
+            monitor is global. */}
+        <TaskbarMonitorPanel />
 
         {/* Monitoring content */}
         <div className="glass hairline rounded-2xl p-4">
@@ -992,204 +997,417 @@ function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
   );
 }
 
-interface TaskbarMonitorControlsProps {
-  cfg: OsdAppearance;
-  onChange: (patch: Partial<OsdCfg>) => void;
-}
+/** The metric keys the native taskbar plate (taskbar_mon.rs) can render, in a
+ *  sensible default offer order. The picker below offers ONLY these — writing the
+ *  taskbar monitor's OWN `tbMetrics` list, independent of the OSD `metrics`. */
+const TB_METRIC_KEYS = [
+  "cpu.util",
+  "cpu.temp",
+  "cpu.freq",
+  "mem.used",
+  "mem.util",
+  "gpu.util",
+  "gpu.temp",
+  "gpu.power",
+  "net.up",
+  "net.down",
+] as const;
 
-/** The independent taskbar-monitor settings: the "Taskbar" panel (Show Taskbar =
- *  its own enable toggle, Single Line, Position, Offset) + the "Custom Layout"
- *  panel (Size / Bold / Item Space / Inner Space / Padding). Mirrors the
- *  reference screenshot. The native taskbar monitor is a GLOBAL feature (App.tsx
- *  pushes only the global `useOsd` state to `tbmon_config`), so these controls
- *  read from AND write to the global store directly — bypassing the per-game
- *  preview/override path — so what the user edits is exactly what reaches the
- *  native window (a per-game override here would silently never apply).
- *  ponytail: deferred from the reference UI — Style preset, Hover Details,
- *  Double-Click action, Monitor selector, Click-Through (always on for this
- *  click-through window), and the Font picker (uses the inherited OSD font). */
-function TaskbarMonitorControls(_props: TaskbarMonitorControlsProps) {
+/** Human labels/categories for the taskbar-supported keys, reusing OSD_METRICS
+ *  (the catalog the corner OSD picker uses) so wording stays consistent. */
+const TB_METRIC_DEFS = TB_METRIC_KEYS.map(
+  (key) => OSD_METRICS.find((m) => m.key === key)!,
+);
+
+/** Group the taskbar-supported metrics by category, in OSD_CATEGORIES order, so
+ *  the picker reads like the OSD content picker (CPU / GPU / 内存 / 网络). */
+const TB_METRIC_GROUPS = OSD_CATEGORIES.map((c) => ({
+  cat: c,
+  defs: TB_METRIC_DEFS.filter((m) => m.cat === c.id),
+})).filter((g) => g.defs.length > 0);
+
+/**
+ * ONE foldable panel holding ALL taskbar-monitor settings — the independent
+ * second overlay docked on the Windows taskbar. A single Chevron header toggles
+ * the whole body open/closed; the enable toggle (Show Taskbar) stays in the
+ * header so it's reachable while folded.
+ *
+ * Sections (all folded together):
+ *   1. Layout       — Single Line / Position / Offset
+ *   2. Custom Layout — its master + Size / Bold / Item / Inner / Padding
+ *   3. Content      — the INDEPENDENT `tbMetrics` picker (this taskbar's own
+ *                     metric list, NOT the OSD's `metrics`), with add/remove +
+ *                     up/down reorder.
+ *   4. Colors       — its master + bg / label / value / warn / crit + thresholds.
+ *
+ * The native taskbar monitor is a GLOBAL feature (App.tsx pushes only the global
+ * `useOsd` state to `tbmon_config`), so every control here reads from AND writes
+ * to the global `useOsd` store directly — bypassing the per-game preview/override
+ * path, so what the user edits is exactly what reaches the native window (a
+ * per-game override here would silently never apply).
+ *
+ * ponytail: deferred from the reference UI — Style preset, Hover Details,
+ * Double-Click action, Monitor selector, Click-Through (always on for this
+ * click-through window), and the Font picker (uses the inherited OSD font).
+ */
+function TaskbarMonitorPanel() {
   const tf = useTf();
   const update = useOsd((s) => s.update);
   // Read the GLOBAL store (not the passed per-game previewCfg) so the editor
   // reflects exactly what is pushed to the native taskbar window.
   const cfg = useOsd();
+  const [open, setOpen] = useState(false);
   const tbEnabled = cfg.tbEnabled ?? TBMON_DEFAULTS.tbEnabled;
   const customLayout = cfg.tbCustomLayout ?? TBMON_DEFAULTS.tbCustomLayout;
+  const colorsOn = cfg.tbColorsEnabled ?? TASKBAR_DEFAULTS.tbColorsEnabled;
+  const metrics = cfg.tbMetrics ?? TBMON_DEFAULTS.tbMetrics;
+
+  // The independent tbMetrics editor: toggle add/remove preserves the picker's
+  // offer order; reorder nudges a selected key up/down within tbMetrics. All
+  // write `tbMetrics` on the GLOBAL store (never the OSD `metrics`).
+  function toggleTbMetric(key: string) {
+    const cur = cfg.tbMetrics ?? TBMON_DEFAULTS.tbMetrics;
+    const next = cur.includes(key)
+      ? cur.filter((k) => k !== key)
+      : // Insert in the canonical offer order so adding keeps pairs tidy.
+        TB_METRIC_KEYS.filter((k) => cur.includes(k) || k === key);
+    update({ tbMetrics: [...next] });
+  }
+  function moveTbMetric(key: string, dir: -1 | 1) {
+    const cur = [...(cfg.tbMetrics ?? TBMON_DEFAULTS.tbMetrics)];
+    const i = cur.indexOf(key);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= cur.length) return;
+    [cur[i], cur[j]] = [cur[j], cur[i]];
+    update({ tbMetrics: cur });
+  }
+
   return (
     <div className="glass hairline rounded-2xl p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <MonitorPlay size={14} className="text-accent-bright" />
-        <span className="hud-label text-[10.5px] text-dim">任务栏监视器 · TASKBAR MONITOR</span>
-        <span className="h-px flex-1 bg-line/50" />
-      </div>
-      <div className="mb-3 text-[11.5px] leading-relaxed text-dim">
-        {tf(
-          "停靠在 Windows 任务栏上的独立监视条;与上方角落/桌面 OSD 互不影响,可同时开启。",
-          "An independent monitor docked on the Windows taskbar — coexists with the corner / desktop OSD above (both can be on at once).",
-        )}
-      </div>
-
-      {/* Taskbar panel */}
-      <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
-        <Row label={tf("显示任务栏监视器", "Show Taskbar")}>
+      {/* Foldable header: chevron + title toggles the whole body; the enable
+          toggle stays visible while collapsed. */}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="no-drag flex flex-1 cursor-pointer items-center gap-2 text-left"
+          aria-expanded={open}
+        >
+          <ChevronRight
+            size={14}
+            className={cn("shrink-0 text-dim transition-transform", open && "rotate-90")}
+          />
+          <MonitorPlay size={14} className="shrink-0 text-accent-bright" />
+          <span className="hud-label text-[10.5px] text-dim">
+            {tf("任务栏监视器 · TASKBAR MONITOR", "TASKBAR MONITOR")}
+          </span>
+          {tbEnabled && (
+            <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent-bright">
+              {tf("已开启", "On")}
+            </span>
+          )}
+        </button>
+        <Row label={tf("显示", "Show")}>
           <Toggle
             checked={tbEnabled}
-            onChange={(v) => {
-              // The native taskbar window reads `tbEnabled` from the pushed config
-              // (App.tsx subscribes to the store and calls api.tbmonConfig), so the
-              // toggle only updates the store — no direct window call.
-              update({ tbEnabled: v });
-            }}
+            // The native taskbar window reads `tbEnabled` from the pushed config
+            // (App.tsx subscribes to the store and calls api.tbmonConfig), so the
+            // toggle only updates the store — no direct window call.
+            onChange={(v) => update({ tbEnabled: v })}
           />
         </Row>
-        <Row label={tf("单行显示", "Single Line")}>
-          <Toggle
-            checked={cfg.tbSingleLine ?? TBMON_DEFAULTS.tbSingleLine}
-            onChange={(v) => update({ tbSingleLine: v })}
-          />
-        </Row>
-        <Row label={tf("停靠位置", "Position")}>
-          <Segmented
-            id="tbmon-pos"
-            value={cfg.tbBarPosition ?? TBMON_DEFAULTS.tbBarPosition}
-            onChange={(v) => update({ tbBarPosition: v as TbBarPosition })}
-            options={[
-              { value: "left", label: tf("靠左", "Left") },
-              { value: "right", label: tf("靠右", "Right") },
-            ]}
-          />
-        </Row>
-        <NumRow
-          label={tf("偏移 (px)", "Offset (px)")}
-          value={cfg.tbOffset ?? TBMON_DEFAULTS.tbOffset}
-          onChange={(v) => update({ tbOffset: v })}
-        />
       </div>
 
-      {/* Custom Layout panel */}
-      <div className="mt-4 mb-3 flex items-center gap-2 border-t border-line/60 pt-3">
-        <span className="hud-label text-[10.5px] text-dim">自定义布局 · CUSTOM LAYOUT</span>
-        <span className="h-px flex-1 bg-line/50" />
-      </div>
-      <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
-        <Row label={tf("启用自定义布局", "Custom Layout")}>
-          <Toggle checked={customLayout} onChange={(v) => update({ tbCustomLayout: v })} />
-        </Row>
-        <Row label={tf("加粗", "Bold")}>
-          <Toggle checked={cfg.tbBold ?? TBMON_DEFAULTS.tbBold} onChange={(v) => update({ tbBold: v })} />
-        </Row>
-        <NumRow
-          label={tf("字号 (pt)", "Size (pt)")}
-          value={cfg.tbSize ?? TBMON_DEFAULTS.tbSize}
-          onChange={(v) => update({ tbSize: v })}
-        />
-        <NumRow
-          label={tf("项间距 (px)", "Item Space (px)")}
-          value={cfg.tbItemSpace ?? TBMON_DEFAULTS.tbItemSpace}
-          onChange={(v) => update({ tbItemSpace: v })}
-        />
-        <NumRow
-          label={tf("内间距 (px)", "Inner Space (px)")}
-          value={cfg.tbInnerSpace ?? TBMON_DEFAULTS.tbInnerSpace}
-          onChange={(v) => update({ tbInnerSpace: v })}
-        />
-        <NumRow
-          label={tf("内边距 (px)", "Padding (px)")}
-          value={cfg.tbPadding ?? TBMON_DEFAULTS.tbPadding}
-          onChange={(v) => update({ tbPadding: v })}
-        />
-      </div>
+      {open && (
+        <div className="mt-3 border-t border-line/60 pt-3">
+          <div className="mb-3 text-[11.5px] leading-relaxed text-dim">
+            {tf(
+              "停靠在 Windows 任务栏上的独立监视条;与上方角落/桌面 OSD 互不影响,可同时开启。其监控内容独立于上方 OSD。",
+              "An independent monitor docked on the Windows taskbar — coexists with the corner / desktop OSD above (both can be on at once). Its monitored content is independent of the OSD above.",
+            )}
+          </div>
+
+          {/* 1. Layout panel */}
+          <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+            <Row label={tf("单行显示", "Single Line")}>
+              <Toggle
+                checked={cfg.tbSingleLine ?? TBMON_DEFAULTS.tbSingleLine}
+                onChange={(v) => update({ tbSingleLine: v })}
+              />
+            </Row>
+            <Row label={tf("停靠位置", "Position")}>
+              <Segmented
+                id="tbmon-pos"
+                value={cfg.tbBarPosition ?? TBMON_DEFAULTS.tbBarPosition}
+                onChange={(v) => update({ tbBarPosition: v as TbBarPosition })}
+                options={[
+                  { value: "left", label: tf("靠左", "Left") },
+                  { value: "right", label: tf("靠右", "Right") },
+                ]}
+              />
+            </Row>
+            <NumRow
+              label={tf("偏移 (px)", "Offset (px)")}
+              value={cfg.tbOffset ?? TBMON_DEFAULTS.tbOffset}
+              onChange={(v) => update({ tbOffset: v })}
+            />
+          </div>
+
+          {/* 2. Custom Layout panel */}
+          <div className="mb-3 mt-4 flex items-center gap-2 border-t border-line/60 pt-3">
+            <span className="hud-label text-[10.5px] text-dim">自定义布局 · CUSTOM LAYOUT</span>
+            <span className="h-px flex-1 bg-line/50" />
+          </div>
+          <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+            <Row label={tf("启用自定义布局", "Custom Layout")}>
+              <Toggle checked={customLayout} onChange={(v) => update({ tbCustomLayout: v })} />
+            </Row>
+            <Row label={tf("加粗", "Bold")}>
+              <Toggle
+                checked={cfg.tbBold ?? TBMON_DEFAULTS.tbBold}
+                onChange={(v) => update({ tbBold: v })}
+              />
+            </Row>
+            <NumRow
+              label={tf("字号 (pt)", "Size (pt)")}
+              value={cfg.tbSize ?? TBMON_DEFAULTS.tbSize}
+              onChange={(v) => update({ tbSize: v })}
+            />
+            <NumRow
+              label={tf("项间距 (px)", "Item Space (px)")}
+              value={cfg.tbItemSpace ?? TBMON_DEFAULTS.tbItemSpace}
+              onChange={(v) => update({ tbItemSpace: v })}
+            />
+            <NumRow
+              label={tf("内间距 (px)", "Inner Space (px)")}
+              value={cfg.tbInnerSpace ?? TBMON_DEFAULTS.tbInnerSpace}
+              onChange={(v) => update({ tbInnerSpace: v })}
+            />
+            <NumRow
+              label={tf("内边距 (px)", "Padding (px)")}
+              value={cfg.tbPadding ?? TBMON_DEFAULTS.tbPadding}
+              onChange={(v) => update({ tbPadding: v })}
+            />
+          </div>
+
+          {/* 3. Content — the INDEPENDENT tbMetrics picker. */}
+          <TaskbarMetricsPicker
+            metrics={metrics}
+            onToggle={toggleTbMetric}
+            onMove={moveTbMetric}
+            onClear={() => update({ tbMetrics: [] })}
+          />
+
+          {/* 4. Colors panel */}
+          <div className="mb-3 mt-4 flex items-center gap-2 border-t border-line/60 pt-3">
+            <Palette size={14} className="text-accent-bright" />
+            <span className="hud-label text-[10.5px] text-dim">配色 · COLORS</span>
+            <span className="h-px flex-1 bg-line/50" />
+          </div>
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <span className="text-[12.5px] text-muted">{tf("启用配色", "Enable colors")}</span>
+            <Toggle checked={colorsOn} onChange={(v) => update({ tbColorsEnabled: v })} />
+          </div>
+          <div className="mb-3 flex items-start gap-2 rounded-lg border border-line/60 bg-surface2/50 px-3 py-2">
+            <AlertTriangle size={13} className="mt-0.5 shrink-0 text-warn" />
+            <span className="text-[11.5px] leading-relaxed text-dim">
+              将背景色设为接近系统任务栏颜色 / Set BG close to system taskbar color
+            </span>
+          </div>
+          <div className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
+            <ColorRow
+              label="背景色 Background"
+              value={cfg.tbBg ?? TASKBAR_DEFAULTS.tbBg}
+              onChange={(v) => update({ tbBg: v })}
+            />
+            <ColorRow
+              label="标签 Label"
+              value={cfg.tbLabel ?? TASKBAR_DEFAULTS.tbLabel}
+              onChange={(v) => update({ tbLabel: v })}
+            />
+            <ColorRow
+              label="数值 Value"
+              value={cfg.tbSafe ?? TASKBAR_DEFAULTS.tbSafe}
+              onChange={(v) => update({ tbSafe: v })}
+            />
+            <ColorRow
+              label="警告 Warn"
+              value={cfg.tbWarn ?? TASKBAR_DEFAULTS.tbWarn}
+              onChange={(v) => update({ tbWarn: v })}
+            />
+            <ColorRow
+              label="危险 Crit"
+              value={cfg.tbCrit ?? TASKBAR_DEFAULTS.tbCrit}
+              onChange={(v) => update({ tbCrit: v })}
+            />
+          </div>
+          <div className="mt-4 grid gap-x-6 gap-y-3 sm:grid-cols-2">
+            <NumRow
+              label="占用警告 (%)"
+              value={cfg.tbWarnLoad ?? TASKBAR_DEFAULTS.tbWarnLoad}
+              onChange={(v) => update({ tbWarnLoad: v })}
+            />
+            <NumRow
+              label="占用危险 (%)"
+              value={cfg.tbCritLoad ?? TASKBAR_DEFAULTS.tbCritLoad}
+              onChange={(v) => update({ tbCritLoad: v })}
+            />
+            <NumRow
+              label="温度警告 (°C)"
+              value={cfg.tbWarnTemp ?? TASKBAR_DEFAULTS.tbWarnTemp}
+              onChange={(v) => update({ tbWarnTemp: v })}
+            />
+            <NumRow
+              label="温度危险 (°C)"
+              value={cfg.tbCritTemp ?? TASKBAR_DEFAULTS.tbCritTemp}
+              onChange={(v) => update({ tbCritTemp: v })}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-interface TaskbarColorControlsProps {
-  cfg: OsdAppearance;
-  onChange: (patch: Partial<OsdCfg>) => void;
+interface TaskbarMetricsPickerProps {
+  /** The taskbar monitor's OWN selected metric keys, in display order. */
+  metrics: string[];
+  /** Toggle a key into / out of tbMetrics (writes the global store). */
+  onToggle: (key: string) => void;
+  /** Reorder a selected key up (-1) / down (+1) within tbMetrics. */
+  onMove: (key: string, dir: -1 | 1) => void;
+  /** Clear all selected taskbar metrics. */
+  onClear: () => void;
 }
 
-/** The taskbar-monitor "Colors" panel: an Enable toggle + a background color set
- *  close to the system taskbar + Label / Value / Warn / Crit colors and the
- *  load/temp warn-crit thresholds. Mirrors LiteMonitor's Colors settings (and the
- *  reference screenshot). These tb* fields feed the GLOBAL native taskbar monitor
- *  (App.tsx pushes only the global `useOsd` state), so — like the Taskbar Monitor
- *  card — they read from AND write to the global store directly, bypassing the
- *  per-game preview/override path (a per-game override would never reach the
- *  native window). */
-function TaskbarColorControls(_props: TaskbarColorControlsProps) {
-  const update = useOsd((s) => s.update);
-  // Read + write the GLOBAL store so what the user edits is exactly what is pushed
-  // to the native taskbar window (not a per-game override).
-  const cfg = useOsd();
-  const onChange = update;
-  const on = cfg.tbColorsEnabled ?? TASKBAR_DEFAULTS.tbColorsEnabled;
+/**
+ * The INDEPENDENT taskbar-monitor content picker. Edits the taskbar's own
+ * `tbMetrics` list — NOT the OSD `metrics`. Mirrors the OSD content picker's
+ * visual style (category-grouped checkbox tiles), and adds a compact "selected
+ * order" strip with up/down reorder so the user can arrange the pair order the
+ * native plate renders. Only the taskbar-supported keys are offered.
+ */
+function TaskbarMetricsPicker({ metrics, onToggle, onMove, onClear }: TaskbarMetricsPickerProps) {
+  const tf = useTf();
+  const selectedDefs = metrics
+    .map((k) => TB_METRIC_DEFS.find((m) => m.key === k))
+    .filter((m): m is OsdMetricDef => m != null);
   return (
-    <div className="glass hairline rounded-2xl p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <Palette size={14} className="text-accent-bright" />
-        <span className="hud-label text-[10.5px] text-dim">配色 · COLORS</span>
-        <span className="h-px flex-1 bg-line/50" />
-      </div>
+    <div className="mt-4 border-t border-line/60 pt-3">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <span className="text-[12.5px] text-muted">启用配色</span>
-        <Toggle checked={on} onChange={(v) => onChange({ tbColorsEnabled: v })} />
+        <div className="flex min-w-0 items-center gap-2">
+          <MonitorPlay size={14} className="shrink-0 text-accent-bright" />
+          <span className="hud-label truncate text-[10.5px] text-dim">
+            {tf("监控内容 · CONTENT", "CONTENT")}
+          </span>
+          <span className="rounded bg-surface2 px-1.5 py-0.5 text-[10px] text-dim">
+            {tf("已选", "Selected")}{" "}
+            <span className="nums text-muted">{metrics.length}</span>
+          </span>
+        </div>
+        <button
+          onClick={onClear}
+          disabled={metrics.length === 0}
+          className="no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <RotateCcw size={12} /> {tf("全部清空", "Clear all")}
+        </button>
       </div>
-      <div className="mb-3 flex items-start gap-2 rounded-lg border border-line/60 bg-surface2/50 px-3 py-2">
-        <AlertTriangle size={13} className="mt-0.5 shrink-0 text-warn" />
-        <span className="text-[11.5px] leading-relaxed text-dim">
-          将背景色设为接近系统任务栏颜色 / Set BG close to system taskbar color
-        </span>
+      <div className="mb-2 text-[11px] leading-relaxed text-dim">
+        {tf(
+          "任务栏监视器单独的监控项,与上方 OSD 互不影响。",
+          "The taskbar monitor's own metrics — independent of the OSD above.",
+        )}
       </div>
-      <div className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
-        <ColorRow
-          label="背景色 Background"
-          value={cfg.tbBg ?? TASKBAR_DEFAULTS.tbBg}
-          onChange={(v) => onChange({ tbBg: v })}
-        />
-        <ColorRow
-          label="标签 Label"
-          value={cfg.tbLabel ?? TASKBAR_DEFAULTS.tbLabel}
-          onChange={(v) => onChange({ tbLabel: v })}
-        />
-        <ColorRow
-          label="数值 Value"
-          value={cfg.tbSafe ?? TASKBAR_DEFAULTS.tbSafe}
-          onChange={(v) => onChange({ tbSafe: v })}
-        />
-        <ColorRow
-          label="警告 Warn"
-          value={cfg.tbWarn ?? TASKBAR_DEFAULTS.tbWarn}
-          onChange={(v) => onChange({ tbWarn: v })}
-        />
-        <ColorRow
-          label="危险 Crit"
-          value={cfg.tbCrit ?? TASKBAR_DEFAULTS.tbCrit}
-          onChange={(v) => onChange({ tbCrit: v })}
-        />
+
+      {/* Category-grouped toggle tiles (matches the OSD content picker style). */}
+      <div className="space-y-3">
+        {TB_METRIC_GROUPS.map((g) => (
+          <div key={g.cat.id}>
+            <div className="mb-1.5 text-[11px] font-medium text-dim">{g.cat.label}</div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {g.defs.map((m) => {
+                const on = metrics.includes(m.key);
+                return (
+                  <button
+                    key={m.key}
+                    onClick={() => onToggle(m.key)}
+                    className={cn(
+                      "no-drag flex cursor-pointer items-center gap-2.5 rounded-lg border px-3 py-2 text-left text-[12.5px] transition-colors",
+                      on
+                        ? "border-accent/40 bg-accent/10 text-ink"
+                        : "border-line bg-surface2 text-muted hover:bg-surface3 hover:text-ink",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "grid h-4 w-4 shrink-0 place-items-center rounded border transition-colors",
+                        on ? "border-accent bg-accent" : "border-line-strong",
+                      )}
+                    >
+                      {on && <span className="h-2 w-2 rounded-[2px] bg-white" />}
+                    </span>
+                    <span className="flex-1">
+                      <span className="text-dim">{m.tag} </span>
+                      {m.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
-      <div className="mt-4 grid gap-x-6 gap-y-3 sm:grid-cols-2">
-        <NumRow
-          label="占用警告 (%)"
-          value={cfg.tbWarnLoad ?? TASKBAR_DEFAULTS.tbWarnLoad}
-          onChange={(v) => onChange({ tbWarnLoad: v })}
-        />
-        <NumRow
-          label="占用危险 (%)"
-          value={cfg.tbCritLoad ?? TASKBAR_DEFAULTS.tbCritLoad}
-          onChange={(v) => onChange({ tbCritLoad: v })}
-        />
-        <NumRow
-          label="温度警告 (°C)"
-          value={cfg.tbWarnTemp ?? TASKBAR_DEFAULTS.tbWarnTemp}
-          onChange={(v) => onChange({ tbWarnTemp: v })}
-        />
-        <NumRow
-          label="温度危险 (°C)"
-          value={cfg.tbCritTemp ?? TASKBAR_DEFAULTS.tbCritTemp}
-          onChange={(v) => onChange({ tbCritTemp: v })}
-        />
-      </div>
+
+      {/* Selected-order strip with up/down reorder — the order here is the order
+          the native taskbar plate renders the metric pairs. */}
+      {selectedDefs.length > 0 && (
+        <div className="mt-3">
+          <div className="mb-1.5 text-[11px] font-medium text-dim">
+            {tf("显示顺序", "Display order")}
+          </div>
+          <div className="space-y-1">
+            {selectedDefs.map((m, i) => (
+              <div
+                key={m.key}
+                className="flex items-center gap-2 rounded-lg border border-line bg-surface2 px-3 py-1.5 text-[12px]"
+              >
+                <span className="nums w-5 shrink-0 text-dim">{i + 1}</span>
+                <span className="flex-1 truncate text-muted">
+                  <span className="text-dim">{m.tag} </span>
+                  {m.label}
+                </span>
+                <button
+                  onClick={() => onMove(m.key, -1)}
+                  disabled={i === 0}
+                  className="no-drag grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded text-dim transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
+                  title={tf("上移", "Move up")}
+                  aria-label={tf(`上移 ${m.label}`, `Move ${m.label} up`)}
+                >
+                  <ChevronRight size={13} className="-rotate-90" />
+                </button>
+                <button
+                  onClick={() => onMove(m.key, 1)}
+                  disabled={i === selectedDefs.length - 1}
+                  className="no-drag grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded text-dim transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
+                  title={tf("下移", "Move down")}
+                  aria-label={tf(`下移 ${m.label}`, `Move ${m.label} down`)}
+                >
+                  <ChevronRight size={13} className="rotate-90" />
+                </button>
+                <button
+                  onClick={() => onToggle(m.key)}
+                  className="no-drag grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded text-dim transition-colors hover:bg-danger/15 hover:text-danger"
+                  title={tf("移除", "Remove")}
+                  aria-label={tf(`移除 ${m.label}`, `Remove ${m.label}`)}
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

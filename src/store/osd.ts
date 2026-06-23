@@ -15,7 +15,9 @@ export type TbBarPosition = "left" | "right";
  *  state and the persist `migrate` backfill share one source of truth. */
 export const TASKBAR_DEFAULTS = {
   tbColorsEnabled: false,
-  tbBg: "#D2D2D2",
+  // Color-key background — kept DARK (near-black) so antialiased text edges blend
+  // into the (dark) taskbar instead of leaving a bright halo. See win11 plate.
+  tbBg: "#0B0F16",
   tbLabel: "#141414",
   tbSafe: "#008040",
   tbWarn: "#B57500",
@@ -208,16 +210,20 @@ export const useOsd = create<OsdStore>()(
     }),
     {
       name: "corepilot-osd",
-      version: 3,
+      version: 4,
       storage: createJSONStorage(() => tauriStorage),
       // v1 → v2: backfill the taskbar "Colors" fields. v2 → v3: backfill the
       // independent taskbar-monitor settings (tbEnabled / two-row / layout).
-      // Persisted values win where present.
-      migrate: (persisted) => ({
-        ...TASKBAR_DEFAULTS,
-        ...TBMON_DEFAULTS,
-        ...(persisted as Partial<OsdStore>),
-      }),
+      // v3 → v4: the taskbar color-key bg defaulted to light grey (#D2D2D2),
+      // which haloed antialiased text on the dark taskbar — reset that one old
+      // default to the new dark key. Custom bg values are preserved. Persisted
+      // values otherwise win where present.
+      migrate: (persisted) => {
+        const p = (persisted ?? {}) as Partial<OsdStore>;
+        const merged = { ...TASKBAR_DEFAULTS, ...TBMON_DEFAULTS, ...p };
+        if (p.tbBg === "#D2D2D2") merged.tbBg = TASKBAR_DEFAULTS.tbBg;
+        return merged;
+      },
     },
   ),
 );

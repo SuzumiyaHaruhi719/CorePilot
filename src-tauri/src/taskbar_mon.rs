@@ -50,19 +50,20 @@ use tauri::AppHandle;
 use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
-    GetTextExtentPoint32W, InvalidateRect, SelectObject, SetBkMode, SetTextColor, TextOutW,
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE, FW_BOLD,
-    FW_NORMAL, GetDC, HBRUSH, HDC, HFONT, OUT_DEFAULT_PRECIS,
-    PAINTSTRUCT, ReleaseDC, TRANSPARENT,
+    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetMonitorInfoW,
+    GetTextExtentPoint32W, InvalidateRect, MonitorFromWindow, SelectObject, SetBkMode, SetTextColor,
+    TextOutW, ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE,
+    FW_BOLD, FW_NORMAL, GetDC, HBRUSH, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, TRANSPARENT,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{
-    SHAppBarMessage, ABM_GETTASKBARPOS, ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, APPBARDATA,
+    SHAppBarMessage, SHQueryUserNotificationState, ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP,
+    ABM_GETTASKBARPOS, APPBARDATA, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows, FindWindowW,
-    GetClassNameW, GetMessageW, GetWindowRect, KillTimer,
+    GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect, KillTimer,
     LoadCursorW, PostQuitMessage, RegisterClassW, SetLayeredWindowAttributes, SetTimer,
     SetWindowPos, ShowWindow, TranslateMessage, HWND_TOPMOST, IDC_ARROW, MSG,
     SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_PAINT,
@@ -178,7 +179,7 @@ impl Default for TbConfig {
             inner_space: 8,
             padding: 2,
             colors_enabled: false,
-            bg: rgb(0xD2, 0xD2, 0xD2),
+            bg: rgb(0x0B, 0x0F, 0x16),
             label: rgb(0x14, 0x14, 0x14),
             safe: rgb(0x00, 0x80, 0x40),
             warn: rgb(0xB5, 0x75, 0x00),
@@ -634,7 +635,10 @@ unsafe fn rebuild_font(rs: &mut RenderState, size_pt: i32, bold: bool, dpi: u32)
         DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY,
+        // Grayscale AA, NOT ClearType: ClearType's subpixel color fringe looks
+        // ugly on a color-keyed layered window (the RGB-tinted edges don't blend
+        // with the key). Grayscale edges blend cleanly into the dark key/taskbar.
+        ANTIALIASED_QUALITY,
         (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
         PCWSTR(face.as_ptr()),
     );
@@ -654,6 +658,45 @@ unsafe fn rebuild_brush(rs: &mut RenderState, bg: COLORREF) {
     let _ = SetLayeredWindowAttributes(rs.hwnd, bg, 0, LWA_COLORKEY);
 }
 
+/// True when a fullscreen app (exclusive D3D / presentation mode, or a borderless
+/// window covering its whole monitor) is in the foreground — we HIDE the taskbar
+/// plate then so this `WS_EX_TOPMOST` surface never draws over a game. Cheap;
+/// called each ~1 s tick on the render thread.
+unsafe fn foreground_is_fullscreen() -> bool {
+    // Exclusive / D3D fullscreen + presentation mode — the canonical shell query.
+    if let Ok(state) = SHQueryUserNotificationState() {
+        if state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE {
+            return true;
+        }
+    }
+    // Borderless fullscreen: the foreground window covers its entire monitor.
+    let fg = GetForegroundWindow();
+    if fg.0.is_null() {
+        return false;
+    }
+    let mut cls = [0u16; 64];
+    let n = GetClassNameW(fg, &mut cls);
+    let c = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
+    // The desktop / shell are not games.
+    if c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" {
+        return false;
+    }
+    let mut wr = RECT::default();
+    if GetWindowRect(fg, &mut wr).is_err() {
+        return false;
+    }
+    let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !GetMonitorInfoW(mon, &mut mi).as_bool() {
+        return false;
+    }
+    let m = mi.rcMonitor;
+    wr.left <= m.left && wr.top <= m.top && wr.right >= m.right && wr.bottom >= m.bottom
+}
+
 /// One ~1 s tick: read config + readings, (re)build cells + grid geometry,
 /// refresh the cached GDI objects on a config change, dock the window over the
 /// taskbar, show/hide per `enabled`, and invalidate for a repaint. Runs entirely
@@ -667,6 +710,13 @@ unsafe fn tick() {
 
         // Hidden? Park the window and skip all GDI work.
         if !cfg.enabled {
+            let _ = ShowWindow(rs.hwnd, SW_HIDE);
+            rs.cfg = cfg;
+            return;
+        }
+
+        // A fullscreen game is in the foreground → hide so we never draw over it.
+        if foreground_is_fullscreen() {
             let _ = ShowWindow(rs.hwnd, SW_HIDE);
             rs.cfg = cfg;
             return;
