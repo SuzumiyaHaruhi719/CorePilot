@@ -74,16 +74,16 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{
     SHAppBarMessage, SHQueryUserNotificationState, ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP,
-    ABM_GETTASKBARPOS, APPBARDATA, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
+    ABM_GETTASKBARPOS, APPBARDATA, QUNS_RUNNING_D3D_FULL_SCREEN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows, FindWindowW,
-    GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect, KillTimer,
+    GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowLongW, GetWindowRect, KillTimer,
     LoadCursorW, PostQuitMessage, RegisterClassW, SetLayeredWindowAttributes, SetTimer,
-    SetWindowPos, ShowWindow, TranslateMessage, HWND_TOPMOST, IDC_ARROW, MSG,
+    SetWindowPos, ShowWindow, TranslateMessage, GWL_STYLE, HWND_TOPMOST, IDC_ARROW, MSG,
     SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_PAINT,
-    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP, LWA_COLORKEY,
+    WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZE, WS_POPUP, WS_THICKFRAME, LWA_COLORKEY,
 };
 
 /// Ensures the native window thread is spawned at most once (mirrors
@@ -111,6 +111,25 @@ struct Group {
     values: Vec<Seg>,
     /// label.width + Σ(inner_space + value.width) — the group's drawn width.
     width: i32,
+}
+
+/// One drawable unit in the aligned column grid (LiteMonitor `Column` model port):
+/// a label or a value, assigned a flat COLUMN INDEX so the same column index in
+/// row 0 and row 1 shares an x-band. Owns its UTF-16 text so `WM_PAINT` never
+/// allocates. `is_value` selects right-alignment (values) vs left-alignment
+/// (labels) within the column band, exactly like LiteMonitor's renderer.
+struct Cell {
+    w16: Vec<u16>,
+    color: COLORREF,
+    width: i32,
+    /// Flat column index (0-based) shared across both rows.
+    col: usize,
+    /// true = value cell (right-aligned in its column), false = label (left).
+    is_value: bool,
+    /// true when this cell STARTS a new category group (drives the column gap:
+    /// `item_space` at a group boundary, `inner_space` between label↔value /
+    /// value↔value inside a group).
+    group_start: bool,
 }
 
 /// OSD category index (matches osdPalette.ts order fps,cpu,gpu,mem,disk,net) →
@@ -568,12 +587,21 @@ struct RenderState {
     /// The bg the cached brush + color-key were set for.
     brush_key: COLORREF,
     cfg: TickCfg,
-    /// The laid-out rows (1 or 2): each row is a sequence of category groups,
-    /// already measured/colored, ready for `WM_PAINT`. CPU anchors row 0, GPU
-    /// anchors row 1, remaining categories balance the two rows' widths.
-    rows_layout: Vec<Vec<Group>>,
+    /// The aligned column grid consumed by `WM_PAINT` (1 or 2 rows). Each row is a
+    /// flat sequence of `Cell`s (label + values), each tagged with a shared COLUMN
+    /// INDEX so corresponding columns line up vertically across both rows
+    /// (LiteMonitor `Column` model). CPU anchors row 0, GPU anchors row 1.
+    cells_layout: Vec<Vec<Cell>>,
+    /// Shared x-offset (device px) of each column's left edge, indexed by column.
+    col_x: Vec<i32>,
+    /// Width (device px) of each column = max cell width across the rows there.
+    col_w: Vec<i32>,
     /// Per-row height in device px (the tallest measured segment).
     row_h: i32,
+    /// Last GOOD dock geometry `(x, y, plate_w, plate_h)`. On a TRANSIENT dock
+    /// query failure we re-show at this instead of hiding, so a single bad tick
+    /// (Explorer restart / momentary appbar churn) never blinks the plate off.
+    last_good: Option<(i32, i32, i32, i32)>,
 
     // === Direct2D / DirectWrite text engine (browser-grade glyphs). ===
     /// When true, measure + paint go through D2D/DWrite; when false (any D2D
@@ -818,18 +846,32 @@ unsafe fn measure_d2d(rs: &RenderState, s: &str) -> Option<(i32, i32)> {
     Some((m.width.ceil() as i32, m.height.ceil() as i32))
 }
 
-/// True when a fullscreen app (exclusive D3D / presentation mode, or a borderless
-/// window covering its whole monitor) is in the foreground — we HIDE the taskbar
-/// plate then so this `WS_EX_TOPMOST` surface never draws over a game. Cheap;
-/// called each ~1 s tick on the render thread.
+/// True ONLY when a GENUINE exclusive / borderless fullscreen GAME is in the
+/// foreground — we HIDE the taskbar plate then so this `WS_EX_TOPMOST` surface
+/// never draws over a game. Cheap; called each ~1 s tick on the render thread.
+///
+/// Deliberately MINIMAL (ported from LiteMonitor's philosophy: LiteMonitor is a
+/// child of `Shell_TrayWnd` and lets Windows hide the bar — it does NO app-side
+/// fullscreen detection at all). CorePilot's plate is a free top-level window so
+/// it needs a rule, but the rule must not fire for transient shell states or a
+/// merely-maximized normal window:
+///   * the ONLY trusted shell positive is `QUNS_RUNNING_D3D_FULL_SCREEN` (true
+///     exclusive / fullscreen-optimization game). `QUNS_PRESENTATION_MODE`
+///     ("don't disturb": media players, projector mode, some video calls) is
+///     NOT a game and is no longer treated as fullscreen.
+///   * the monitor-cover test is gated behind a BORDERLESS-style check: a real
+///     borderless game is `WS_POPUP` with no caption/thick-frame and is NOT
+///     maximized; a maximized Explorer/browser (which keeps a caption/frame and
+///     still shows the taskbar) therefore never counts.
 unsafe fn foreground_is_fullscreen() -> bool {
-    // Exclusive / D3D fullscreen + presentation mode — the canonical shell query.
+    // Exclusive / D3D fullscreen — the only trusted shell positive.
     if let Ok(state) = SHQueryUserNotificationState() {
-        if state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE {
+        if state == QUNS_RUNNING_D3D_FULL_SCREEN {
             return true;
         }
     }
-    // Borderless fullscreen: the foreground window covers its entire monitor.
+    // Borderless fullscreen: a visible, borderless, monitor-covering foreground
+    // window. Anything that fails one of these gates keeps the plate visible.
     let fg = GetForegroundWindow();
     if fg.0.is_null() {
         return false;
@@ -837,8 +879,23 @@ unsafe fn foreground_is_fullscreen() -> bool {
     let mut cls = [0u16; 64];
     let n = GetClassNameW(fg, &mut cls);
     let c = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
-    // The desktop / shell are not games.
-    if c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" {
+    // The desktop / shell / our own plate are never games.
+    if c == "Progman"
+        || c == "WorkerW"
+        || c == "Shell_TrayWnd"
+        || c == "Shell_SecondaryTrayWnd"
+        || c == "CorePilotTaskbarMon"
+    {
+        return false;
+    }
+    // Style gate: reject maximized windows and any window that still has a
+    // caption or a sizing (thick) frame — i.e. all normal/maximized apps. A
+    // borderless fullscreen game has none of these.
+    let style = GetWindowLongW(fg, GWL_STYLE) as u32;
+    if (style & WS_MAXIMIZE.0) != 0
+        || (style & WS_CAPTION.0) != 0
+        || (style & WS_THICKFRAME.0) != 0
+    {
         return false;
     }
     let mut wr = RECT::default();
@@ -854,6 +911,7 @@ unsafe fn foreground_is_fullscreen() -> bool {
         return false;
     }
     let m = mi.rcMonitor;
+    // Covers the entire monitor on all four edges → genuine borderless game.
     wr.left <= m.left && wr.top <= m.top && wr.right >= m.right && wr.bottom >= m.bottom
 }
 
@@ -972,7 +1030,9 @@ unsafe fn tick() {
         // Nothing to show — hide rather than dock an empty plate.
         if groups.is_empty() {
             let _ = ShowWindow(rs.hwnd, SW_HIDE);
-            rs.rows_layout = Vec::new();
+            rs.cells_layout = Vec::new();
+            rs.col_x = Vec::new();
+            rs.col_w = Vec::new();
             rs.cfg = cfg;
             return;
         }
@@ -1018,36 +1078,104 @@ unsafe fn tick() {
             }
         };
 
+        // === Aligned column grid (LiteMonitor `Column` model port). ===
+        //
+        // Flatten each row of GROUPS into an ordered list of `Cell`s — the group
+        // label is one cell, each value another — and assign every cell a flat
+        // COLUMN INDEX by its position in the row. Column k pairs row-0's k-th
+        // cell with row-1's k-th cell; the column's width is the MAX of the two
+        // (LiteMonitor `Math.Max(widthTop, widthBottom)`), and both rows draw at
+        // the shared `col_x[k]` band, so corresponding columns line up vertically
+        // (CPU/GPU labels align, util% under util%, temp under temp, …).
         let nrows = rows_layout.len() as i32;
-        let row_w = rows_layout
-            .iter()
-            .map(|gs| gs.iter().map(|g| g.width).sum::<i32>() + (gs.len() as i32 - 1).max(0) * item)
-            .max()
-            .unwrap_or(0);
+        let mut cells_layout: Vec<Vec<Cell>> = Vec::with_capacity(rows_layout.len());
+        let mut ncols = 0usize;
+        for groups in &rows_layout {
+            let mut row_cells: Vec<Cell> = Vec::new();
+            let mut col = 0usize;
+            for g in groups {
+                // Label cell starts the group (→ item_space gap before it).
+                row_cells.push(Cell {
+                    w16: g.label.w16.clone(),
+                    color: g.label.color,
+                    width: g.label.width,
+                    col,
+                    is_value: false,
+                    group_start: true,
+                });
+                col += 1;
+                for v in &g.values {
+                    row_cells.push(Cell {
+                        w16: v.w16.clone(),
+                        color: v.color,
+                        width: v.width,
+                        col,
+                        is_value: true,
+                        group_start: false,
+                    });
+                    col += 1;
+                }
+            }
+            ncols = ncols.max(col);
+            cells_layout.push(row_cells);
+        }
+
+        // Per-column width = max cell width across the rows at that column. Per-
+        // column-boundary gap = max across rows of (item_space if the column's
+        // cell starts a group, else inner_space) — so both rows share one x grid
+        // and the existing item_space/inner_space spacing semantics are preserved.
+        let mut col_w = vec![0i32; ncols];
+        let mut col_gap = vec![inner; ncols]; // gap that PRECEDES column k
+        for row_cells in &cells_layout {
+            for cell in row_cells {
+                col_w[cell.col] = col_w[cell.col].max(cell.width);
+                let g = if cell.group_start { item } else { inner };
+                col_gap[cell.col] = col_gap[cell.col].max(g);
+            }
+        }
+        // Shared x-offset of each column's left edge. Column 0 sits at `pad`; its
+        // leading gap (a group boundary) is folded into the padding, not added.
+        let mut col_x = vec![0i32; ncols];
+        let mut x = pad;
+        for k in 0..ncols {
+            if k > 0 {
+                x += col_gap[k];
+            }
+            col_x[k] = x;
+            x += col_w[k];
+        }
+        let row_w = if ncols > 0 { col_x[ncols - 1] + col_w[ncols - 1] - pad } else { 0 };
+
         let plate_w = pad * 2 + row_w;
         let plate_h = pad * 2 + nrows * row_h + (nrows - 1).max(0) * inner;
 
-        rs.rows_layout = rows_layout;
+        rs.cells_layout = cells_layout;
+        rs.col_x = col_x;
+        rs.col_w = col_w;
         rs.row_h = row_h;
         rs.cfg = cfg;
 
-        // Dock over the taskbar's free area. `None` = no valid on-bar placement
-        // (bar query failed / auto-hidden / sliver) → hide rather than drop the
-        // plate onto a desktop corner.
-        let Some((x, y)) = dock_xy(plate_w, plate_h, rs.cfg.bar_right, rs.cfg.offset, dpi) else {
-            let _ = ShowWindow(rs.hwnd, SW_HIDE);
-            return;
+        // Dock over the taskbar's free area. On a SUCCESSFUL query, record the
+        // geometry as last-good and show. On a TRANSIENT failure (`None`: bar
+        // query failed / auto-hidden / sliver) DO NOT hide on a single bad tick —
+        // re-show at the last good geometry instead, so a momentary appbar/tray
+        // glitch never blinks the plate off the normal desktop. Only hide when we
+        // have never had a good position (nothing to show yet).
+        let (x, y, w, h) = match dock_xy(plate_w, plate_h, rs.cfg.bar_right, rs.cfg.offset, dpi) {
+            Some((x, y)) => {
+                rs.last_good = Some((x, y, plate_w, plate_h));
+                (x, y, plate_w, plate_h)
+            }
+            None => match rs.last_good {
+                Some(g) => g,
+                None => {
+                    let _ = ShowWindow(rs.hwnd, SW_HIDE);
+                    return;
+                }
+            },
         };
 
-        let _ = SetWindowPos(
-            rs.hwnd,
-            Some(HWND_TOPMOST),
-            x,
-            y,
-            plate_w,
-            plate_h,
-            SWP_NOACTIVATE,
-        );
+        let _ = SetWindowPos(rs.hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
         let _ = ShowWindow(rs.hwnd, SW_SHOWNOACTIVATE);
         let _ = InvalidateRect(Some(rs.hwnd), None, true);
     });
@@ -1228,7 +1356,6 @@ unsafe fn paint_d2d(rs: &RenderState, hdc: HDC, rect: &RECT) -> bool {
     target.Clear(Some(&colorref_to_d2d(rs.cfg.bg)));
 
     let pad = rs.cfg.padding.max(0);
-    let item = rs.cfg.item_space.max(0);
     let inner = rs.cfg.inner_space.max(0);
     // Generous per-segment layout rect; left/top is the draw origin, right/bottom
     // are slack so DirectWrite never wraps/clips (we already measured each width).
@@ -1253,18 +1380,20 @@ unsafe fn paint_d2d(rs: &RenderState, hdc: HDC, rect: &RECT) -> bool {
         );
     };
 
-    for (r, groups) in rs.rows_layout.iter().enumerate() {
+    // Aligned column grid: every cell draws inside its shared column band
+    // [col_x[k], col_x[k]+col_w[k]] — labels LEFT-aligned at the band start,
+    // values RIGHT-aligned to the band end (so decimal points / units stack).
+    for (r, cells) in rs.cells_layout.iter().enumerate() {
         let cy = pad + r as i32 * (rs.row_h + inner);
-        let mut cx = pad;
-        for g in groups {
-            draw(cx, cy, &g.label.w16, g.label.color);
-            cx += g.label.width;
-            for v in &g.values {
-                cx += inner;
-                draw(cx, cy, &v.w16, v.color);
-                cx += v.width;
-            }
-            cx += item;
+        for cell in cells {
+            let band_x = rs.col_x.get(cell.col).copied().unwrap_or(pad);
+            let band_w = rs.col_w.get(cell.col).copied().unwrap_or(cell.width);
+            let cx = if cell.is_value {
+                band_x + (band_w - cell.width).max(0)
+            } else {
+                band_x
+            };
+            draw(cx, cy, &cell.w16, cell.color);
         }
     }
 
@@ -1283,27 +1412,23 @@ unsafe fn paint_gdi(rs: &RenderState, hdc: HDC, rect: &RECT) {
     SetBkMode(hdc, TRANSPARENT);
 
     let pad = rs.cfg.padding.max(0);
-    let item = rs.cfg.item_space.max(0);
     let inner = rs.cfg.inner_space.max(0);
 
-    for (r, groups) in rs.rows_layout.iter().enumerate() {
+    // Same aligned column grid as `paint_d2d`: labels left-aligned at the column
+    // band start, values right-aligned to the band end, both rows sharing col_x.
+    for (r, cells) in rs.cells_layout.iter().enumerate() {
         let cy = pad + r as i32 * (rs.row_h + inner);
-        let mut cx = pad;
-        for g in groups {
-            // Category label in its OSD-theme color. Reuse the cached UTF-16
-            // buffer built in `tick` — no per-paint allocation.
-            SetTextColor(hdc, g.label.color);
-            let _ = TextOutW(hdc, cx, cy, &g.label.w16);
-            cx += g.label.width;
-            // The category's values (white, or threshold-colored), each after an
-            // inner gap.
-            for v in &g.values {
-                cx += inner;
-                SetTextColor(hdc, v.color);
-                let _ = TextOutW(hdc, cx, cy, &v.w16);
-                cx += v.width;
-            }
-            cx += item; // gap before the next group
+        for cell in cells {
+            let band_x = rs.col_x.get(cell.col).copied().unwrap_or(pad);
+            let band_w = rs.col_w.get(cell.col).copied().unwrap_or(cell.width);
+            let cx = if cell.is_value {
+                band_x + (band_w - cell.width).max(0)
+            } else {
+                band_x
+            };
+            // Reuse the cached UTF-16 buffer built in `tick` — no per-paint alloc.
+            SetTextColor(hdc, cell.color);
+            let _ = TextOutW(hdc, cx, cy, &cell.w16);
         }
     }
 
@@ -1411,8 +1536,11 @@ pub fn start(app: AppHandle) {
                     font_key: (0, false, 0),
                     brush_key: COLORREF(0xFFFF_FFFF),
                     cfg: TickCfg::read(),
-                    rows_layout: Vec::new(),
+                    cells_layout: Vec::new(),
+                    col_x: Vec::new(),
+                    col_w: Vec::new(),
                     row_h: 0,
+                    last_good: None,
                     use_d2d: false,
                     d2d_factory: None,
                     dwrite_factory: None,
