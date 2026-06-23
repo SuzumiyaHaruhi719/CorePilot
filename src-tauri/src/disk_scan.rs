@@ -1769,8 +1769,13 @@ pub fn scan_handle(scan_id: &str) -> Option<Arc<ScanHandle>> {
 
 /// Default LOD knobs for `disk_tree` when the frontend omits them (the treemap's
 /// initial pull). The client tunes these via the toolbar LOD slider (spec §4.5).
-const DEFAULT_DEPTH_LIMIT: u8 = 4;
-const DEFAULT_MAX_NODES: u32 = 4096;
+// Deep + large by default so the treemap fills like SpaceSniffer (a full-disk
+// overview, not just the top 4 levels). The CLIENT treemap has its own pixel-LOD
+// (stops recursing into sub-pixel rects) and a draw-count cap, so a big/deep slice
+// renders densely where pixels allow without over-drawing — container interiors
+// (e.g. a huge `Videos/`) fill with their contents instead of staying empty.
+const DEFAULT_DEPTH_LIMIT: u8 = 16;
+const DEFAULT_MAX_NODES: u32 = 16000;
 
 /// Return a bounded LOD slice of a scan's published tree (spec §2.9). The backend
 /// does the slicing so a huge tree never crosses IPC whole; the workhorse for the
