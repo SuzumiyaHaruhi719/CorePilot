@@ -171,11 +171,15 @@ enum FieldClass {
 /// Map a metric key to its numeric field class (for worst-case field sizing).
 fn field_class(key: &str) -> FieldClass {
     match key {
-        "cpu.util" | "gpu.util" | "mem.util" => FieldClass::Percent,
+        "cpu.util" | "gpu.util" | "mem.util" | "gpu.fan" | "gpu.vramPct" | "disk.util" => {
+            FieldClass::Percent
+        }
         "cpu.temp" | "gpu.temp" => FieldClass::Temp,
-        "cpu.freq" | "gpu.power" => FieldClass::ClockPower,
-        "mem.used" => FieldClass::Mem,
-        "net.up" | "net.down" => FieldClass::NetRate,
+        "cpu.freq" | "gpu.power" | "cpu.power" | "gpu.coreClock" | "gpu.memClock" => {
+            FieldClass::ClockPower
+        }
+        "mem.used" | "gpu.vramUsed" => FieldClass::Mem,
+        "net.up" | "net.down" | "disk.read" | "disk.write" => FieldClass::NetRate,
         _ => FieldClass::Other,
     }
 }
@@ -519,11 +523,20 @@ struct Readings {
     cpu_util: Option<f64>,
     cpu_temp: Option<f64>,
     cpu_clock: Option<f64>,
+    cpu_power: Option<f64>,
     mem_used: Option<u64>,
     mem_pct: Option<f64>,
     gpu_util: Option<f64>,
     gpu_temp: Option<f64>,
     gpu_power: Option<f64>,
+    gpu_core_clock: Option<f64>,
+    gpu_mem_clock: Option<f64>,
+    gpu_fan: Option<f64>,
+    gpu_vram_used: Option<u64>,
+    gpu_vram_pct: Option<f64>,
+    disk_util: Option<f64>,
+    disk_read: Option<u64>,
+    disk_write: Option<u64>,
     net_up: Option<u64>,
     net_down: Option<u64>,
 }
@@ -557,15 +570,58 @@ impl Readings {
             sensors.gpu_power.map(|v| v as f64)
         };
 
+        // GPU clocks / fan come only from NVML (no PDH/sidecar equivalent); they're
+        // available iff the NVML query succeeded. A 0 clock means "unknown" — treat
+        // it as unavailable (matches osd.ts `d.gpu?.graphicsClock ? … : null`).
+        let gpu_core_clock = if gpu.available && gpu.graphics_clock > 0 {
+            Some(gpu.graphics_clock as f64)
+        } else {
+            None
+        };
+        let gpu_mem_clock = if gpu.available && gpu.mem_clock > 0 {
+            Some(gpu.mem_clock as f64)
+        } else {
+            None
+        };
+        let gpu_fan = if gpu.available {
+            Some(gpu.fan_speed_pct as f64)
+        } else {
+            None
+        };
+        // VRAM: prefer NVML's used/total, else the PDH/sidecar dedicated-VRAM figures
+        // (sensors.vram_used / vram_total). pct + used require a positive total.
+        let (vram_used_b, vram_total_b) = if gpu.available && gpu.mem_total_bytes > 0 {
+            (Some(gpu.mem_used_bytes), Some(gpu.mem_total_bytes))
+        } else {
+            (sensors.vram_used, sensors.vram_total)
+        };
+        let gpu_vram_pct = match (vram_used_b, vram_total_b) {
+            (Some(u), Some(t)) if t > 0 => Some(u as f64 / t as f64 * 100.0),
+            _ => None,
+        };
+        let gpu_vram_used = match vram_total_b {
+            Some(t) if t > 0 => vram_used_b,
+            _ => None,
+        };
+
         Readings {
             cpu_util: Some(metrics.cpu_overall as f64),
             cpu_temp: sensors.cpu_temp.map(|v| v as f64),
             cpu_clock: sensors.cpu_clock,
+            cpu_power: sensors.cpu_power.map(|v| v as f64),
             mem_used: Some(metrics.mem_used),
             mem_pct,
             gpu_util,
             gpu_temp,
             gpu_power,
+            gpu_core_clock,
+            gpu_mem_clock,
+            gpu_fan,
+            gpu_vram_used,
+            gpu_vram_pct,
+            disk_util: sensors.disk_pct.map(|v| v as f64),
+            disk_read: sensors.disk_read,
+            disk_write: sensors.disk_write,
             net_up: sensors.net_up,
             net_down: sensors.net_down,
         }
@@ -579,7 +635,10 @@ impl Readings {
             "cpu.temp" => self.cpu_temp,
             "gpu.util" => self.gpu_util,
             "gpu.temp" => self.gpu_temp,
+            "gpu.fan" => self.gpu_fan,
+            "gpu.vramPct" => self.gpu_vram_pct,
             "mem.util" => self.mem_pct,
+            "disk.util" => self.disk_util,
             _ => None,
         }
     }
@@ -595,7 +654,7 @@ impl Readings {
             "cpu.freq" => self
                 .cpu_clock
                 .map(|v| ("CCLK", format!("{:.0}MHz", v))),
-            "cpu.power" => None, // not in the default set; sensors carry W if added
+            "cpu.power" => self.cpu_power.map(|v| ("CPU", format!("{:.0}W", v))),
             "mem.used" => self
                 .mem_used
                 .map(|v| ("RAM", fmt_bytes(v as f64, 1))),
@@ -603,8 +662,24 @@ impl Readings {
             "gpu.util" => self.gpu_util.map(|v| ("GPU", format!("{:.1}%", v))),
             "gpu.temp" => self.gpu_temp.map(|v| ("GPU", format!("{:.1}°C", v))),
             "gpu.power" => self.gpu_power.map(|v| ("GPU", format!("{:.0}W", v))),
+            "gpu.coreClock" => self.gpu_core_clock.map(|v| ("GPU", format!("{:.0}MHz", v))),
+            "gpu.memClock" => self.gpu_mem_clock.map(|v| ("GPU", format!("{:.0}MHz", v))),
+            "gpu.fan" => self.gpu_fan.map(|v| ("GPU", format!("{:.0}%", v))),
+            "gpu.vramPct" => self.gpu_vram_pct.map(|v| ("GPU", format!("{:.0}%", v))),
+            "gpu.vramUsed" => self
+                .gpu_vram_used
+                .map(|v| ("GPU", fmt_bytes(v as f64, 1))),
+            "disk.util" => self.disk_util.map(|v| ("DISK", format!("{:.0}%", v))),
+            // Disk read/write: a small "R"/"W" mini-label drawn inline with the rate
+            // (same inline-glyph pattern as net.up/down's ▲/▼ — see `tick`).
+            "disk.read" => fmt_rate(self.disk_read).map(|s| ("R", s)),
+            "disk.write" => fmt_rate(self.disk_write).map(|s| ("W", s)),
             "net.up" => fmt_rate(self.net_up).map(|s| ("\u{25B2}", s)),
             "net.down" => fmt_rate(self.net_down).map(|s| ("\u{25BC}", s)),
+            // FPS / frame pacing is game-injected only (ETW present events); there is
+            // no desktop source, so these stay valid offerable keys that render
+            // nothing on the taskbar — exactly like the OSD off-game.
+            "fps" | "fps.low1" | "fps.low01" | "fps.frametime" => None,
             _ => None,
         }
     }
@@ -1096,8 +1171,10 @@ unsafe fn tick() {
                 continue;
             };
             let (cat, cat_label) = cat_of(key);
-            // net keeps its ▲/▼ glyph inline with the rate (e.g. "▲12KB/s").
-            let disp = if key.starts_with("net.") {
+            // net keeps its ▲/▼ glyph inline with the rate (e.g. "▲12KB/s"); disk
+            // read/write likewise prefix their "R"/"W" mini-label inline with the
+            // rate so they share the NetRate fixed field and right-align together.
+            let disp = if key.starts_with("net.") || key == "disk.read" || key == "disk.write" {
                 format!("{mini_label}{value}")
             } else {
                 value
