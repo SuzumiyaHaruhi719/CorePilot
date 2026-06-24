@@ -83,7 +83,7 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
 
   // The store entry can be momentarily undefined during a close re-target.
   const metric: Metric = view?.metric ?? "alloc";
-  const colorMode: ColorMode = view?.colorMode ?? "cushion";
+  const colorMode: ColorMode = view?.colorMode ?? "depth";
   const paused = view?.paused ?? false;
   const lod = view?.lod ?? 3;
   const stack = view?.stack ?? [{ path: null, label: "" }];
@@ -417,9 +417,9 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
             value={colorMode}
             onChange={(v) => patch({ colorMode: v })}
             options={[
-              { value: "cushion", label: "软垫" },
-              { value: "depth", label: "按层级" },
+              { value: "depth", label: "按区域" },
               { value: "type", label: "按类型" },
+              { value: "cushion", label: "暖色" },
             ]}
           />
           <div className="w-[128px]">

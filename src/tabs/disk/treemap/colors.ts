@@ -126,12 +126,36 @@ function withAlpha(oklch: string, alpha: number): string {
   return `oklch(${inner} / ${alpha})`;
 }
 
+/** Curated flat hues (OKLCH H) for the modern per-region treemap coloring — a
+ *  cohesive, slightly-cool spread (indigo→cyan→teal→purple→green→amber→pink→blue).
+ *  Each top-level disk region (C:\Users, C:\Windows, …) maps to one, so a whole
+ *  subtree reads as one color block — the recognizable modern-treemap look. */
+const FLAT_HUES = [266, 218, 187, 293, 152, 41, 330, 240, 96, 174];
+
+/** First path component below the drive root: "C:\\Users\\Thomas\\x" → "users".
+ *  Empty for the root itself. Drives the per-region hue so siblings of a region
+ *  share its color. */
+function topRegion(path: string): string {
+  const parts = path.replace(/\//g, "\\").split("\\").filter(Boolean);
+  return parts.length >= 2 ? parts[1].toLowerCase() : "";
+}
+
+/** Stable 32-bit FNV-1a hash → picks a palette hue per region name. */
+function hashStr(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
 /**
  * Fill color for one rect. `depth` is the nesting depth (0..n); `node` is the
  * backing TreeNode (null for a synthetic bucket tile → muted neutral).
  *
- * - "depth": an OKLCH lightness ramp off the accent — deeper = a shade step.
- * - "type": folders → neutral surface frames; leaves → ext-class signal hue.
+ * - default (modern flat): per top-level region hue; files bright, folders muted.
+ * - "cushion"/"type": alternative schemes (also flat-rendered — no bevel).
  */
 export function rectColor(
   p: Palette,
@@ -194,16 +218,22 @@ export function rectColor(
     }
   }
 
-  // "depth" ramp (default): step lightness off the accent per nesting level.
-  // Dark themes get lighter as they nest (frames recede, leaves pop); light mode
-  // steps darker so deep rects stay legible.
+  // DEFAULT — modern flat. Each top-level region gets a distinct hue from the
+  // curated palette (stable, derived from the path), so Users / Windows / Program
+  // Files etc. read as separate color blocks. Within a region: folders are a
+  // muted/darker frame, files a brighter saturated tile, lightness stepping a
+  // little per nesting level so depth still reads. Flat fills — the hairline
+  // separator (see `separator`) divides tiles, no skeuomorphic bevel.
+  if ((node.flags & DISK_FLAG.aggregated) !== 0) return withAlpha(p.surface3, 0.6);
+  const region = node.path ? topRegion(node.path) : "";
+  const hue = region ? FLAT_HUES[hashStr(region) % FLAT_HUES.length] : p.accentH;
   const step = Math.min(depth, 6);
-  const base = p.accentL;
-  const L = p.light ? Math.max(28, base - step * 4) : Math.min(86, base + 6 + step * 5);
-  // Folders keep slightly lower chroma so leaves read as the "content".
-  const C = Math.max(0.02, (isDir ? p.accentC * 0.4 : p.accentC * 0.62));
-  const a = isDir ? 0.5 : 0.86;
-  return `oklch(${L}% ${C} ${p.accentH} / ${a})`;
+  if (isDir) {
+    const L = p.light ? Math.max(68, 78 - step * 3) : 38 + step * 3;
+    return `oklch(${L}% 0.055 ${hue} / 0.85)`;
+  }
+  const L = p.light ? Math.max(52, 70 - step * 2) : Math.min(82, 60 + step * 3);
+  return `oklch(${L}% 0.115 ${hue} / 0.95)`;
 }
 
 /** Stroke (border) color for a rect at a given depth. */
@@ -217,15 +247,13 @@ export function labelColor(p: Palette, onContainer: boolean): string {
 }
 
 /**
- * Engraved 2-stroke bevel colors for the cushion look (spec §3.2): a LIGHT stroke
- * on the top/left edges + a DARK stroke on the bottom/right edges give a cheap,
- * DPR-stable 3D "pillow" without per-pixel gradients (no GPU-budget churn —
- * MEMORY: box-shadow DPC storm). Light themes invert (dark catches the light).
+ * Flat hairline that divides adjacent tiles (replaces the skeuomorphic 3D bevel).
+ * A single subtle 1px stroke — modern flat, DPR-stable, no per-pixel gradient
+ * (no GPU-budget churn — MEMORY: box-shadow DPC storm). The gap reads as crisp
+ * tile separation against the colored fills.
  */
-export function bevel(p: Palette): { light: string; dark: string } {
-  return p.light
-    ? { light: "oklch(100% 0 0 / 0.65)", dark: "oklch(0% 0 0 / 0.4)" }
-    : { light: "oklch(100% 0 0 / 0.22)", dark: "oklch(0% 0 0 / 0.58)" };
+export function separator(p: Palette): string {
+  return p.light ? "oklch(0% 0 0 / 0.14)" : "oklch(0% 0 0 / 0.42)";
 }
 
 /** Header/title-bar fill for a top-level container — a faint band darker than the

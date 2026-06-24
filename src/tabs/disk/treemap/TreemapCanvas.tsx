@@ -16,7 +16,7 @@ import {
   rectColor,
   strokeColor,
   labelColor,
-  bevel,
+  separator,
   titleBarColor,
   type ColorMode,
   type Palette,
@@ -308,10 +308,12 @@ export function TreemapCanvas({
     const met = metricRef.current;
     const tfn = tfRef.current;
     const stroke = strokeColor(p);
-    const bv = bevel(p);
+    const sep = separator(p);
     const barFill = titleBarColor(p);
 
-    // Pass 1: fills + bevel (parents first → children paint on top of frames).
+    // Pass 1: flat fills + a hairline separator (parents first → children paint on
+    // top of frames). Modern flat — no skeuomorphic bevel; a single 1px line in a
+    // subtle separator color crisply divides tiles.
     for (const r of draw) {
       if (r.w <= 0.5 || r.h <= 0.5) continue;
       const node = nodeOf(r.nodeId);
@@ -319,32 +321,17 @@ export function TreemapCanvas({
       ctx.fillStyle = rectColor(p, mode, r.depth, node);
       ctx.fillRect(r.x, r.y, r.w, r.h);
 
-      // Engraved 2-stroke cushion bevel: light top/left, dark bottom/right (spec §3.2).
-      // Only on rects big enough to read the bevel — keeps the draw cheap.
-      if (r.w >= 4 && r.h >= 4) {
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = bv.light;
-        ctx.beginPath();
-        ctx.moveTo(r.x + 0.5, r.y + r.h - 0.5);
-        ctx.lineTo(r.x + 0.5, r.y + 0.5);
-        ctx.lineTo(r.x + r.w - 0.5, r.y + 0.5);
-        ctx.stroke();
-        ctx.strokeStyle = bv.dark;
-        ctx.beginPath();
-        ctx.moveTo(r.x + r.w - 0.5, r.y + 0.5);
-        ctx.lineTo(r.x + r.w - 0.5, r.y + r.h - 0.5);
-        ctx.lineTo(r.x + 0.5, r.y + r.h - 0.5);
-        ctx.stroke();
-      } else if (r.w > 1.5 && r.h > 1.5) {
-        // Small boxes: a single dark separating edge so they don't merge into a blob.
-        ctx.strokeStyle = bv.dark;
+      // One flat hairline edge so adjacent same-region tiles don't merge into a
+      // blob. Skip sub-pixel tiles to keep dense areas from over-darkening.
+      if (r.w > 1.5 && r.h > 1.5) {
+        ctx.strokeStyle = sep;
         ctx.lineWidth = 1;
         ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
       }
       void stroke;
 
-      // Header/title bar on top-level containers (spec §3.2): a faint band behind
-      // the name strip so it reads as a folder header.
+      // Header/title strip on top-level containers: a faint band behind the name
+      // so it reads as a folder header.
       if (r.isContainer && r.depth <= 1 && r.w >= STRIP_MIN_W && r.h >= LABEL_STRIP + 6) {
         ctx.fillStyle = barFill;
         ctx.fillRect(r.x + 1, r.y + 1, r.w - 2, LABEL_STRIP - 1);

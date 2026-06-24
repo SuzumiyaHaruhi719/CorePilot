@@ -43,7 +43,7 @@ export interface PerDiskView {
   progress: ScanProgress | null;
   /** Per-tab size metric (spec §2.4). */
   metric: Metric;
-  /** Per-tab color scheme (default "cushion" — SpaceSniffer warm-folder/blue-file, §7). */
+  /** Per-tab color scheme (default "depth" — modern flat, per-region hue). */
   colorMode: ColorMode;
   /** Per-tab "pause live updates" — when true the active-tab poller stops re-pulling. */
   paused: boolean;
@@ -61,7 +61,7 @@ function freshView(scanId: string, rootLabel: string, usedBytes = 0): PerDiskVie
     usedBytes,
     progress: null,
     metric: "alloc",
-    colorMode: "cushion",
+    colorMode: "depth",
     paused: false,
     // Mid floor (lod 5 ≈ 1MB): lod 1 (no floor) FLOODED the slice with tiny
     // shallow nodes and hit the node cap BEFORE reaching inside big folders, so
