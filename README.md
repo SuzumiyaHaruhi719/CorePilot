@@ -253,5 +253,5 @@ npm run tauri build
 
 <p align="center">
   <sub>详细规划见 <a href="docs/planning/"><code>docs/planning/</code></a> · 构建进度见 <a href="PROGRESS.md"><code>PROGRESS.md</code></a><br>
-  README 动画由 <code>branding/*.mjs</code> 生成（SVG → <code>@resvg/resvg-js</code> → <code>ffmpeg</code> GIF），重新生成： <code>node branding/&lt;script&gt;.mjs</code></sub>
+  品牌动画（<code>branding/*.gif</code>）由 <code>branding/*.mjs</code> 生成（SVG → <code>@resvg/resvg-js</code> → <code>ffmpeg</code> GIF），重新生成： <code>node branding/&lt;script&gt;.mjs</code>；功能演示动画（<code>docs/media/*.gif</code>）为实机录制（CDP screencast → <code>ffmpeg</code>）</sub>
 </p>
