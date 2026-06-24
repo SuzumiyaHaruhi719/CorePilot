@@ -147,7 +147,7 @@ export function DiskAnalyzer() {
   // Zone C (+ Zone B strip) once at least one scan exists.
   if (order.length > 0) {
     return (
-      <div className="flex h-full min-h-0 flex-col">
+      <div className="flex min-h-0 flex-1 flex-col">
         <DiskTabStrip
           order={order}
           active={active}
@@ -157,7 +157,7 @@ export function DiskAnalyzer() {
           onRescan={onRescan}
         />
 
-        <div className="min-h-0 flex-1">
+        <div className="flex min-h-0 flex-1 flex-col">
           {active ? (
             <DiskWorkspace key={active} scanId={active} />
           ) : (
@@ -202,7 +202,7 @@ export function DiskAnalyzer() {
 
   // Zone A — the landing picker.
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       <TabHeader
         icon={HardDrive}
         title="磁盘空间分析"

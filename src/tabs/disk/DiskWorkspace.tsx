@@ -363,7 +363,7 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
   const crumbs: CrumbSegment[] = stack.map((lvl) => ({ label: lvl.label }));
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       {/* Thin toolbar bar above the canvas (spec §4.5). */}
       <div className="flex flex-wrap items-center gap-2.5 border-b border-line px-4 py-2.5">
         {/* Back affordance (spec §3.3): pop one drill level; disabled at root. */}
