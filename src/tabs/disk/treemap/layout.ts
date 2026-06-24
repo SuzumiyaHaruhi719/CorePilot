@@ -21,12 +21,16 @@ import { DISK_FLAG } from "../../../lib/ipc";
  * See docs/superpowers/specs/2026-06-23-disk-space-analyzer-design.md §3.2/§3.3.
  */
 
-/** Below this short-side (px) a container is NOT subdivided — drawn as a leaf. */
-export const MIN_SUBDIVIDE = 24;
+/** Below this short-side (px) a container is NOT subdivided — drawn as a leaf.
+ *  Low so folders keep subdividing into their contents (SpaceSniffer-dense nesting)
+ *  instead of bottoming out as solid blocks. */
+export const MIN_SUBDIVIDE = 16;
 /** Sibling rects whose short side would be under this (px) fold into "… N more". */
-export const MIN_RECT = 3;
-/** Hard ceiling on emitted draw-rects; `MIN_RECT` is raised adaptively to stay under. */
-export const MAX_DRAW_RECTS = 4000;
+export const MIN_RECT = 2;
+/** Hard ceiling on emitted draw-rects; `MIN_RECT` is raised adaptively to stay under.
+ *  Raised for a denser whole-disk overview (more small nested tiles visible at once,
+ *  matching SpaceSniffer); flat fills are cheap and the layout only runs on change. */
+export const MAX_DRAW_RECTS = 7000;
 /** Reserved top label strip (px) so a framed folder's name reads above its children. */
 export const LABEL_STRIP = 16;
 /** Inner padding (px) inset on every subdivided container before nesting children. */

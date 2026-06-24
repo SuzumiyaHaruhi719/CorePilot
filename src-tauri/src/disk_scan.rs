@@ -2035,7 +2035,11 @@ pub fn scan_handle(scan_id: &str) -> Option<Arc<ScanHandle>> {
 // renders densely where pixels allow without over-drawing — container interiors
 // (e.g. a huge `Videos/`) fill with their contents instead of staying empty.
 const DEFAULT_DEPTH_LIMIT: u8 = 16;
-const DEFAULT_MAX_NODES: u32 = 16000;
+// Bigger slice → with the lod floor pruning sub-pixel tails, the bounded slice
+// descends DEEPER + WIDER into big folders, feeding the denser client layout
+// (MAX_DRAW_RECTS) so the whole-disk overview reads as densely nested as
+// SpaceSniffer rather than bottoming out in solid blocks.
+const DEFAULT_MAX_NODES: u32 = 26000;
 
 /// Return a bounded LOD slice of a scan's published tree (spec §2.9). The backend
 /// does the slicing so a huge tree never crosses IPC whole; the workhorse for the
