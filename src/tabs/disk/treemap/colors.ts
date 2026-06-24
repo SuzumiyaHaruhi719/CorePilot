@@ -153,12 +153,16 @@ export function rectColor(
     const [fL, , fH] = parseOklch(p.freq); // amber/tan hue (~70)
     if (isDir) {
       const step = Math.min(depth, 6);
-      // Warm tan: low chroma, L receding deeper (darker as nested, lighter in light mode).
+      // Warm tan cushions, L receding deeper so the bevel reads as nesting depth.
+      // The dark theme used to clamp this to L≈22–37% at C=0.03 → near-black,
+      // muddy gray-brown frames that looked nothing like SpaceSniffer. Brighter
+      // base + a touch more chroma + a wider per-depth step makes them read as
+      // SpaceSniffer's warm tan with clear level-to-level contrast.
       const L = p.light
-        ? Math.max(78, fL - step * 2)
-        : Math.max(22, Math.min(46, 40 - step * 3));
-      const C = 0.03;
-      return `oklch(${L}% ${C} ${fH} / 0.62)`;
+        ? Math.max(74, fL - step * 3)
+        : Math.max(30, 54 - step * 4);
+      const C = 0.05;
+      return `oklch(${L}% ${C} ${fH} / 0.66)`;
     }
     if ((node.flags & DISK_FLAG.aggregated) !== 0) return withAlpha(p.surface3, 0.6);
     // Files: blue cushion from the cyan token, chroma-modulated for a flatter fill.
@@ -218,8 +222,8 @@ export function labelColor(p: Palette, onContainer: boolean): string {
  */
 export function bevel(p: Palette): { light: string; dark: string } {
   return p.light
-    ? { light: "oklch(100% 0 0 / 0.6)", dark: "oklch(0% 0 0 / 0.32)" }
-    : { light: "oklch(100% 0 0 / 0.18)", dark: "oklch(0% 0 0 / 0.5)" };
+    ? { light: "oklch(100% 0 0 / 0.65)", dark: "oklch(0% 0 0 / 0.4)" }
+    : { light: "oklch(100% 0 0 / 0.22)", dark: "oklch(0% 0 0 / 0.58)" };
 }
 
 /** Header/title-bar fill for a top-level container — a faint band darker than the
