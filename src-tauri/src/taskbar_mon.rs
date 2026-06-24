@@ -1067,12 +1067,21 @@ unsafe fn foreground_is_fullscreen() -> bool {
     let mut cls = [0u16; 64];
     let n = GetClassNameW(fg, &mut cls);
     let c = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
-    // The desktop / shell / our own plate are never games.
+    // The desktop / shell / our own plate are never games. `Windows.UI.Core.
+    // CoreWindow` is the Win11 Start menu / Search / Action Center / Task View —
+    // these are hosted in FULLSCREEN transparent CoreWindows, so the monitor-cover
+    // test below would wrongly treat "pressing the Windows key" or clicking the
+    // taskbar as a fullscreen game and HIDE the plate. Exclude them: the taskbar
+    // stays visible for all of these, so the plate must too. Real exclusive/UWP
+    // fullscreen games are still caught by SHQueryUserNotificationState above.
     if c == "Progman"
         || c == "WorkerW"
         || c == "Shell_TrayWnd"
         || c == "Shell_SecondaryTrayWnd"
         || c == "CorePilotTaskbarMon"
+        || c == "Windows.UI.Core.CoreWindow"
+        || c == "XamlExplorerHostIslandWindow"
+        || c == "ForegroundStaging"
     {
         return false;
     }
