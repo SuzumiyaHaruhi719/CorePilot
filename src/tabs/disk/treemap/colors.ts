@@ -164,6 +164,12 @@ export function rectColor(
   mode: ColorMode,
   depth: number,
   node: TreeNode | null,
+  // Top-level region name this tile belongs to, threaded from the layout's parent
+  // walk. The backend nulls `path` on ordinary leaves to save IPC, so deriving the
+  // region from `node.path` alone left most tiles region-less → they fell back to
+  // the warm theme accent (orange blobs on the sandstone theme). Passing the region
+  // in makes every tile in a region share its hue.
+  regionKey?: string,
 ): string {
   if (node == null) {
     // Synthetic "… N more" bucket — muted neutral so it recedes.
@@ -227,8 +233,8 @@ export function rectColor(
   // little per nesting level so depth still reads. Flat fills — the hairline
   // separator (see `separator`) divides tiles, no skeuomorphic bevel.
   if ((node.flags & DISK_FLAG.aggregated) !== 0) return withAlpha(p.surface3, 0.6);
-  const region = node.path ? topRegion(node.path) : "";
-  const hue = region ? FLAT_HUES[hashStr(region) % FLAT_HUES.length] : p.accentH;
+  const region = regionKey || (node.path ? topRegion(node.path) : "");
+  const hue = region ? FLAT_HUES[hashStr(region) % FLAT_HUES.length] : FLAT_HUES[0];
   const step = Math.min(depth, 6);
   if (isDir) {
     const L = p.light ? Math.max(68, 78 - step * 3) : 38 + step * 3;

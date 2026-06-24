@@ -236,6 +236,23 @@ export function TreemapCanvas({
     [view],
   );
 
+  // localId → top-level region name (the disk-root child it descends from), via a
+  // parent walk. rectColor colors per-region, but the backend nulls `path` on most
+  // leaves, so without this they'd fall back to the warm accent (orange on the
+  // sandstone theme) instead of their region's hue. Memoized per view (the walk is
+  // O(depth); 16k nodes ≈ sub-ms once).
+  const regionKeys = useMemo<Map<number, string>>(() => {
+    const m = new Map<number, string>();
+    const nodes = view.nodes;
+    for (let i = 1; i < nodes.length; i++) {
+      let cur = i;
+      let guard = 0;
+      while (cur > 0 && nodes[cur].parent !== 0 && guard++ < 64) cur = nodes[cur].parent;
+      m.set(i, cur > 0 ? nodes[cur].name : "");
+    }
+    return m;
+  }, [view]);
+
   // ---- Tween controller (spec §3.1) -------------------------------------------
   // Boxes ease toward each new snapshot's geometry instead of popping, and freshly
   // appeared boxes fade+grow in from their target center. The whole thing lives in
@@ -317,7 +334,7 @@ export function TreemapCanvas({
       if (r.w <= 0.5 || r.h <= 0.5) continue;
       const node = nodeOf(r.nodeId);
       ctx.globalAlpha = r.alpha;
-      ctx.fillStyle = rectColor(p, mode, r.depth, node);
+      ctx.fillStyle = rectColor(p, mode, r.depth, node, regionKeys.get(r.nodeId));
       ctx.fillRect(r.x, r.y, r.w, r.h);
 
       // One flat hairline edge so adjacent same-region tiles don't merge into a
@@ -428,7 +445,7 @@ export function TreemapCanvas({
         ctx.strokeRect(sel.x + 1, sel.y + 1, sel.w - 2, sel.h - 2);
       }
     }
-  }, [nodeOf]);
+  }, [nodeOf, regionKeys]);
 
   // Drive the tween toward `targetRef`. Critically-damped lerp of geometry+alpha
   // per key; new keys grow+fade from their target center; removed keys fade out
