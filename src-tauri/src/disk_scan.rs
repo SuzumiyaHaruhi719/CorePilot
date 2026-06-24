@@ -1654,18 +1654,27 @@ mod win {
         let BuiltArena {
             mut nodes,
             names,
-            files_seen,
             dirs_seen,
-            bytes_logical,
-            bytes_alloc,
             node_count,
             truncated,
+            ..
         } = built;
         rollup(&mut nodes);
-        handle.files_seen.store(files_seen, Ordering::Relaxed);
+        // Headline totals come from the ROLLED-UP ROOT, not the pass-1 sums. Pass-1
+        // sums every in-use record's $DATA — which includes reparse-point content
+        // the tree (correctly, matching the walk) excludes, and that double-counts
+        // junction/dedup targets to ABOVE the volume's used bytes (impossible). The
+        // root's rolled-up size is exactly what the treemap shows, so the progress
+        // chip / volume readout and the treemap now agree (e.g. C: 3.84 TB, not the
+        // pass-1 4.65 TB).
+        let (root_logical, root_alloc, root_files) = nodes
+            .first()
+            .map(|r| (r.logical_size, r.alloc_size, r.file_count as u64))
+            .unwrap_or((0, 0, 0));
+        handle.files_seen.store(root_files, Ordering::Relaxed);
         handle.dirs_seen.store(dirs_seen, Ordering::Relaxed);
-        handle.bytes_logical.store(bytes_logical, Ordering::Relaxed);
-        handle.bytes_alloc.store(bytes_alloc, Ordering::Relaxed);
+        handle.bytes_logical.store(root_logical, Ordering::Relaxed);
+        handle.bytes_alloc.store(root_alloc, Ordering::Relaxed);
         handle.node_count.store(node_count, Ordering::Relaxed);
         if truncated {
             handle.truncated.store(true, Ordering::Relaxed);
@@ -1694,22 +1703,22 @@ mod win {
         // `FindFirstFileExW` walk below with ZERO behavior change. A user cancel
         // mid-MFT finalizes as `Cancelled` WITHOUT falling back (capability
         // failures fall back; user cancel does not — spec §3.3).
-        // MFT fast-path is OPT-IN (COREPILOT_MFT=1) — close, not yet exact. Ground
-        // truth (SpaceSniffer + the complete walk) on the 9950X3D C: = 3.5 TiB,
-        // Users 1.8 TiB. It is ~8× faster than the walk (full C: in ~33 s vs ~281 s)
-        // and DISPLAYS (DiskWorkspace finish-fetch). The resident-$ATTRIBUTE_LIST
-        // fix (disk_scan_mft) recovered the big undercount — Users is now 1.82 TB
-        // (was 1.0 TB), awa/Program Files/War Thunder match the walk within 1-3% —
-        // but two gaps keep it opt-in:
-        //   • pass-2 PLACEMENT still drops ~0.8 TB (resolved totals 4.03 TB vs tree
-        //     3.22 TB): files whose parent dir node wasn't built (orphan /
-        //     reparse-ancestor / cap) are counted but not placed.
-        //   • NON-RESIDENT $ATTRIBUTE_LIST is not yet followed (v1 reads resident
-        //     lists only), so a few huge fragmented trees (e.g. Program Files (x86)
-        //     590 vs 729 GB) still read short.
-        // Close both (place every counted file; read non-resident attr-lists) before
-        // making MFT the default — until then the proven walk runs.
-        if std::env::var("COREPILOT_MFT").is_ok()
+        // MFT fast-path is now DEFAULT-ON when capable. The capability gate inside
+        // (raw volume handle needs elevation; FSCTL needs NTFS; drive-letter root
+        // only) means a non-elevated / non-NTFS / GUID-path run returns `None` and
+        // falls through to the walk — so attempting it unconditionally is safe, and
+        // any parse/sanity failure also falls back. VALIDATED on the 9950X3D C:
+        // against SpaceSniffer + the complete walk (ground truth 3.5 TiB, Users
+        // 1.8 TiB): the $MFT scan now totals 3.84 TB / Users 1.99 TB / Program Files
+        // (x86) 729 GB — within ~0.3-1% of both references, per-folder mostly exact
+        // — in ~33 s vs the walk's ~281 s (~8× faster). The size accuracy came from
+        // resolving $DATA that spilled into extension records via $ATTRIBUTE_LIST
+        // (disk_scan_mft, BaseFileRecordSegment back-pointer — covers resident AND
+        // non-resident lists); reparse-point content is excluded exactly as the
+        // walk does (recurse_dir = is_dir && !is_reparse). Opt OUT with
+        // COREPILOT_NO_MFT=1 to force the proven walk on a volume where the raw
+        // parse ever misbehaves.
+        if std::env::var("COREPILOT_NO_MFT").is_err()
             && try_run_mft(&handle, &app, &walk_root, &root_display)
         {
             return;
