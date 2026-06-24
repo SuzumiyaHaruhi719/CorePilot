@@ -553,6 +553,9 @@ mod imp {
         own_alloc: &[u64],
         own_logical: &[u64],
         own_files: &[u32],
+        // Largest files (alloc, mft), biggest-first — broken out as leaves under their
+        // dirs so file-heavy folders fill mid-scan. Empty slice = dir-only (old behavior).
+        top_files: &[(u64, u64)],
         root_display: &str,
     ) -> (Vec<Node>, Vec<Box<str>>) {
         let n = records.len();
@@ -680,6 +683,52 @@ mod imp {
         nodes[0].alloc_size = own_alloc.get(ROOT_MFT as usize).copied().unwrap_or(0);
         nodes[0].logical_size = own_logical.get(ROOT_MFT as usize).copied().unwrap_or(0);
         nodes[0].file_count = own_files.get(ROOT_MFT as usize).copied().unwrap_or(0);
+
+        // Break the largest files out as leaf tiles under their parent dirs so
+        // file-heavy folders (Videos, Downloads…) subdivide DURING the scan instead of
+        // showing as one coarse block until completion (SpaceSniffer-style file fill).
+        // CRITICAL: subtract each file's size from its parent's OWN tally — pass-1
+        // already counted it into own_*, and mft_publish_partial rolls children up into
+        // parents, so without this the file would be double-counted (parent tile too
+        // big). Partial sizes are approximate anyway; the final build_arena is exact.
+        for &(falloc, fmft) in top_files {
+            if nodes.len() >= PARTIAL_NODE_CAP {
+                break;
+            }
+            let Some(rec) = records.get(fmft as usize).and_then(|r| r.as_ref()) else {
+                continue;
+            };
+            if rec.is_dir {
+                continue;
+            }
+            let Some(pid) = ensure_dir(
+                rec.parent_mft, records, &mut node_of, &mut nodes, &mut interner, own_alloc,
+                own_logical, own_files,
+            ) else {
+                continue;
+            };
+            if nodes.len() >= PARTIAL_NODE_CAP {
+                break;
+            }
+            let name_id = interner.intern(&rec.name);
+            let id = nodes.len() as u32;
+            let prev_first = nodes[pid as usize].first_child;
+            nodes.push(Node {
+                parent: pid,
+                name_id,
+                first_child: SENTINEL,
+                next_sibling: prev_first,
+                logical_size: falloc,
+                alloc_size: falloc,
+                file_count: 1,
+                flags: 0,
+            });
+            nodes[pid as usize].first_child = id;
+            let pn = &mut nodes[pid as usize];
+            pn.alloc_size = pn.alloc_size.saturating_sub(falloc);
+            pn.logical_size = pn.logical_size.saturating_sub(falloc);
+            pn.file_count = pn.file_count.saturating_sub(1);
+        }
         (nodes, interner.table)
     }
 
@@ -770,6 +819,14 @@ mod imp {
         let mut own_alloc: Vec<u64> = vec![0; cap];
         let mut own_logical: Vec<u64> = vec![0; cap];
         let mut own_files: Vec<u32> = vec![0; cap];
+        // The largest files seen so far, for the mid-scan animation: a bounded min-heap
+        // (by alloc) so file-heavy folders fill with leaf tiles DURING the scan instead
+        // of only at completion (SpaceSniffer-style). One compare per file → no scan
+        // slowdown; boundary churn is on sub-pixel tiles the front-end LOD-collapses, so
+        // it's invisible. `build_dir_snapshot` breaks these out under their parent dirs.
+        const TOP_FILES: usize = 4000;
+        let mut top_files: std::collections::BinaryHeap<std::cmp::Reverse<(u64, u64)>> =
+            std::collections::BinaryHeap::new();
         let mut last_partial = std::time::Instant::now();
 
         // Walk each $DATA extent; skip sparse runs (holes in the table → those
@@ -868,6 +925,15 @@ mod imp {
                                     if let Some(s) = own_files.get_mut(p) {
                                         *s = s.saturating_add(1);
                                     }
+                                    // Remember the largest files for the fill animation.
+                                    if top_files.len() < TOP_FILES {
+                                        top_files.push(std::cmp::Reverse((ri.alloc, mft_index)));
+                                    } else if ri.alloc
+                                        > top_files.peek().map(|r| r.0 .0).unwrap_or(u64::MAX)
+                                    {
+                                        top_files.pop();
+                                        top_files.push(std::cmp::Reverse((ri.alloc, mft_index)));
+                                    }
                                 }
                                 records[mft_index as usize] = info;
                             }
@@ -898,12 +964,17 @@ mod imp {
                         // in + resizes as folders are discovered. The full accurate
                         // build still lands at the end.
                         if last_partial.elapsed().as_millis() >= PARTIAL_MS {
+                            // Largest files biggest-first so they survive the snapshot cap.
+                            let mut tf: Vec<(u64, u64)> =
+                                top_files.iter().map(|r| (r.0 .0, r.0 .1)).collect();
+                            tf.sort_unstable_by(|a, b| b.0.cmp(&a.0));
                             let (pn, pnm) = build_dir_snapshot(
                                 &records,
                                 mft_index,
                                 &own_alloc,
                                 &own_logical,
                                 &own_files,
+                                &tf,
                                 root_display,
                             );
                             handle.mft_publish_partial(pn, pnm);
