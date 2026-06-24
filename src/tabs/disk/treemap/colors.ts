@@ -126,15 +126,13 @@ function withAlpha(oklch: string, alpha: number): string {
   return `oklch(${inner} / ${alpha})`;
 }
 
-/** Flat hues (OKLCH H) for the modern per-region treemap coloring — 16 roughly
- *  evenly-spaced (~22°) around the wheel so neighbouring top-level regions get
- *  visibly distinct colors. Each top-level disk region (C:\Users, C:\Windows, …)
- *  hashes to one, so a whole subtree reads as one color block. Was 10 hues, which
- *  on a typical C: collided 3-way (Users/WeGameApps/hiberfil → same teal, etc.);
- *  16 spreads the ~16-25 real top-level dirs across far more distinct colors. */
-const FLAT_HUES = [
-  12, 35, 58, 80, 102, 125, 148, 170, 192, 215, 238, 260, 282, 305, 328, 350,
-];
+/** Per-region treemap hues (OKLCH H). A COHESIVE COOL spread — teal → cyan → blue
+ *  → indigo → violet → purple → magenta — anchored on CorePilot's own theme hues
+ *  (cyan ~218, accent/violet ~293, vcache-teal ~184), deliberately avoiding the
+ *  warm half (reds/oranges/yellows) that made the old full-wheel palette read as a
+ *  dated rainbow clashing with the cyberpunk/glass theme. 12 hues ~14° apart keep
+ *  neighbouring top-level regions distinct while the whole map stays on-theme. */
+const FLAT_HUES = [164, 178, 192, 206, 220, 234, 248, 262, 276, 290, 304, 318];
 
 /** First path component below the drive root: "C:\\Users\\Thomas\\x" → "users".
  *  Empty for the root itself. Drives the per-region hue so siblings of a region
@@ -236,8 +234,8 @@ export function rectColor(
     const L = p.light ? Math.max(68, 78 - step * 3) : 38 + step * 3;
     return `oklch(${L}% 0.055 ${hue} / 0.85)`;
   }
-  const L = p.light ? Math.max(52, 70 - step * 2) : Math.min(82, 60 + step * 3);
-  return `oklch(${L}% 0.115 ${hue} / 0.95)`;
+  const L = p.light ? Math.max(52, 70 - step * 2) : Math.min(80, 58 + step * 3);
+  return `oklch(${L}% 0.128 ${hue} / 0.96)`;
 }
 
 /** Stroke (border) color for a rect at a given depth. */
@@ -257,7 +255,7 @@ export function labelColor(p: Palette, onContainer: boolean): string {
  * tile separation against the colored fills.
  */
 export function separator(p: Palette): string {
-  return p.light ? "oklch(0% 0 0 / 0.14)" : "oklch(0% 0 0 / 0.42)";
+  return p.light ? "oklch(0% 0 0 / 0.12)" : "oklch(0% 0 0 / 0.34)";
 }
 
 /** Header/title-bar fill for a top-level container — a faint band darker than the
