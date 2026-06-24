@@ -2176,4 +2176,31 @@ mod tests {
             "breadth-first leak: shallow small-subtree A1 should lose to deep B1a; got {got:?}"
         );
     }
+
+    /// Children below the `min_bytes` LOD floor fold away (not in the slice) and
+    /// their (non-root) parent is marked `has_more`, so the density slider can prune
+    /// sub-threshold tails while the UI still offers a drill-in. Guards the floor +
+    /// truncation contract.
+    #[test]
+    fn slice_collapses_below_min_bytes_and_marks_parent_has_more() {
+        let names: Vec<Box<str>> =
+            vec!["C:\\".into(), "Big".into(), "t1".into(), "t2".into()];
+        let nodes = vec![
+            dir(0, 0, 1, SENTINEL, 1010), // 0 root → child Big
+            dir(0, 1, 2, SENTINEL, 1000), // 1 Big  → children t1,t2
+            file(1, 2, 3, 5),             // 2 t1   (< floor, parent Big)
+            file(1, 3, SENTINEL, 5),      // 3 t2   (< floor, parent Big)
+        ];
+        let tree = DiskTree { nodes, names };
+
+        // min_bytes = 100: Big (1000) stays; its 5-byte leaves fold into Big.
+        let view = tree.slice("scan", 1, 0, 16, 100, 100);
+        let got: Vec<&str> = view.nodes.iter().map(|n| n.name.as_str()).collect();
+
+        assert_eq!(got, vec!["C:\\", "Big"], "below-floor leaves fold away; got {got:?}");
+        assert!(view.truncated, "a collapsed child sets truncated");
+        // Big is NOT the focus root, so has_more is true ONLY because its children
+        // collapsed under the floor — that marking is what's under test.
+        assert!(view.nodes[1].has_more, "Big stays drillable after its leaves fold");
+    }
 }
