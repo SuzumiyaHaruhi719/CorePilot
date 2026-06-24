@@ -165,11 +165,13 @@ export function rectColor(
       return `oklch(${L}% ${C} ${fH} / 0.66)`;
     }
     if ((node.flags & DISK_FLAG.aggregated) !== 0) return withAlpha(p.surface3, 0.6);
-    // Files: blue cushion from the cyan token, chroma-modulated for a flatter fill.
-    const [cL, cC, cH] = parseOklch(p.cyan);
-    const L = p.light ? Math.max(55, cL - 8) : Math.min(72, cL);
-    const C = Math.max(0.05, cC * 0.78);
-    return `oklch(${L}% ${C} ${cH} / 0.9)`;
+    // Files: a WARM tan tile (same hue family as the folders), a touch brighter +
+    // more saturated than the receding folder frame so leaves pop out of their
+    // container. SpaceSniffer keeps the whole disk in one warm family — the bevel
+    // + folder header labels carry folder/file, NOT hue — so a blue file fill (the
+    // old behavior) made the treemap read blue-dominated instead of tan.
+    const L = p.light ? 80 : 60;
+    return `oklch(${L}% 0.072 ${fH} / 0.92)`;
   }
 
   if (mode === "type") {
