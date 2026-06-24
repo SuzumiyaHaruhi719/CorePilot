@@ -103,7 +103,7 @@ mod imp {
     /// Min gap between mid-scan animation snapshots (a cheap dir-only tree publish).
     /// Small enough that folders visibly appear + grow from ~½ s in; the front-end
     /// tween eases between frames so it reads as continuous fill.
-    const PARTIAL_MS: u128 = 450;
+    const PARTIAL_MS: u128 = 350;
     /// If more than this fraction of in-use records fail to parse, treat the parse
     /// as broken and fall back (sanity, spec §3.5).
     const MAX_BAD_RECORD_RATIO: f64 = 0.05;
@@ -580,6 +580,9 @@ mod imp {
             node_of: &mut [u32],
             nodes: &mut Vec<Node>,
             interner: &mut Interner,
+            own_alloc: &[u64],
+            own_logical: &[u64],
+            own_files: &[u32],
         ) -> Option<u32> {
             match node_of.get(mft as usize) {
                 Some(&id) if id != SENTINEL => return Some(id),
@@ -637,9 +640,11 @@ mod imp {
                     name_id,
                     first_child: SENTINEL,
                     next_sibling: prev_first,
-                    logical_size: 0,
-                    alloc_size: 0,
-                    file_count: 0,
+                    // Own size = this dir's direct-file tally (set here so we never
+                    // need an O(max_mft) pass over ALL records per frame).
+                    logical_size: own_logical.get(dmft as usize).copied().unwrap_or(0),
+                    alloc_size: own_alloc.get(dmft as usize).copied().unwrap_or(0),
+                    file_count: own_files.get(dmft as usize).copied().unwrap_or(0),
                     flags,
                 });
                 nodes[parent_id as usize].first_child = id;
@@ -650,24 +655,31 @@ mod imp {
         }
 
         let end = max_mft.min(n as u64);
+        // Cap each mid-scan frame at a small node budget so it builds in ~tens of ms
+        // even late in the scan (the uncapped ~1M-dir build was ~0.2 s, which made
+        // frames arrive slowly + irregularly → a choppy fill). The biggest top-level
+        // dirs have low MFT numbers so they're built first; deep/small dirs (not
+        // visible at the overview scale) wait for the accurate final build. The
+        // front-end LOD-slices this down to the visible tiles anyway.
+        const PARTIAL_NODE_CAP: usize = 24000;
         for mft in FIRST_USER_MFT..end {
+            if nodes.len() >= PARTIAL_NODE_CAP {
+                break;
+            }
             let Some(rec) = records.get(mft as usize).and_then(|r| r.as_ref()) else {
                 continue;
             };
             if rec.is_dir {
-                let _ = ensure_dir(mft, records, &mut node_of, &mut nodes, &mut interner);
+                let _ = ensure_dir(
+                    mft, records, &mut node_of, &mut nodes, &mut interner, own_alloc, own_logical,
+                    own_files,
+                );
             }
         }
-        // Each built dir's OWN size = the running tally of its direct files.
-        for mft in ROOT_MFT..end {
-            let id = match node_of.get(mft as usize) {
-                Some(&v) if v != SENTINEL => v as usize,
-                _ => continue,
-            };
-            nodes[id].alloc_size = own_alloc.get(mft as usize).copied().unwrap_or(0);
-            nodes[id].logical_size = own_logical.get(mft as usize).copied().unwrap_or(0);
-            nodes[id].file_count = own_files.get(mft as usize).copied().unwrap_or(0);
-        }
+        // Root's own size = files directly under the drive root.
+        nodes[0].alloc_size = own_alloc.get(ROOT_MFT as usize).copied().unwrap_or(0);
+        nodes[0].logical_size = own_logical.get(ROOT_MFT as usize).copied().unwrap_or(0);
+        nodes[0].file_count = own_files.get(ROOT_MFT as usize).copied().unwrap_or(0);
         (nodes, interner.table)
     }
 

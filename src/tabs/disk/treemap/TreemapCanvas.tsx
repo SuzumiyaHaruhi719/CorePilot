@@ -50,15 +50,14 @@ import { displayName } from "./names";
  * See docs/superpowers/specs/2026-06-23-disk-space-analyzer-design.md §3.
  */
 
-/** Reduce-motion is active when EITHER the in-app flag (`data-reduce-motion`) is
- *  set OR the OS-level `prefers-reduced-motion` media query matches, so users who
- *  only set the OS preference still get snap-to-final geometry, not full tweens. */
+/** Reduce-motion for the treemap follows CorePilot's OWN toggle (`data-reduce-
+ *  motion`), NOT the OS `prefers-reduced-motion`. The disk-scan fill + reshape is a
+ *  requested, information-bearing animation (it shows the scan progressing); many
+ *  users leave the OS flag on without wanting every app's functional motion killed,
+ *  and respecting it here silently flattened the whole scan animation to instant
+ *  pops. Motion-sensitive users still disable it via the in-app toggle. */
 function prefersReducedMotion(): boolean {
-  if (document.documentElement.dataset.reduceMotion === "true") return true;
-  return (
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches
-  );
+  return document.documentElement.dataset.reduceMotion === "true";
 }
 
 /** Canvas label fonts — set explicitly (canvas ignores CSS font-features). */
@@ -440,7 +439,11 @@ export function TreemapCanvas({
       lastTs.current = ts;
       const target = targetRef.current;
       const prev = prevByKey.current;
-      const TAU = 90; // ms — critically-damped feel (cubic-bezier(0.22,1,0.36,1)-ish)
+      // Longer ease so motion FLOWS across the gap between snapshots instead of
+      // snapping to each then waiting (which read as choppy). ~150ms spans the
+      // ~280ms publish cadence, so boxes are always gliding toward the latest
+      // geometry — a silkier scan fill. Still self-terminates when settled.
+      const TAU = 150; // ms
       const k = 1 - Math.exp(-dt / TAU);
       const FADE = 1 - Math.exp(-dt / 120); // removed-key fade-out
 

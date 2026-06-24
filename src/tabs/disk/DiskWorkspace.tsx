@@ -224,7 +224,7 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
         inFlight = false;
       }
     };
-    const id = window.setInterval(() => void tick(), 320);
+    const id = window.setInterval(() => void tick(), 300);
     return () => {
       alive = false;
       window.clearInterval(id);
