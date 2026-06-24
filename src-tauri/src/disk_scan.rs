@@ -316,19 +316,24 @@ impl DiskTree {
         let mut nodes: Vec<TreeNode> = Vec::new();
         let mut truncated = false;
 
-        // (arena_id, local_parent, depth). Process largest-first so the cap keeps
-        // the biggest, most relevant subtrees.
-        let mut queue: std::collections::VecDeque<(u32, u32, u8)> =
-            std::collections::VecDeque::new();
+        // Best-first by alloc size (max-heap): always expand the LARGEST unexpanded
+        // subtree next, so the node budget (`cap`) fills the biggest, most visible
+        // folders with nested detail. The old FIFO was breadth-first — it spent the
+        // budget on shallow levels everywhere and left big folders as empty drillable
+        // blocks (measured: 5546 empty blocks at the 1MB floor, and a LOWER floor made
+        // it worse, not better — the BFS-flood signature). Tuple = (alloc_size,
+        // arena_id, local_id, depth); BinaryHeap is a max-heap on the leading size.
+        let mut queue: std::collections::BinaryHeap<(u64, u32, u32, u8)> =
+            std::collections::BinaryHeap::new();
 
         // Push the focus root (local id 0, parent == self).
         {
             let n = &self.nodes[focus as usize];
             nodes.push(self.make_tree_node(0, 0, n, true, Some(focus_path.clone())));
-            queue.push_back((focus, 0, 0));
+            queue.push((n.alloc_size, focus, 0, 0));
         }
 
-        while let Some((arena_id, local_parent, depth)) = queue.pop_front() {
+        while let Some((_, arena_id, local_parent, depth)) = queue.pop() {
             if depth >= depth_limit {
                 // Past the depth budget: mark the parent drillable if it has kids.
                 if self.nodes[arena_id as usize].first_child != SENTINEL {
@@ -374,7 +379,7 @@ impl DiskTree {
                 };
                 nodes.push(self.make_tree_node(local_id, local_parent, kn, false, path));
                 if is_dir && kn.first_child != SENTINEL {
-                    queue.push_back((kid, local_id, depth + 1));
+                    queue.push((kn.alloc_size, kid, local_id, depth + 1));
                 }
             }
         }
