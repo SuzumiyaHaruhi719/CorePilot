@@ -356,13 +356,15 @@ export function TreemapCanvas({
       if (!node) continue;
 
       if (r.isContainer) {
-        // Folder name in the reserved top strip; add the size on the top-level
-        // header bar where there's room (SpaceSniffer shows folder size in headers).
+        // Folder name in the reserved top strip, with its size right-aligned at ANY
+        // depth when the strip is wide enough — SpaceSniffer labels folder sizes
+        // throughout, not just at the top level, so the nested overview reads as
+        // "what's eating space" at a glance.
         if (r.w >= STRIP_MIN_W && r.h >= LABEL_STRIP + 6) {
           ctx.fillStyle = labelColor(p, true);
           ctx.font = STRIP_FONT;
           const nm = displayName(node, tfn);
-          if (r.depth <= 1 && r.w >= 120) {
+          if (r.w >= 116) {
             const szTxt = formatBytes(met === "alloc" ? node.allocSize : node.logicalSize);
             const szW = ctx.measureText(szTxt).width;
             drawClipped(ctx, nm, r.x + 4, r.y + 3, r.w - 12 - szW);
