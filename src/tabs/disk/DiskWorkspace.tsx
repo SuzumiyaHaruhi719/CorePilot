@@ -195,6 +195,29 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
     lastFetchedGen.current = -1;
   }, [scanId, focusPath, lod]);
 
+  // Final authoritative fetch when the scan FINISHES (status leaves "scanning").
+  // The MFT fast-path publishes its ONLY snapshot at completion — `generation`
+  // flips at the same instant `status` → done — so the `scanning`-gated live
+  // poller above can tear down before it catches that snapshot, leaving the
+  // treemap empty ("暂无可显示的数据"). The streaming walk republishes throughout
+  // so it never hit this, but a one-shot fetch on completion is correct for both;
+  // commitTree's signature guard makes the (already-current) walk fetch a no-op.
+  const finalStatus = progress?.status ?? null;
+  useEffect(() => {
+    if (!finalStatus || finalStatus === "scanning") return;
+    let alive = true;
+    api
+      .diskTree(scanId, focusPath, { minBytes: minBytesFor(lod) })
+      .then((tv) => {
+        if (alive) commitTree(tv);
+        setLoading(false);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [finalStatus, scanId, focusPath, lod, commitTree]);
+
   /**
    * One-shot ~220ms zoom tween (gated by reduce-motion). `dir: "in"` grows the
    * new (deeper) view from the picked rect's footprint (spec §3.3); `dir: "out"`

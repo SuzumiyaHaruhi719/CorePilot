@@ -1694,9 +1694,20 @@ mod win {
         // `FindFirstFileExW` walk below with ZERO behavior change. A user cancel
         // mid-MFT finalizes as `Cancelled` WITHOUT falling back (capability
         // failures fall back; user cancel does not — spec §3.3).
-        // MFT fast-path is OPT-IN (COREPILOT_MFT=1) until it's hardware-validated
-        // elevated — it's unvalidated raw $MFT parsing, so default to the proven
-        // FindFirstFileExW walk to avoid an empty/wrong tree on a regression.
+        // MFT fast-path is OPT-IN (COREPILOT_MFT=1) until it stops UNDER-COUNTING.
+        // On the 9950X3D C: it is ~11× faster (full C: in ~16 s vs the walk's
+        // ~281 s) and the tree now DISPLAYS (see DiskWorkspace's finish-fetch), but
+        // it reports far less than reality. Ground truth = the complete walk, whose
+        // 3.88 TB ≈ the volume's used space (3.9 TB): 9.28M files / 3.88 TB.
+        //   • MFT pass-1 (sum of every in-use record's $DATA) = 6.26M files /
+        //     2.87 TB — already ~3M files / ~1 TB short. Prime suspect: the parser
+        //     does NOT follow $ATTRIBUTE_LIST extension records, so a fragmented /
+        //     multi-attribute file's $DATA size is read as 0 from its base record
+        //     (e.g. C: Users alloc 1.0 TB via MFT vs 2.0 TB via the walk).
+        //   • MFT pass-2 then drops a FURTHER ~0.8 TB: files whose parent dir node
+        //     wasn't built (orphan / reparse-ancestor / cap) → tree only 2.06 TB.
+        // Both gaps must close ($ATTRIBUTE_LIST resolution; place every counted
+        // file) before MFT can be the default — until then the proven walk runs.
         if std::env::var("COREPILOT_MFT").is_ok()
             && try_run_mft(&handle, &app, &walk_root, &root_display)
         {
