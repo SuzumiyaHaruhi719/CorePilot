@@ -2104,3 +2104,76 @@ pub async fn disk_top_items(
     .await
     .map_err(|e| crate::error::CoreError::Msg(format!("task failed: {e}")))?
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(parent: u32, name_id: u32, first_child: u32, next_sibling: u32, alloc: u64) -> Node {
+        Node {
+            parent,
+            name_id,
+            first_child,
+            next_sibling,
+            logical_size: alloc,
+            alloc_size: alloc,
+            file_count: 1,
+            flags: FLAG_IS_DIR,
+        }
+    }
+
+    fn file(parent: u32, name_id: u32, next_sibling: u32, alloc: u64) -> Node {
+        Node {
+            parent,
+            name_id,
+            first_child: SENTINEL,
+            next_sibling,
+            logical_size: alloc,
+            alloc_size: alloc,
+            file_count: 1,
+            flags: 0,
+        }
+    }
+
+    /// The slice must spend its node budget BEST-FIRST (largest subtree first), not
+    /// breadth-first — this is what fills big folders with nested detail instead of
+    /// leaving them as empty drillable blocks (SpaceSniffer parity). Tree:
+    ///   root → B(1000) → B1(1000) → B1a(1000, file)
+    ///   root → A(50)   → A1(50, file)
+    /// With a 5-node cap, a size-first slice descends the BIG subtree (keeps `B1a`)
+    /// and starves the small one (drops `A1`); a breadth-first FIFO would do the
+    /// opposite. Pins the traversal so it can't silently regress to a queue.
+    #[test]
+    fn slice_spends_budget_best_first_not_breadth_first() {
+        let names: Vec<Box<str>> = vec![
+            "C:\\".into(),
+            "B".into(),
+            "A".into(),
+            "B1".into(),
+            "A1".into(),
+            "B1a".into(),
+        ];
+        let nodes = vec![
+            dir(0, 0, 1, SENTINEL, 1050), // 0 root → child B
+            dir(0, 1, 3, 2, 1000),        // 1 B    → child B1, sibling A
+            dir(0, 2, 4, SENTINEL, 50),   // 2 A    → child A1
+            dir(1, 3, 5, SENTINEL, 1000), // 3 B1   → child B1a
+            file(2, 4, SENTINEL, 50),     // 4 A1   (leaf)
+            file(3, 5, SENTINEL, 1000),   // 5 B1a  (leaf)
+        ];
+        let tree = DiskTree { nodes, names };
+
+        let view = tree.slice("scan", 1, 0, 16, 0, 5);
+        let got: Vec<&str> = view.nodes.iter().map(|n| n.name.as_str()).collect();
+
+        assert_eq!(view.nodes.len(), 5, "node cap honored; got {got:?}");
+        assert!(
+            got.contains(&"B1a"),
+            "best-first must descend the big subtree to B1a; got {got:?}"
+        );
+        assert!(
+            !got.contains(&"A1"),
+            "breadth-first leak: shallow small-subtree A1 should lose to deep B1a; got {got:?}"
+        );
+    }
+}
