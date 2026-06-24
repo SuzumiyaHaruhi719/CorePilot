@@ -126,11 +126,15 @@ function withAlpha(oklch: string, alpha: number): string {
   return `oklch(${inner} / ${alpha})`;
 }
 
-/** Curated flat hues (OKLCH H) for the modern per-region treemap coloring — a
- *  cohesive, slightly-cool spread (indigo→cyan→teal→purple→green→amber→pink→blue).
- *  Each top-level disk region (C:\Users, C:\Windows, …) maps to one, so a whole
- *  subtree reads as one color block — the recognizable modern-treemap look. */
-const FLAT_HUES = [266, 218, 187, 293, 152, 41, 330, 240, 96, 174];
+/** Flat hues (OKLCH H) for the modern per-region treemap coloring — 16 roughly
+ *  evenly-spaced (~22°) around the wheel so neighbouring top-level regions get
+ *  visibly distinct colors. Each top-level disk region (C:\Users, C:\Windows, …)
+ *  hashes to one, so a whole subtree reads as one color block. Was 10 hues, which
+ *  on a typical C: collided 3-way (Users/WeGameApps/hiberfil → same teal, etc.);
+ *  16 spreads the ~16-25 real top-level dirs across far more distinct colors. */
+const FLAT_HUES = [
+  12, 35, 58, 80, 102, 125, 148, 170, 192, 215, 238, 260, 282, 305, 328, 350,
+];
 
 /** First path component below the drive root: "C:\\Users\\Thomas\\x" → "users".
  *  Empty for the root itself. Drives the per-region hue so siblings of a region
