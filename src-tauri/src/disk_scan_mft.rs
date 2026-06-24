@@ -75,6 +75,7 @@ mod imp {
 
     /// Attribute type codes.
     const ATTR_STANDARD_INFORMATION: u32 = 0x10;
+    const ATTR_ATTRIBUTE_LIST: u32 = 0x20;
     const ATTR_FILE_NAME: u32 = 0x30;
     const ATTR_DATA: u32 = 0x80;
     const ATTR_END: u32 = 0xFFFF_FFFF;
@@ -132,6 +133,13 @@ mod imp {
         hardlink: bool,
         logical: u64,
         alloc: u64,
+        /// When the unnamed `$DATA` spilled out of the base record (the file is
+        /// fragmented enough to need an `$ATTRIBUTE_LIST`), the MFT record number
+        /// that actually holds the size-bearing VCN-0 `$DATA` fragment. `None` when
+        /// the `$DATA` is in the base record (the common case). Resolved against
+        /// `ext_data` after pass 1 — without it a fragmented file reads size 0 and
+        /// the whole volume under-totals (e.g. C: Users 1.0 TB vs 1.8 TB actual).
+        data_ref: Option<u64>,
     }
 
     /// A `$MFT` `$DATA` extent: `start_lcn` cluster + `clusters` count. A sparse
@@ -361,6 +369,101 @@ mod imp {
         None
     }
 
+    /// Extract the unnamed (default) `$DATA` stream's (logical, alloc) bytes from a
+    /// SINGLE record — but only the fragment that carries the real sizes: a
+    /// resident value, or a non-resident header with `LowestVcn == 0` (the size
+    /// fields are meaningful only there). `(0, 0)` if this record holds no
+    /// size-bearing unnamed `$DATA`. Called for BASE *and* EXTENSION records so a
+    /// fragmented file's size — which can live in an extension record reached via
+    /// `$ATTRIBUTE_LIST` — is captured (the base-only read is what under-counted).
+    fn unnamed_data_sizes(rec: &[u8]) -> (u64, u64) {
+        let first_attr = match u16_at(rec, 0x14) {
+            Some(v) => v as usize,
+            None => return (0, 0),
+        };
+        let mut off = first_attr;
+        while off + 4 <= rec.len() {
+            let atype = match u32_at(rec, off) {
+                Some(v) => v,
+                None => break,
+            };
+            if atype == ATTR_END {
+                break;
+            }
+            let alen = match u32_at(rec, off + 4) {
+                Some(v) => v as usize,
+                None => break,
+            };
+            if alen < 0x18 || off + alen > rec.len() {
+                break;
+            }
+            if atype == ATTR_DATA && *rec.get(off + 9).unwrap_or(&0) == 0 {
+                let non_resident = *rec.get(off + 8).unwrap_or(&0);
+                if non_resident == 0 {
+                    if let Some(vlen) = u32_at(rec, off + 0x10) {
+                        return (vlen as u64, 0);
+                    }
+                } else if u64_at(rec, off + 0x10).unwrap_or(1) == 0 {
+                    // LowestVcn == 0 fragment: AllocatedSize@0x28, DataSize@0x30.
+                    let alloc = u64_at(rec, off + 0x28).unwrap_or(0);
+                    let dsize = u64_at(rec, off + 0x30).unwrap_or(0);
+                    return (dsize, alloc);
+                }
+            }
+            off += alen;
+        }
+        (0, 0)
+    }
+
+    /// If the record carries a RESIDENT `$ATTRIBUTE_LIST`, return the MFT record
+    /// number holding the unnamed `$DATA` (LowestVcn 0) — where the real size lives
+    /// once it spilled out of the base record. `None` when there's no list, the
+    /// `$DATA` is in the base record itself, or the list is non-resident (v1 reads
+    /// resident lists only — they cover the vast majority; a non-resident list
+    /// degrades to the base-record size, no worse than before this fix).
+    fn attrlist_data_ref(rec: &[u8]) -> Option<u64> {
+        let first_attr = u16_at(rec, 0x14)? as usize;
+        let mut off = first_attr;
+        while off + 4 <= rec.len() {
+            let atype = u32_at(rec, off)?;
+            if atype == ATTR_END {
+                break;
+            }
+            let alen = u32_at(rec, off + 4)? as usize;
+            if alen < 0x18 || off + alen > rec.len() {
+                break;
+            }
+            if atype == ATTR_ATTRIBUTE_LIST {
+                if *rec.get(off + 8)? != 0 {
+                    return None; // non-resident list — out of scope for v1
+                }
+                let content_len = u32_at(rec, off + 0x10)? as usize;
+                let content_off = u16_at(rec, off + 0x14)? as usize;
+                let list_start = off + content_off;
+                let list_end = (list_start + content_len).min(off + alen).min(rec.len());
+                let mut e = list_start;
+                // Each entry: type@0x00, len@0x04, nameLen@0x06, startVCN@0x08,
+                // baseFileReference@0x10 (low 48 bits = the holding record's MFT#).
+                while e + 0x18 <= list_end {
+                    let etype = u32_at(rec, e)?;
+                    let elen = u16_at(rec, e + 0x04)? as usize;
+                    if elen < 0x18 {
+                        break;
+                    }
+                    let name_len = *rec.get(e + 0x06)?;
+                    let start_vcn = u64_at(rec, e + 0x08)?;
+                    if etype == ATTR_DATA && name_len == 0 && start_vcn == 0 {
+                        return Some(u64_at(rec, e + 0x10)? & 0x0000_FFFF_FFFF_FFFF);
+                    }
+                    e += elen;
+                }
+                return None;
+            }
+            off += alen;
+        }
+        None
+    }
+
     /// Parse ONE FILE record (already fixed-up) into a `RecordInfo`, or `None` if
     /// it's free / not a file / unparseable. Bounds-checked throughout (a bad
     /// offset yields `None`, never a panic).
@@ -484,6 +587,9 @@ mod imp {
             logical,
             // alloc filled below by the caller (needs cluster size for resident).
             alloc,
+            // Where the size lives if it spilled to an extension record (resolved
+            // after pass 1 against `ext_data`); None ⇒ the $DATA is in this record.
+            data_ref: attrlist_data_ref(rec),
         })
     }
 
@@ -545,6 +651,11 @@ mod imp {
         let cap = record_count as usize;
         let mut records: Vec<Option<RecordInfo>> = Vec::new();
         records.resize_with(cap, || None);
+        // (logical, alloc) of the unnamed $DATA found IN each record — base AND
+        // extension records alike. A fragmented file's size lives in an extension
+        // record (reached via its base record's $ATTRIBUTE_LIST), so we capture
+        // every record's $DATA here and stitch them after pass 1.
+        let mut ext_data: Vec<(u64, u64)> = vec![(0, 0); cap];
 
         let recs_per_chunk = (CHUNK_BYTES / rec_size).max(1);
         let chunk_bytes = recs_per_chunk * rec_size;
@@ -591,7 +702,7 @@ mod imp {
                     // skipped, never crash. A flood of them trips the sanity gate.
                     let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         if !apply_fixup(&mut buf, bytes_per_sector) {
-                            return (false, None);
+                            return (false, None, (0u64, 0u64));
                         }
                         // Distinguish "free record" (None, not bad) from "in-use
                         // but unparseable" by re-checking the in-use flag.
@@ -599,12 +710,19 @@ mod imp {
                             .map(|f| f & FLAG_RECORD_IN_USE != 0)
                             .unwrap_or(false);
                         let info = parse_record(&buf);
-                        (in_use, info)
+                        // Capture this record's own unnamed $DATA size — for a base
+                        // record it's the file's size; for an extension record it's
+                        // the spilled fragment a fragmented file points to.
+                        let data = unnamed_data_sizes(&buf);
+                        (in_use, info, data)
                     }))
-                    .unwrap_or((false, None));
+                    .unwrap_or((false, None, (0, 0)));
 
-                    let (in_use, mut info) = parsed;
+                    let (in_use, mut info, data) = parsed;
                     if in_use {
+                        if let Some(slot) = ext_data.get_mut(mft_index as usize) {
+                            *slot = data;
+                        }
                         in_use_seen += 1;
                         match info.as_mut() {
                             Some(ri) => {
@@ -664,6 +782,43 @@ mod imp {
         match records.get(ROOT_MFT as usize).and_then(|r| r.as_ref()) {
             Some(r) if r.is_dir => {}
             _ => return None,
+        }
+
+        // --- Resolve spilled $DATA sizes (the $ATTRIBUTE_LIST fix) ------------
+        // A file fragmented enough to need an $ATTRIBUTE_LIST keeps its real size
+        // in an EXTENSION record, so the base-record read above saw 0 — the cause
+        // of the volume under-total (C: 2.06 TB via MFT vs 3.5 TB actual). Re-derive
+        // each file's size from the record that actually holds its unnamed VCN-0
+        // $DATA (its own capture, else the attr-list referent) and recompute the
+        // byte totals. files/dirs counts are unchanged (same record set).
+        bytes_logical = 0;
+        bytes_alloc = 0;
+        for mft in 0..records.len() {
+            let Some(ri) = records[mft].as_mut() else {
+                continue;
+            };
+            if ri.is_dir {
+                continue;
+            }
+            let (mut logical, mut alloc) = ext_data.get(mft).copied().unwrap_or((0, 0));
+            if logical == 0 && alloc == 0 {
+                if let Some(src) = ri.data_ref {
+                    if let Some(&(l, a)) = ext_data.get(src as usize) {
+                        logical = l;
+                        alloc = a;
+                    }
+                }
+            }
+            ri.logical = logical;
+            ri.alloc = if alloc > 0 {
+                alloc
+            } else if logical > 0 {
+                round_to_cluster(logical, bytes_per_cluster)
+            } else {
+                0
+            };
+            bytes_logical = bytes_logical.saturating_add(ri.logical);
+            bytes_alloc = bytes_alloc.saturating_add(ri.alloc);
         }
 
         // --- Pass 2: build the arena from parent references -------------------
