@@ -65,6 +65,51 @@ function minBytesFor(d: number): number {
   return Math.round(64 * 1024 * (1 << (d - 1))); // 64KB..32MB across 2..10
 }
 
+/** Expand-in-place (SpaceSniffer-style): replace the clicked folder's coarse
+ *  contents (a `(N more)` aggregate bucket, or nothing) with the finer fetched
+ *  subtree `sub` (rooted at that folder), WITHOUT re-rooting — so its rect
+ *  subdivides into its real contents at the same position/scale. We drop the
+ *  folder's current descendants, re-index the survivors, then append `sub`'s
+ *  descendants under it. Node `id` == array position (the layout indexes by
+ *  position), so everything is renumbered to its new slot. */
+function spliceExpansion(view: TreeView, fId: number, sub: TreeView): TreeView {
+  const n = view.nodes.length;
+  if (fId < 0 || fId >= n) return view;
+  // Children adjacency (skip each node's self/root-loop where parent === id).
+  const kids: number[][] = Array.from({ length: n }, () => []);
+  for (let i = 0; i < n; i++) {
+    const p = view.nodes[i].parent;
+    if (p !== i && p >= 0 && p < n) kids[p].push(i);
+  }
+  // Mark every descendant of fId (its current, coarse subtree) for removal.
+  const isDesc = new Array<boolean>(n).fill(false);
+  const stack = [...kids[fId]];
+  while (stack.length) {
+    const x = stack.pop()!;
+    if (isDesc[x]) continue;
+    isDesc[x] = true;
+    for (const c of kids[x]) stack.push(c);
+  }
+  // Keep the survivors, re-index, fix parents.
+  const remap = new Array<number>(n).fill(-1);
+  const kept: number[] = [];
+  for (let i = 0; i < n; i++) if (!isDesc[i]) (remap[i] = kept.length), kept.push(i);
+  const newNodes = kept.map((oi, ni) => ({
+    ...view.nodes[oi],
+    id: ni,
+    parent: remap[view.nodes[oi].parent] >= 0 ? remap[view.nodes[oi].parent] : ni,
+  }));
+  const newF = remap[fId];
+  // Append the finer subtree's descendants under the (re-indexed) folder.
+  const base = newNodes.length;
+  const added = sub.nodes.slice(1).map((sn, k) => ({
+    ...sn,
+    id: base + k,
+    parent: sn.parent === 0 ? newF : base + (sn.parent - 1),
+  }));
+  return { ...view, nodes: [...newNodes, ...added] };
+}
+
 export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
   const tf = useTf();
 
@@ -74,6 +119,8 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
 
   // Transient render state (NOT persisted across tab switches — re-pulled on focus).
   const [tree, setTree] = useState<TreeView | null>(null);
+  const treeRef = useRef<TreeView | null>(null);
+  treeRef.current = tree;
   const [selected, setSelected] = useState<TreeNode | null>(null);
   const [hovered, setHovered] = useState<TreeNode | null>(null);
   const [loading, setLoading] = useState(true);
@@ -259,11 +306,42 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
     [],
   );
 
-  // SINGLE-CLICK → select only (spec §3.3): no navigation, the DetailPanel shows
-  // it. Buckets (localId -1, node null) clear the selection.
-  const onSelect = useCallback((node: TreeNode | null) => {
-    setSelected(node);
-  }, []);
+  // SINGLE-CLICK → select + EXPAND-IN-PLACE (SpaceSniffer-style). The DetailPanel
+  // shows the node; and if it's a folder still drawn as a solid block (a dir with
+  // un-shown contents — `hasMore` and no children in the view yet), we fetch its
+  // subtree and splice it in at the folder's slot so its rect subdivides IN PLACE
+  // (no zoom / re-root); the tween eases the contents in. Skipped while scanning
+  // (the live poller would clobber the splice), for files, and for folders already
+  // showing children (drill those with double-click). Buckets (localId -1) just
+  // clear selection.
+  const onSelect = useCallback(
+    (node: TreeNode | null, localId: number) => {
+      setSelected(node);
+      if (scanning || !node || node.path == null || localId < 0) return;
+      if ((node.flags & DISK_FLAG.isDir) === 0 || !node.hasMore) return;
+      const v = treeRef.current;
+      if (!v) return;
+      // Only expand a block that's solid or shows just an aggregate "(N more)"
+      // bucket — a folder already subdivided into real children is left as-is
+      // (double-click drills it).
+      const shown = v.nodes.filter((nd) => nd.parent === localId && nd.id !== localId);
+      const onlyBucket = shown.every((c) => (c.flags & DISK_FLAG.aggregated) !== 0);
+      if (shown.length > 0 && !onlyBucket) return;
+      const path = node.path;
+      void (async () => {
+        try {
+          // Finer detail than the current LOD so the reveal is worthwhile.
+          const sub = await api.diskTree(scanId, path, {
+            minBytes: minBytesFor(Math.max(1, lod - 2)),
+          });
+          setTree((prev) => (prev === v ? spliceExpansion(prev, localId, sub) : prev));
+        } catch {
+          /* transient — leave the block unexpanded */
+        }
+      })();
+    },
+    [scanning, scanId, lod],
+  );
 
   // DOUBLE-CLICK on a drillable container → zoom in (push the drill stack). The
   // canvas already filtered to drillable nodes; we just push + tween (spec §3.3).
@@ -459,7 +537,7 @@ export function DiskWorkspace({ scanId }: DiskWorkspaceProps) {
               colorMode={colorMode}
               scanning={scanning}
               selected={selected}
-              onSelect={(node) => onSelect(node)}
+              onSelect={(node, localId) => onSelect(node, localId)}
               onZoom={(node, origin) => onZoom(node, origin)}
               onContext={(node, id, x, y) => onContext(node, id, x, y)}
               onHover={(node) => setHovered(node ?? null)}
