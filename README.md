@@ -16,7 +16,9 @@
   A premium Windows 11 performance app — <b>topology-aware process core-assignment</b>
   (AMD CCD / 3D V-Cache <i>and</i> Intel P/E hybrids, HEDT up to 64 threads),
   <b>GPU overclocking</b> (NVML + NVAPI), a full <b>Task Manager</b> clone, live
-  <b>monitoring</b>, one-click <b>optimization</b>, and an in-game <b>OSD overlay</b>.<br>
+  <b>monitoring</b>, one-click <b>optimization</b>, an in-game <b>OSD overlay</b>, a
+  SpaceSniffer-style <b>disk-space treemap</b> (NTFS <code>$MFT</code> fast scan), and
+  experimental AMD <b>SMU tuning</b> (Curve Optimizer / PBO).<br>
   Tuned on a Ryzen 9 9950X3D + RTX 4090 — it auto-detects and adapts to whatever it runs on.
 </p>
 
@@ -31,7 +33,7 @@
 </p>
 
 <p align="center">
-  <sub><b>拓扑感知 Topology-aware</b> · <b>AMD / Intel</b> · <b>NVIDIA NVML + NVAPI</b> · <b>实时监控 Live monitoring</b> · <b>游戏内 OSD In-game overlay</b></sub>
+  <sub><b>拓扑感知 Topology-aware</b> · <b>AMD / Intel</b> · <b>NVIDIA NVML + NVAPI</b> · <b>实时监控 Live monitoring</b> · <b>游戏内 OSD In-game overlay</b> · <b>存储分析 Disk treemap</b></sub>
 </p>
 
 ---
@@ -47,6 +49,18 @@
 | ⚡ **一键优化** | 释放内存、清待机缓存、清临时文件、刷新 DNS、高性能电源计划 |
 | 🌀 **风扇控制** | 主板风扇调速（FanXpert 式）— 手动 / 温度曲线，基于 LibreHardwareMonitor，固件锁定时优雅降级 |
 | 🎮 **游戏内 OSD** | 透明、点击穿透的叠加层 + 实时预览 + `Ctrl+Shift+F10` 热键 |
+| 💾 **存储空间分析** | SpaceSniffer 式全盘 treemap — NTFS `$MFT` 极速扫描（数 TB 的 C: 约 15 秒）、扫描即填充动画、按区域配色、单击原地展开 |
+| 🎚️ **SMU 精调（实验）** | AMD Curve Optimizer / PBO 偏移 + 深度传感器，PawnIO ring-0 净室实现，实验开关 + 自动回滚 |
+
+---
+
+<p align="center">
+  <img src="docs/media/feature-tour.gif" alt="CorePilot in motion — 核心分配 / GPU / 风扇 / 优化 / 存储分析 实机一览" width="100%">
+</p>
+
+<p align="center">
+  <sub><b>实机录制 · The app in motion</b> — 核心分配 → GPU → 风扇 → 优化 → 存储空间分析</sub>
+</p>
 
 ---
 
@@ -157,6 +171,24 @@
 
 ---
 
+## 💾 ⑧ 存储空间分析 · Disk Space Analyzer
+
+<p align="center">
+  <img src="docs/media/disk-scan.gif" alt="Disk Space Analyzer — full-disk squarified treemap filling live as the NTFS $MFT scan streams in" width="92%">
+</p>
+
+SpaceSniffer 式的全盘 treemap 概览，**直接读取 NTFS `$MFT`** 而非逐目录遍历：
+
+- **极速扫描** — 解析 `$MFT` 记录（含 `$ATTRIBUTE_LIST` 扩展记录、运行列表、USA fixup），数 TB 的 C: 盘约 15 秒扫完（比逐目录遍历快约 **18×**）；提权 + NTFS 时默认启用，否则回退到目录遍历
+- **扫描即填充动画** — 每扫出一个文件夹就即时出现、其余方块跟着重新布局，从第一个文件夹到扫描结束全程平滑缓动（临界阻尼补间）
+- **最大优先切片** — 节点预算按 alloc 大小「最大优先」分配，大文件夹被嵌套小块填满，而非塌成一个巨块
+- **按区域配色** — 每个顶层区域（Users / Windows / Program Files…）一种色相、整片一致，按嵌套深度微调明度；扁平现代、细发丝分隔线
+- **单击原地展开** — 点击文件夹不缩放，就地把巨块细分为其内容；面包屑下钻、占用 / 逻辑大小双指标、密度 LOD 滑杆、右侧最大项榜单 + 一键打开位置
+
+> 上图为实机录制：C: 盘从空白到填满的扫描动画 —— treemap 随 `$MFT` 流式数据逐步出现并重新布局。
+
+---
+
 ## 🖥️ 硬件适配 · Hardware support
 
 CorePilot 自动适配运行它的硬件，无需手动配置：
@@ -180,11 +212,14 @@ CorePilot 自动适配运行它的硬件，无需手动配置：
 npm install
 npm run tauri dev
 
-# 构建发行版（生成 NSIS 安装包 + 独立 exe）
+# 构建发行版
 npm run tauri build
-# 产物: src-tauri/target/release/corepilot.exe
-#       src-tauri/target/release/bundle/nsis/CorePilot_*_x64-setup.exe
+# 安装版 (installable): src-tauri/target/release/bundle/nsis/CorePilot_<ver>_x64-setup.exe
+# 便携版 (portable):    corepilot.exe + sensord.exe + corepilot_overlay.dll 同放一个文件夹即免安装运行
+#                       （三者均在 src-tauri/target/release/ 下）
 ```
+
+> 发行附带 **安装版**（NSIS 安装包）与 **便携版**（免安装 zip）两种。Releases 页可直接下载。
 
 环境要求：Windows 10/11、Node ≥ 18、Rust (stable-msvc)、MSVC Build Tools、WebView2 Runtime、.NET 8（传感器 sidecar）。
 
