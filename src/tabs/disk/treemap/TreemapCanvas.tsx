@@ -605,6 +605,11 @@ export function TreemapCanvas({
 
   // Hover repaints: when settled (no tween running) the rAF loop won't redraw, so
   // paint a single frame from the last-rendered geometry to show/clear the overlay.
+  // Keyed on the hovered RECT (not the cursor position): moving WITHIN a tile only
+  // repositions the DOM tooltip — the canvas overlay is identical, so we skip the
+  // full-list repaint. At MAX_DRAW_RECTS=7000 that turns a per-mouse-move repaint
+  // into a per-tile-change one (the overlay reads the live cursor via hoverRef).
+  const hoverKey = hover?.rect.key ?? null;
   useEffect(() => {
     if (rafId.current) return; // the live loop already repaints with the overlay
     const draw: Drawn[] = [];
@@ -625,7 +630,7 @@ export function TreemapCanvas({
       });
     }
     paint(draw);
-  }, [hover, colorMode, selectedKey, paint, rects]);
+  }, [hoverKey, colorMode, selectedKey, paint, rects]);
 
   // Cleanup the loop on unmount.
   useEffect(() => {
