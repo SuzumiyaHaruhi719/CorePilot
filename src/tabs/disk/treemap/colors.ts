@@ -218,8 +218,8 @@ export function labelColor(p: Palette, onContainer: boolean): string {
  */
 export function bevel(p: Palette): { light: string; dark: string } {
   return p.light
-    ? { light: "oklch(100% 0 0 / 0.55)", dark: "oklch(0% 0 0 / 0.14)" }
-    : { light: "oklch(100% 0 0 / 0.16)", dark: "oklch(0% 0 0 / 0.28)" };
+    ? { light: "oklch(100% 0 0 / 0.6)", dark: "oklch(0% 0 0 / 0.32)" }
+    : { light: "oklch(100% 0 0 / 0.18)", dark: "oklch(0% 0 0 / 0.5)" };
 }
 
 /** Header/title-bar fill for a top-level container — a faint band darker than the

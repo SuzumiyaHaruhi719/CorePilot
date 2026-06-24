@@ -294,7 +294,7 @@ export function TreemapCanvas({
 
       // Engraved 2-stroke cushion bevel: light top/left, dark bottom/right (spec §3.2).
       // Only on rects big enough to read the bevel — keeps the draw cheap.
-      if (r.w >= 6 && r.h >= 6) {
+      if (r.w >= 4 && r.h >= 4) {
         ctx.lineWidth = 1;
         ctx.strokeStyle = bv.light;
         ctx.beginPath();
@@ -308,11 +308,13 @@ export function TreemapCanvas({
         ctx.lineTo(r.x + r.w - 0.5, r.y + r.h - 0.5);
         ctx.lineTo(r.x + 0.5, r.y + r.h - 0.5);
         ctx.stroke();
-      } else if (r.w > 2 && r.h > 2) {
-        ctx.strokeStyle = stroke;
+      } else if (r.w > 1.5 && r.h > 1.5) {
+        // Small boxes: a single dark separating edge so they don't merge into a blob.
+        ctx.strokeStyle = bv.dark;
         ctx.lineWidth = 1;
         ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
       }
+      void stroke;
 
       // Header/title bar on top-level containers (spec §3.2): a faint band behind
       // the name strip so it reads as a folder header.
