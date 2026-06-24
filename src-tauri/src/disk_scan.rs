@@ -652,6 +652,28 @@ impl ScanHandle {
         self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Publish a mid-scan PROGRESS snapshot. The $MFT path builds these cheap
+    /// directory-only trees (own sizes from running per-dir tallies) every few
+    /// hundred ms while reading the table, so the treemap animates folders
+    /// appearing + resizing as they're discovered (the front-end tween eases
+    /// between snapshots). Rolls subtree sizes up the parent spine (a child always
+    /// has a higher index than its parent) then swaps it in via `publish`. No
+    /// chip-counter stores — the progress emitter owns those.
+    pub(crate) fn mft_publish_partial(&self, mut nodes: Vec<Node>, names: Vec<Box<str>>) {
+        for i in (1..nodes.len()).rev() {
+            let (l, a, c, p) = {
+                let n = &nodes[i];
+                (n.logical_size, n.alloc_size, n.file_count, n.parent as usize)
+            };
+            if let Some(par) = nodes.get_mut(p) {
+                par.logical_size = par.logical_size.saturating_add(l);
+                par.alloc_size = par.alloc_size.saturating_add(a);
+                par.file_count = par.file_count.saturating_add(c);
+            }
+        }
+        self.publish(Arc::new(DiskTree { nodes, names }));
+    }
+
     fn build_progress(&self) -> ScanProgress {
         let status = self.status();
         ScanProgress {

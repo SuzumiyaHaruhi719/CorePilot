@@ -100,6 +100,10 @@ mod imp {
     const CHUNK_BYTES: usize = 4 * 1024 * 1024;
     /// Poll cancel + republish progress every this many records during the read.
     const PROGRESS_EVERY: u64 = 50_000;
+    /// Min gap between mid-scan animation snapshots (a cheap dir-only tree publish).
+    /// Small enough that folders visibly appear + grow from ~½ s in; the front-end
+    /// tween eases between frames so it reads as continuous fill.
+    const PARTIAL_MS: u128 = 450;
     /// If more than this fraction of in-use records fail to parse, treat the parse
     /// as broken and fall back (sanity, spec §3.5).
     const MAX_BAD_RECORD_RATIO: f64 = 0.05;
@@ -533,6 +537,140 @@ mod imp {
         })
     }
 
+    /// Build a cheap DIRECTORY-ONLY snapshot tree for a mid-scan animation frame:
+    /// every directory reachable in `records[..max_mft]`, each carrying its OWN
+    /// accumulated direct-file size from the running per-dir tallies (`own_*`), and
+    /// NO individual file leaves. The caller (`ScanHandle::mft_publish_partial`)
+    /// rolls subtree sizes up + publishes; the front-end LOD-slices to the visible
+    /// top folders and the tween animates folders appearing + resizing as the read
+    /// progresses. Kept SEPARATE from `build_arena` (the accurate final build) on
+    /// purpose — the animation path must never be able to regress the accurate
+    /// result. Sizes here are approximate (pre-$ATTRIBUTE_LIST-resolution, partial
+    /// subtree); the final build replaces them exactly.
+    fn build_dir_snapshot(
+        records: &[Option<RecordInfo>],
+        max_mft: u64,
+        own_alloc: &[u64],
+        own_logical: &[u64],
+        own_files: &[u32],
+        root_display: &str,
+    ) -> (Vec<Node>, Vec<Box<str>>) {
+        let n = records.len();
+        let mut node_of: Vec<u32> = vec![SENTINEL; n];
+        let mut nodes: Vec<Node> = Vec::new();
+        let mut interner = Interner::new();
+        let root_name = interner.intern(root_display);
+        nodes.push(Node {
+            parent: 0,
+            name_id: root_name,
+            first_child: SENTINEL,
+            next_sibling: SENTINEL,
+            logical_size: 0,
+            alloc_size: 0,
+            file_count: 0,
+            flags: FLAG_IS_DIR,
+        });
+        node_of[ROOT_MFT as usize] = 0;
+
+        // Build dir `mft` + its ancestor chain to root. Mirrors build_arena's
+        // ensure_dir (incl. reparse parity) so the partial converges to the final.
+        fn ensure_dir(
+            mft: u64,
+            records: &[Option<RecordInfo>],
+            node_of: &mut [u32],
+            nodes: &mut Vec<Node>,
+            interner: &mut Interner,
+        ) -> Option<u32> {
+            match node_of.get(mft as usize) {
+                Some(&id) if id != SENTINEL => return Some(id),
+                Some(_) => {}
+                None => return None,
+            }
+            let mut chain: Vec<u64> = Vec::new();
+            let mut cur = mft;
+            let mut guard = 0u32;
+            loop {
+                if cur == ROOT_MFT {
+                    break;
+                }
+                match node_of.get(cur as usize) {
+                    Some(&id) if id != SENTINEL => break,
+                    Some(_) => {}
+                    None => return None,
+                }
+                let rec = records.get(cur as usize)?.as_ref()?;
+                if !rec.is_dir {
+                    return None;
+                }
+                if cur != mft && rec.is_reparse {
+                    return None;
+                }
+                chain.push(cur);
+                cur = rec.parent_mft;
+                guard += 1;
+                if guard > 1 << 20 {
+                    return None;
+                }
+            }
+            let mut parent_id = if cur == ROOT_MFT { 0u32 } else { node_of[cur as usize] };
+            for &dmft in chain.iter().rev() {
+                if node_of[dmft as usize] != SENTINEL {
+                    parent_id = node_of[dmft as usize];
+                    continue;
+                }
+                if nodes.len() as u64 >= NODE_CAP {
+                    return None;
+                }
+                let rec = records[dmft as usize].as_ref()?;
+                let name_id = interner.intern(&rec.name);
+                let id = nodes.len() as u32;
+                let prev_first = nodes[parent_id as usize].first_child;
+                let mut flags = FLAG_IS_DIR;
+                if rec.is_reparse {
+                    flags |= FLAG_REPARSE;
+                }
+                if rec.is_system {
+                    flags |= FLAG_SYSTEM;
+                }
+                nodes.push(Node {
+                    parent: parent_id,
+                    name_id,
+                    first_child: SENTINEL,
+                    next_sibling: prev_first,
+                    logical_size: 0,
+                    alloc_size: 0,
+                    file_count: 0,
+                    flags,
+                });
+                nodes[parent_id as usize].first_child = id;
+                node_of[dmft as usize] = id;
+                parent_id = id;
+            }
+            Some(node_of[mft as usize]).filter(|&v| v != SENTINEL)
+        }
+
+        let end = max_mft.min(n as u64);
+        for mft in FIRST_USER_MFT..end {
+            let Some(rec) = records.get(mft as usize).and_then(|r| r.as_ref()) else {
+                continue;
+            };
+            if rec.is_dir {
+                let _ = ensure_dir(mft, records, &mut node_of, &mut nodes, &mut interner);
+            }
+        }
+        // Each built dir's OWN size = the running tally of its direct files.
+        for mft in ROOT_MFT..end {
+            let id = match node_of.get(mft as usize) {
+                Some(&v) if v != SENTINEL => v as usize,
+                _ => continue,
+            };
+            nodes[id].alloc_size = own_alloc.get(mft as usize).copied().unwrap_or(0);
+            nodes[id].logical_size = own_logical.get(mft as usize).copied().unwrap_or(0);
+            nodes[id].file_count = own_files.get(mft as usize).copied().unwrap_or(0);
+        }
+        (nodes, interner.table)
+    }
+
     /// The full MFT build. Returns `Some(BuiltArena)` on success, `None` for ANY
     /// capability/parse/sanity failure (→ caller runs the walk) OR user cancel
     /// (→ caller finalizes Cancelled). Side-effect-free on shared state except the
@@ -614,6 +752,13 @@ mod imp {
         let mut dirs_seen: u64 = 0;
         let mut bytes_logical: u64 = 0;
         let mut bytes_alloc: u64 = 0;
+        // Running per-dir tallies (indexed by MFT#) of DIRECT-child file sizes —
+        // accumulated cheaply during the read so build_dir_snapshot can publish a
+        // sized dir tree mid-scan for the fill animation, without placing files.
+        let mut own_alloc: Vec<u64> = vec![0; cap];
+        let mut own_logical: Vec<u64> = vec![0; cap];
+        let mut own_files: Vec<u32> = vec![0; cap];
+        let mut last_partial = std::time::Instant::now();
 
         // Walk each $DATA extent; skip sparse runs (holes in the table → those
         // record slots stay None). Read in `chunk_bytes` units.
@@ -700,6 +845,17 @@ mod imp {
                                     bytes_logical =
                                         bytes_logical.saturating_add(ri.logical);
                                     bytes_alloc = bytes_alloc.saturating_add(ri.alloc);
+                                    // Running per-dir tally for the animation frames.
+                                    let p = ri.parent_mft as usize;
+                                    if let Some(s) = own_alloc.get_mut(p) {
+                                        *s = s.saturating_add(ri.alloc);
+                                    }
+                                    if let Some(s) = own_logical.get_mut(p) {
+                                        *s = s.saturating_add(ri.logical);
+                                    }
+                                    if let Some(s) = own_files.get_mut(p) {
+                                        *s = s.saturating_add(1);
+                                    }
                                 }
                                 records[mft_index as usize] = info;
                             }
@@ -725,6 +881,22 @@ mod imp {
                             bytes_alloc,
                             (files_seen + dirs_seen).min(record_count),
                         );
+                        // Throttled mid-scan animation frame: a cheap dir-only tree
+                        // (own sizes from the running tallies) so the treemap fills
+                        // in + resizes as folders are discovered. The full accurate
+                        // build still lands at the end.
+                        if last_partial.elapsed().as_millis() >= PARTIAL_MS {
+                            let (pn, pnm) = build_dir_snapshot(
+                                &records,
+                                mft_index,
+                                &own_alloc,
+                                &own_logical,
+                                &own_files,
+                                root_display,
+                            );
+                            handle.mft_publish_partial(pn, pnm);
+                            last_partial = std::time::Instant::now();
+                        }
                     }
                 }
                 bytes_remaining -= this as u64;
