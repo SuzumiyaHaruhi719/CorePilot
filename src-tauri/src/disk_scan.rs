@@ -715,8 +715,13 @@ static SCANS: Lazy<DashMap<ScanId, Arc<ScanHandle>>> = Lazy::new(DashMap::new);
 /// ~20M nodes ≈ 640 MB (spec §2.7, owner decision 2).
 pub(crate) const NODE_CAP: u64 = 20_000_000;
 /// Within a directory, keep the top-N largest files as real nodes; fold the rest
-/// into one synthetic `AGGREGATED` "(other M files)" leaf (spec §2.6).
-pub(crate) const TOP_N_PER_DIR: usize = 32;
+/// into one synthetic `AGGREGATED` "(other M files)" leaf (spec §2.6). Kept HIGH
+/// so big folders (e.g. a 642-file Videos dir) show every file as its own treemap
+/// box — SpaceSniffer-style full detail — instead of collapsing 610 of them into
+/// one giant aggregate block. The arena NODE_CAP + the disk_tree slice's max_nodes
+/// + the client pixel-LOD still bound memory and render cost; only pathological
+/// mega-dirs (>2048 files, typically tiny cache files) still aggregate the tail.
+pub(crate) const TOP_N_PER_DIR: usize = 2048;
 /// Progress-event throttle floor (spec §2.8 — ~4–10 Hz).
 const PROGRESS_THROTTLE: Duration = Duration::from_millis(200);
 /// Snapshot publish cadence during scanning (~5 Hz). Each tick copies the arena

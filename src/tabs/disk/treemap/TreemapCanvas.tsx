@@ -180,18 +180,45 @@ export function TreemapCanvas({
     onHoverRef.current = onHover;
   });
 
-  // Track the wrapper's pixel box.
+  // Track the wrapper's pixel box. NOTE: the disk-tab flex chain collapses this
+  // box to its CONTENT height (~65px) — the row stays tall (the detail-panel
+  // sibling fills it) but `align-items` doesn't stretch the treemap side, so the
+  // box shrinks to the canvas it contains → a circular 65px lock that squarifies
+  // the whole tree into one thin strip ("only one giant folder"). So instead of
+  // trusting our own collapsed height, take the REAL available height from our
+  // top down to the nearest tall ancestor's bottom.
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      const r = entries[0]?.contentRect;
-      if (r && r.width > 0 && r.height > 0) {
-        setSize({ w: Math.round(r.width), h: Math.round(r.height) });
+    const measure = () => {
+      const w = el.clientWidth;
+      let h = el.clientHeight;
+      if (h < 200) {
+        const top = el.getBoundingClientRect().top;
+        let node: HTMLElement | null = el.parentElement;
+        while (node) {
+          const r = node.getBoundingClientRect();
+          if (r.height > 200) {
+            h = Math.max(h, Math.floor(r.bottom - top));
+            break;
+          }
+          node = node.parentElement;
+        }
       }
-    });
+      if (w > 0 && h > 0) setSize({ w, h });
+    };
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
-    return () => ro.disconnect();
+    // Observe a few ancestors too: the collapsed box may not resize when the real
+    // available height changes (window/panel resize), but an ancestor will.
+    let p: HTMLElement | null = el.parentElement;
+    for (let i = 0; i < 6 && p; i++, p = p.parentElement) ro.observe(p);
+    measure();
+    const raf = requestAnimationFrame(measure);
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(raf);
+    };
   }, []);
 
   // Theme-derived palette, recomputed on a theme/style switch.
@@ -724,7 +751,15 @@ export function TreemapCanvas({
   const hoverNode = hover ? nodeOf(hover.rect.nodeId) : null;
 
   return (
-    <div ref={wrapRef} className="relative min-h-0 w-full flex-1 overflow-hidden">
+    <div
+      ref={wrapRef}
+      className="relative min-h-0 w-full flex-1 overflow-hidden"
+      // The flex chain collapses this box to ~65px (see the measure() fallback);
+      // with overflow-hidden that CLIPPED the correctly-sized 655px canvas to a
+      // thin strip. Pin the height to the measured available height so the box
+      // matches the canvas and the full treemap shows.
+      style={{ height: size.h || undefined }}
+    >
       <canvas
         ref={canvasRef}
         style={{ width: size.w, height: size.h, display: "block" }}

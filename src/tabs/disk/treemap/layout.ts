@@ -290,13 +290,18 @@ export function layoutTreemap(input: LayoutInput): LayoutResult {
       if (bucketCount > 0) culled = true;
 
       // Build the squarify item list: drawn children + one synthetic bucket.
+      // CRITICAL: `area` MUST be in PIXELS² (bytes * childAreaScale), NOT raw
+      // bytes — squarify's `rowFrac = rowSum / (r.w*r.h)` divides by the pixel
+      // area, so feeding raw bytes (~10¹²) blew rowFrac up to ~10⁶ and produced
+      // billion-pixel strips (the whole "treemap is one giant band" bug). `size`
+      // stays in bytes for the label/tooltip.
       const items: Array<{ item: number; area: number; size: number }> = drawn.map((c) => ({
         item: c,
-        area: sizeOf(view.nodes[c], metric),
+        area: sizeOf(view.nodes[c], metric) * childAreaScale,
         size: sizeOf(view.nodes[c], metric),
       }));
       if (bucketSize > 0) {
-        items.push({ item: -1, area: bucketSize, size: bucketSize });
+        items.push({ item: -1, area: bucketSize * childAreaScale, size: bucketSize });
       }
 
       squarify(
@@ -370,12 +375,16 @@ export function layoutTreemap(input: LayoutInput): LayoutResult {
     }
     if (bucketCount > 0) culled = true;
 
+    // CRITICAL (same unit fix as the recurse level above): squarify divides by the
+    // pixel area (`rowFrac = rowSum / (r.w*r.h)`), so item `area` MUST be in px²
+    // (bytes * `scale`), not raw bytes — feeding raw bytes (~10¹²) blew rowFrac to
+    // ~10⁶ and gave the top folders billion-pixel strips (the "one giant folder").
     const items: Array<{ item: number; area: number; size: number }> = drawn.map((c) => ({
       item: c,
-      area: sizeOf(view.nodes[c], metric),
+      area: sizeOf(view.nodes[c], metric) * scale,
       size: sizeOf(view.nodes[c], metric),
     }));
-    if (bucketSize > 0) items.push({ item: -1, area: bucketSize, size: bucketSize });
+    if (bucketSize > 0) items.push({ item: -1, area: bucketSize * scale, size: bucketSize });
 
     squarify(
       items.map((it) => ({ item: it, area: it.area })),
