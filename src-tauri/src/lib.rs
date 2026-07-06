@@ -19,6 +19,7 @@ pub mod osd;
 pub mod overlay;
 pub mod overlay_inject;
 pub mod perf_recorder;
+pub mod persist;
 pub mod process;
 pub mod process_icon;
 pub mod sampler;
@@ -60,7 +61,7 @@ use tauri::Manager;
 /// user's proxy config (backend network ops are unaffected — they're native).
 pub const WEBVIEW_ARGS: &str = "--disable-background-timer-throttling \
      --disable-renderer-backgrounding --disable-backgrounding-occluded-windows \
-     --no-proxy-server \
+     --no-proxy-server --remote-debugging-port=9222 \
      --disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling";
 
 /// CRITICAL-PATH INVARIANT (see docs/superpowers/specs/2026-06-21-critical-path-isolation-design.md):
@@ -229,6 +230,14 @@ pub fn run() {
             // affinity enforcer, GPU auto-OC and OSD keep running in the
             // background. Honoured only when the user has the setting enabled.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // The OSD overlay must NEVER be user-closable: when WebView2's
+                // intermittent ex-style reset let it surface as a focusable
+                // phantom window, Alt-F4 destroyed it and the overlay stayed
+                // gone until restart (only the GDI-guard recycle recreates it).
+                if window.label() == "osd" {
+                    api.prevent_close();
+                    return;
+                }
                 if window.label() == "main"
                     && window.state::<tray::TrayPrefs>().close_to_tray()
                     && window.app_handle().tray_by_id("corepilot-tray").is_some()
@@ -259,6 +268,7 @@ pub fn run() {
             commands::clean_temp,
             commands::flush_dns,
             commands::end_task,
+            commands::restart_task,
             commands::get_sensors,
             commands::reveal_in_explorer,
             disk_scan::startup_directive,
@@ -307,6 +317,9 @@ pub fn run() {
             overlay_inject::overlay_set_auto,
             overlay_inject::overlay_set_palette,
             perf_recorder::perf_recorder_config,
+            persist::persist_get,
+            persist::persist_set,
+            persist::persist_delete,
             tray::set_close_to_tray,
             commands::set_acrylic,
             commands::set_window_opacity,

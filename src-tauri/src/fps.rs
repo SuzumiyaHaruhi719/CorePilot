@@ -42,7 +42,6 @@ use windows::Win32::System::Threading::{
     GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_RUNNING_D3D_FULL_SCREEN};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
 };
@@ -353,8 +352,9 @@ pub fn stats_for_pid(pid: u32) -> FpsStats {
 
 /// Resolve a PID's full executable path, lowercased (e.g.
 /// `r"c:\program files (x86)\steam\steamapps\common\foo\foo.exe"`). `None` when
-/// the process can't be opened or queried. Never panics.
-fn process_image_path(pid: u32) -> Option<String> {
+/// the process can't be opened or queried. Never panics. (`pub(crate)`: also
+/// used by `commands::restart_task` to relaunch the same image.)
+pub(crate) fn process_image_path(pid: u32) -> Option<String> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false.into(), pid).ok()?;
         // QueryFullProcessImageNameW writes the full image path; `len` is in/out
@@ -454,7 +454,7 @@ fn is_non_game(exe: &str) -> bool {
 /// frame rate; a UI app only redraws occasionally. Requiring a sustained rate
 /// this high distinguishes them. Capped/menu games below this can still be added
 /// via the OSD whitelist (which force-records regardless of FPS).
-const GAME_FPS_MIN: f64 = 20.0;
+pub const GAME_FPS_MIN: f64 = 20.0;
 
 /// True when the foreground window covers its ENTIRE monitor (including the strip
 /// the taskbar occupies) — i.e. exclusive- or borderless-fullscreen. A *maximised*
@@ -488,15 +488,13 @@ fn foreground_is_fullscreen() -> bool {
     }
 }
 
-/// True when Windows reports a Direct3D application is running full-screen — a
-/// strong "a game is in front" hint. Cheap shell query; it's global (not per-PID),
-/// so we only ever use it as a positive signal alongside the foreground checks.
-fn d3d_fullscreen_active() -> bool {
-    unsafe {
-        SHQueryUserNotificationState()
-            .map(|s| s == QUNS_RUNNING_D3D_FULL_SCREEN)
-            .unwrap_or(false)
-    }
+/// True when the present-event pipeline has EVER produced data — i.e. the ETW
+/// session started and events flow (needs admin). The perf recorder's
+/// sustained-render session filter keys off per-PID FPS; when ETW is down every
+/// FPS reads `None` and that filter would discard *real* game sessions, so it
+/// bypasses itself while this is false.
+pub fn etw_alive() -> bool {
+    PRESENTS.lock().map(|m| !m.is_empty()).unwrap_or(false)
 }
 
 /// Async + blocking-pool: usually µs of window/process queries, but the
@@ -530,12 +528,16 @@ pub fn foreground_info_now() -> ForegroundInfo {
                 .map(crate::game_library::is_game_path)
                 .unwrap_or(false);
             // Heuristic fallback for unrecognised apps: presenting at a sustained,
-            // game-like rate AND either (A) the window covers its whole monitor
-            // (exclusive- or borderless-fullscreen) or (B) Windows reports a D3D
-            // full-screen app. The fullscreen guard is what stops a merely-redrawing
-            // UI app (e.g. Paint while you draw) from being misdetected as a game.
+            // game-like rate AND the window covers its whole monitor (exclusive- or
+            // borderless-fullscreen). The fullscreen guard is what stops a
+            // merely-redrawing UI app (e.g. Paint while you draw) from being
+            // misdetected as a game. NOTE: this deliberately does NOT consult
+            // `SHQueryUserNotificationState` — that flag is GLOBAL, so while any
+            // D3D-fullscreen game was running it turned every presenting app the
+            // user alt-tabbed to (Tacview, a browser playing video, …) into a
+            // "game", spawning junk perf sessions and splitting the real one.
             let presenting = fps_for(pid).is_some_and(|fps| fps >= GAME_FPS_MIN);
-            let heuristic = presenting && (foreground_is_fullscreen() || d3d_fullscreen_active());
+            let heuristic = presenting && foreground_is_fullscreen();
 
             let is_game = not_shell && (in_library || heuristic);
             ForegroundInfo { exe, pid, is_game }

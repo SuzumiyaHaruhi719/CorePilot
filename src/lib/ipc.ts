@@ -723,6 +723,9 @@ export const api = {
   cleanTemp: () => invoke<CleanResult>("clean_temp"),
   flushDns: () => invoke<void>("flush_dns"),
   endTask: (pid: number) => invoke<void>("end_task", { pid }),
+  /** Kill + relaunch the same executable (the only action offered for
+   *  SYSTEM/service-account processes — they can be restarted, never just ended). */
+  restartTask: (pid: number) => invoke<void>("restart_task", { pid }),
   getSensors: () => invoke<Sensors>("get_sensors"),
   // SMU tuning (Curve Optimizer / PBO) — forwarded to the sensord sidecar.
   smuStatus: () => invoke<SmuStatus>("smu_status"),

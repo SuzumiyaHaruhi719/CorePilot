@@ -178,6 +178,19 @@ pub fn get_memory_detail() -> CoreResult<MemDetail> {
     optimize::memory_detail()
 }
 
+/// Like [`run_blocking_default`], for command bodies returning
+/// `Result<T, String>` (persist writes, overlay injection): runs on the
+/// blocking pool with the slow-body warning, surfacing a join failure as `Err`.
+pub(crate) async fn run_blocking_err<T, F>(name: &'static str, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || warn_slow(name, f))
+        .await
+        .map_err(|e| format!("blocking task failed: {e}"))?
+}
+
 /// Run a blocking optimization step on the blocking thread pool. Sync Tauri
 /// commands execute on the MAIN thread — the window's message pump — so
 /// seconds-long work (temp-tree deletion, standby purge, powercfg/ipconfig
@@ -256,6 +269,42 @@ pub async fn flush_dns() -> CoreResult<()> {
 pub fn end_task(pid: u32) -> CoreResult<()> {
     process::guard_critical_pid(pid)?;
     process::kill(pid)
+}
+
+/// Restart a process: kill it, wait for it to exit, then relaunch the same
+/// executable image. This is what the task-manager view offers for SYSTEM /
+/// service-account processes instead of a bare "end task" (mirrors Windows Task
+/// Manager's explorer.exe "重新启动"). The critical-PID guard still refuses the
+/// OS-critical set (csrss/lsass/…) outright. Async + blocking-pool: waits up to
+/// ~3 s for the old process to exit before respawning.
+///
+/// NOTE: this is an image relaunch, not an SCM service restart — right for
+/// shell-class processes (explorer.exe etc.); real services are managed from
+/// the services view.
+#[tauri::command]
+pub async fn restart_task(pid: u32) -> CoreResult<()> {
+    run_blocking(move || {
+        process::guard_critical_pid(pid)?;
+        let path = crate::fps::process_image_path(pid)
+            .ok_or_else(|| CoreError::Msg("无法解析进程路径，无法重启".into()))?;
+        process::kill(pid)?;
+        // Wait for the old instance to release single-instance locks (<=3 s).
+        for _ in 0..30 {
+            if !crate::fps::pid_alive(pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let dir = std::path::Path::new(&path).parent().map(|p| p.to_path_buf());
+        let mut cmd = std::process::Command::new(&path);
+        if let Some(dir) = dir {
+            cmd.current_dir(dir);
+        }
+        cmd.spawn()
+            .map(|_| ())
+            .map_err(|e| CoreError::Msg(format!("重启失败：{e}")))
+    })
+    .await
 }
 
 /// Async + blocking-pool: `sample()` runs a PDH collect whose `\GPU Engine(*)`

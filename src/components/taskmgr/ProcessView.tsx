@@ -1,4 +1,4 @@
-import { ChevronsUp, Copy, FolderOpen, Loader2, MonitorPlay, Search, X } from "lucide-react";
+import { ChevronsUp, Copy, FolderOpen, Loader2, MonitorPlay, RotateCw, Search, X } from "lucide-react";
 import { useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useProcesses } from "../../hooks/useProcesses";
 import { useTf } from "../../lib/i18n";
@@ -13,6 +13,16 @@ import { TmProcessTable } from "./TmProcessTable";
 
 interface ProcessViewProps {
   detailed?: boolean;
+}
+
+/** Service-account owners whose processes must never be plain-killed from the
+ *  UI — ending them destabilizes Windows. The only action offered is RESTART
+ *  (kill + relaunch the same image, like Task Manager's explorer.exe 重新启动).
+ *  Well-known SIDs keep these English names on every Windows locale. */
+const SYSTEM_ACCOUNTS = new Set(["system", "local service", "network service"]);
+
+function isSystemProc(p: ProcInfo): boolean {
+  return SYSTEM_ACCOUNTS.has((p.user ?? "").trim().toLowerCase());
 }
 
 export function ProcessView({ detailed }: ProcessViewProps) {
@@ -73,7 +83,9 @@ export function ProcessView({ detailed }: ProcessViewProps) {
       x: e.clientX,
       y: e.clientY,
       items: [
-        { label: "结束任务", icon: X, danger: true, onClick: () => setPendingKill(proc) },
+        isSystemProc(proc)
+          ? { label: tf("重启任务", "Restart task"), icon: RotateCw, danger: true, onClick: () => setPendingKill(proc) }
+          : { label: "结束任务", icon: X, danger: true, onClick: () => setPendingKill(proc) },
         {
           label: "设为高优先级",
           icon: ChevronsUp,
@@ -140,13 +152,25 @@ export function ProcessView({ detailed }: ProcessViewProps) {
   async function confirmKill() {
     if (!pendingKill || killing) return;
     const target = pendingKill;
+    const restart = isSystemProc(target);
     setKilling(true);
     try {
-      await api.endTask(target.pid);
-      setStatus(tf(`已结束 ${target.name}`, `Ended ${target.name}`));
+      if (restart) {
+        // System-owned process: plain "end task" is not offered — kill +
+        // relaunch the same image instead (Task Manager's explorer.exe 重新启动).
+        await api.restartTask(target.pid);
+        setStatus(tf(`已重启 ${target.name}`, `Restarted ${target.name}`));
+      } else {
+        await api.endTask(target.pid);
+        setStatus(tf(`已结束 ${target.name}`, `Ended ${target.name}`));
+      }
       setPendingKill(null);
     } catch {
-      setStatus(tf(`无法结束 ${target.name}（可能是受保护的系统进程）`, `Couldn't end ${target.name} (possibly a protected system process)`));
+      setStatus(
+        restart
+          ? tf(`无法重启 ${target.name}（受保护的系统进程）`, `Couldn't restart ${target.name} (protected system process)`)
+          : tf(`无法结束 ${target.name}（可能是受保护的系统进程）`, `Couldn't end ${target.name} (possibly a protected system process)`),
+      );
       setPendingKill(null);
     } finally {
       setKilling(false);
@@ -201,19 +225,32 @@ export function ProcessView({ detailed }: ProcessViewProps) {
       <Modal
         open={!!pendingKill}
         onClose={() => !killing && setPendingKill(null)}
-        title="结束任务"
+        title={pendingKill && isSystemProc(pendingKill) ? tf("重启任务", "Restart task") : "结束任务"}
         footer={
           <>
             <Button onClick={() => setPendingKill(null)} disabled={killing}>取消</Button>
             <Button variant="danger" onClick={confirmKill} disabled={killing}>
-              {killing ? <Loader2 size={13} className="animate-spin" /> : null} 结束任务
+              {killing ? <Loader2 size={13} className="animate-spin" /> : null}{" "}
+              {pendingKill && isSystemProc(pendingKill) ? tf("重启任务", "Restart") : "结束任务"}
             </Button>
           </>
         }
       >
         <p className="text-[13px] leading-relaxed text-muted">
-          {tf("确定要结束", "End")} <span className="font-semibold text-ink">{pendingKill?.name}</span>{" "}
-          (PID {pendingKill?.pid}){tf("吗？未保存的数据将丢失。", "? Unsaved data will be lost.")}
+          {pendingKill && isSystemProc(pendingKill) ? (
+            <>
+              <span className="font-semibold text-ink">{pendingKill.name}</span> (PID {pendingKill.pid}){" "}
+              {tf(
+                "是系统进程，不能直接结束，只能重启（结束后自动重新启动）。",
+                "is a system process and can't be ended — it can only be restarted (killed, then relaunched).",
+              )}
+            </>
+          ) : (
+            <>
+              {tf("确定要结束", "End")} <span className="font-semibold text-ink">{pendingKill?.name}</span>{" "}
+              (PID {pendingKill?.pid}){tf("吗？未保存的数据将丢失。", "? Unsaved data will be lost.")}
+            </>
+          )}
         </p>
       </Modal>
       <ContextMenu state={menu} onClose={() => setMenu(null)} />

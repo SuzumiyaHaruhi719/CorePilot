@@ -18,7 +18,7 @@ use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW,
-    GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
+    GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 const OSD_LABEL: &str = "osd";
@@ -32,11 +32,17 @@ const OSD_LABEL: &str = "osd";
 /// leaves generous headroom and recycles roughly every 3 h.
 const GDI_RECYCLE_THRESHOLD: u32 = 6_000;
 
-/// Watchdog for the upstream GDI leak: poll our own GDI count once a minute
-/// and, near the cap, destroy + recreate the OSD window on the main thread.
-/// Destroying the window releases every leaked object (measured: 186 → 19).
-/// The recreate is invisible while the overlay is parked off-screen and at
-/// worst a one-frame blink in-game.
+/// Watchdog for the upstream GDI leak — and the OSD's KEEP-ALIVE: poll our own
+/// GDI count once a minute and, near the cap, destroy + recreate the OSD window
+/// on the main thread. Destroying the window releases every leaked object
+/// (measured: 186 → 19). The recreate is invisible while the overlay is parked
+/// off-screen and at worst a one-frame blink in-game.
+///
+/// Each tick ALSO re-ensures the overlay exists + carries its styles
+/// (`osd_set_visible` is idempotent): if the window died through ANY path — a
+/// WebView2 crash, a failed recycle, the historical style-reset phantom window
+/// the user could close — it is recreated within a minute instead of staying
+/// gone until the next app restart, and drifted ex-styles are re-asserted.
 pub fn start_gdi_guard(app: AppHandle) {
     std::thread::Builder::new()
         .name("gdi-guard".into())
@@ -48,6 +54,13 @@ pub fn start_gdi_guard(app: AppHandle) {
                 std::thread::sleep(std::time::Duration::from_secs(60));
                 let gdi = unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
                 if gdi < GDI_RECYCLE_THRESHOLD {
+                    // Keep-alive + style re-assert (cheap window calls, main thread).
+                    let handle = app.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        if let Err(e) = osd_set_visible(handle.clone(), true) {
+                            tracing::warn!("OSD keep-alive ensure failed: {e}");
+                        }
+                    });
                     continue;
                 }
                 tracing::warn!(
@@ -81,12 +94,21 @@ pub fn start_gdi_guard(app: AppHandle) {
 /// `set_position` runs.
 static LAST_OSD_SIZE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// OR click-through + non-activating extended styles onto one window.
+/// OR click-through + non-activating + tool-window extended styles onto one
+/// window (and drop `WS_EX_APPWINDOW`).
 unsafe fn set_through(hwnd: HWND) {
     let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
     // WS_EX_TRANSPARENT → clicks pass to whatever is beneath; WS_EX_NOACTIVATE →
-    // the overlay never steals focus. Leave Tauri's layered/transparency bits.
-    let want = ex | WS_EX_TRANSPARENT.0 as isize | WS_EX_NOACTIVATE.0 as isize;
+    // the overlay never steals focus; WS_EX_TOOLWINDOW (+ no APPWINDOW) → never a
+    // taskbar button or Alt-Tab tile. WebView2 intermittently RESETS the ex-style
+    // wholesale; when the earlier re-assert restored only TRANSPARENT|NOACTIVATE,
+    // the overlay resurfaced in the taskbar as a phantom "second CorePilot
+    // window" the user could focus and close. Leave Tauri's layered bits alone.
+    let want = (ex
+        | WS_EX_TRANSPARENT.0 as isize
+        | WS_EX_NOACTIVATE.0 as isize
+        | WS_EX_TOOLWINDOW.0 as isize)
+        & !(WS_EX_APPWINDOW.0 as isize);
     if ex != want {
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
     }

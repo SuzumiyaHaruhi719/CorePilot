@@ -43,8 +43,17 @@ static ICON_CACHE: Lazy<Mutex<HashMap<String, Option<String>>>> =
 /// (e.g. `data:image/png;base64,iVBOR…`), or `None` when the path is empty or no
 /// icon could be extracted. Cached per path; the frontend falls back to a
 /// generic glyph on `None`.
+///
+/// Async + blocking-pool: a cache miss does disk IO + GDI icon extraction, and
+/// a fresh process list misses for every new exe at once — as a sync command
+/// that serialized main-thread stalls (the "未响应" class).
 #[tauri::command]
-pub fn process_icon(exe_path: String) -> Option<String> {
+pub async fn process_icon(exe_path: String) -> Option<String> {
+    crate::commands::run_blocking_default("process_icon", move || process_icon_blocking(exe_path))
+        .await
+}
+
+fn process_icon_blocking(exe_path: String) -> Option<String> {
     if exe_path.trim().is_empty() {
         return None;
     }

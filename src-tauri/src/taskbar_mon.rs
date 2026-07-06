@@ -50,11 +50,12 @@ use tauri::AppHandle;
 use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetMonitorInfoW,
-    GetTextExtentPoint32W, InvalidateRect, MonitorFromWindow, SelectObject, SetBkMode, SetTextColor,
-    TextOutW, ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE,
-    FW_BOLD, FW_NORMAL, GetDC, HBRUSH, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, TRANSPARENT,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateSolidBrush,
+    DeleteDC, DeleteObject, EndPaint, FillRect, GetMonitorInfoW, GetTextExtentPoint32W,
+    InvalidateRect, MonitorFromWindow, SelectObject, SetBkMode, SetTextColor, TextOutW,
+    ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE, FW_BOLD,
+    FW_NORMAL, GetDC, HBITMAP, HBRUSH, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
@@ -95,6 +96,9 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 const TICK_TIMER: usize = 1;
 /// Tick period (ms).
 const TICK_MS: u32 = 1000;
+/// Consecutive ticks the raw fullscreen reading must agree before the plate's
+/// hide-for-fullscreen state flips (see `RenderState::fs_hidden`).
+const FS_DEBOUNCE_TICKS: u8 = 2;
 
 /// One measured, colored text segment — UTF-16 (no trailing NUL) + device-px
 /// width, precomputed in `tick` so `WM_PAINT` reuses them (no per-paint alloc).
@@ -737,6 +741,24 @@ struct RenderState {
     /// query failure we re-show at this instead of hiding, so a single bad tick
     /// (Explorer restart / momentary appbar churn) never blinks the plate off.
     last_good: Option<(i32, i32, i32, i32)>,
+    /// Debounced "a fullscreen game is up → keep the plate hidden" state. The
+    /// RAW `foreground_is_fullscreen()` reading flaps for a tick or two while
+    /// focus bounces through shell/staging windows on every Alt-Tab / tray /
+    /// Start-menu open during a game — driving show/hide directly off it made
+    /// the plate BLINK on every window switch. The state only flips after
+    /// [`FS_DEBOUNCE_TICKS`] consecutive ticks agree.
+    fs_hidden: bool,
+    /// Consecutive ticks the raw fullscreen reading disagreed with `fs_hidden`.
+    fs_streak: u8,
+    /// Cached off-screen back buffer (`buf_dc` + its selected `buf_bmp`, sized
+    /// `buf_size`): every paint renders here first and BitBlts once. Painting
+    /// straight onto the window DC let DWM composite the cleared color-key frame
+    /// mid-paint whenever composition churned (window switch / tray / Start
+    /// animations) — the text visibly blinked. Rebuilt only on size change,
+    /// never per paint (this module's no-GDI-churn law).
+    buf_dc: HDC,
+    buf_bmp: HBITMAP,
+    buf_size: (i32, i32),
 
     // === Direct2D / DirectWrite text engine (browser-grade glyphs). ===
     /// When true, measure + paint go through D2D/DWrite; when false (any D2D
@@ -773,6 +795,14 @@ impl Drop for RenderState {
             if !self.bg_brush.is_invalid() {
                 let _ = DeleteObject(self.bg_brush.into());
                 self.bg_brush = HBRUSH::default();
+            }
+            if !self.buf_bmp.is_invalid() {
+                let _ = DeleteObject(self.buf_bmp.into());
+                self.buf_bmp = HBITMAP::default();
+            }
+            if !self.buf_dc.is_invalid() {
+                let _ = DeleteDC(self.buf_dc);
+                self.buf_dc = HDC::default();
             }
         }
     }
@@ -1130,8 +1160,23 @@ unsafe fn tick() {
             return;
         }
 
-        // A fullscreen game is in the foreground → hide so we never draw over it.
-        if foreground_is_fullscreen() {
+        // A fullscreen game is in the foreground → hide so we never draw over
+        // it. DEBOUNCED: the raw reading flaps while focus bounces through
+        // shell/staging windows on every Alt-Tab / tray / Start open during a
+        // game, and reacting instantly blinked the plate on each switch. Flip
+        // the effective state only after FS_DEBOUNCE_TICKS consecutive ticks
+        // agree; a stable game still hides it within ~2 s.
+        let raw_fs = foreground_is_fullscreen();
+        if raw_fs == rs.fs_hidden {
+            rs.fs_streak = 0;
+        } else {
+            rs.fs_streak += 1;
+            if rs.fs_streak >= FS_DEBOUNCE_TICKS {
+                rs.fs_hidden = raw_fs;
+                rs.fs_streak = 0;
+            }
+        }
+        if rs.fs_hidden {
             let _ = ShowWindow(rs.hwnd, SW_HIDE);
             rs.cfg = cfg;
             return;
@@ -1446,7 +1491,10 @@ unsafe fn tick() {
 
         let _ = SetWindowPos(rs.hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
         let _ = ShowWindow(rs.hwnd, SW_SHOWNOACTIVATE);
-        let _ = InvalidateRect(Some(rs.hwnd), None, true);
+        // erase = false: paint() renders the full frame into the cached back
+        // buffer and blits it in one op, so a background erase pass would only
+        // add a visible transparent-flash window (the blink).
+        let _ = InvalidateRect(Some(rs.hwnd), None, false);
     });
 }
 
@@ -1583,22 +1631,47 @@ unsafe fn dock_xy(
 /// rows stacked. Tries the Direct2D/DirectWrite engine first (browser-grade
 /// glyphs); on any D2D failure falls back to the GDI `HFONT`/`HBRUSH` path. The
 /// color-key bg + same (x,y) positions are identical between the two engines.
-unsafe fn paint(rs: &RenderState) {
+unsafe fn paint(rs: &mut RenderState) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(rs.hwnd, &mut ps);
 
     let mut rect = RECT::default();
     let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(rs.hwnd, &mut rect);
+    let (w, h) = ((rect.right - rect.left).max(1), (rect.bottom - rect.top).max(1));
 
-    // Direct2D path (preferred). Returns false on any failure → GDI fallback below.
-    let drawn = if rs.use_d2d {
-        paint_d2d(rs, hdc, &rect)
+    // (Re)build the cached back buffer on size change only — never per paint.
+    if rs.buf_dc.is_invalid() || rs.buf_size != (w, h) || rs.buf_bmp.is_invalid() {
+        if !rs.buf_bmp.is_invalid() {
+            let _ = DeleteObject(rs.buf_bmp.into());
+        }
+        if rs.buf_dc.is_invalid() {
+            rs.buf_dc = CreateCompatibleDC(Some(hdc));
+        }
+        rs.buf_bmp = CreateCompatibleBitmap(hdc, w, h);
+        if !rs.buf_bmp.is_invalid() && !rs.buf_dc.is_invalid() {
+            SelectObject(rs.buf_dc, rs.buf_bmp.into());
+        }
+        rs.buf_size = (w, h);
+    }
+
+    // Compose the whole frame OFF-SCREEN, then blit once. Painting clear+text
+    // straight onto the window DC let DWM composite the half-painted (fully
+    // color-keyed → transparent) frame whenever composition churned — the
+    // window-switch / tray / Start-menu blink.
+    if !rs.buf_dc.is_invalid() && !rs.buf_bmp.is_invalid() {
+        let mem = rs.buf_dc;
+        let drawn = if rs.use_d2d { paint_d2d(rs, mem, &rect) } else { false };
+        if !drawn {
+            paint_gdi(rs, mem, &rect);
+        }
+        let _ = BitBlt(hdc, 0, 0, w, h, Some(mem), 0, 0, SRCCOPY);
     } else {
-        false
-    };
-
-    if !drawn {
-        paint_gdi(rs, hdc, &rect);
+        // Buffer allocation failed (out of GDI handles?) — draw direct rather
+        // than blank.
+        let drawn = if rs.use_d2d { paint_d2d(rs, hdc, &rect) } else { false };
+        if !drawn {
+            paint_gdi(rs, hdc, &rect);
+        }
     }
 
     let _ = EndPaint(rs.hwnd, &ps);
@@ -1718,7 +1791,7 @@ unsafe extern "system" fn wndproc(
         }
         WM_PAINT => {
             RENDER.with(|cell| {
-                if let Some(rs) = cell.borrow().as_ref() {
+                if let Some(rs) = cell.borrow_mut().as_mut() {
                     paint(rs);
                 }
             });
@@ -1804,6 +1877,11 @@ pub fn start(app: AppHandle) {
                     cells_layout: Vec::new(),
                     row_h: 0,
                     last_good: None,
+                    fs_hidden: false,
+                    fs_streak: 0,
+                    buf_dc: HDC::default(),
+                    buf_bmp: HBITMAP::default(),
+                    buf_size: (0, 0),
                     use_d2d: false,
                     d2d_factory: None,
                     dwrite_factory: None,

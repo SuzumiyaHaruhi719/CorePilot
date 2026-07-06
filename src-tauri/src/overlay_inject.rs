@@ -517,8 +517,26 @@ fn eject_dll(pid: u32) -> Result<(), String> {
 /// start the sampler writing for it. If anti-cheat-protected OR an unsupported
 /// API, DO NOT inject — show the keep-alive window overlay instead and return a
 /// status explaining why.
+/// Async + blocking-pool: a cold attach classifies the target (module walk) and
+/// injects via `CreateRemoteThread` — well past the 100 ms budget for the main
+/// thread. The hot path (same-PID flags refresh) stays cheap either way.
 #[tauri::command]
-pub fn overlay_attach(app: AppHandle, pid: u32, layout_flags: Option<u32>) -> Result<OverlayStatus, String> {
+pub async fn overlay_attach(
+    app: AppHandle,
+    pid: u32,
+    layout_flags: Option<u32>,
+) -> Result<OverlayStatus, String> {
+    crate::commands::run_blocking_err("overlay_attach", move || {
+        overlay_attach_blocking(app, pid, layout_flags)
+    })
+    .await
+}
+
+fn overlay_attach_blocking(
+    app: AppHandle,
+    pid: u32,
+    layout_flags: Option<u32>,
+) -> Result<OverlayStatus, String> {
     let target = classify_target(pid);
     let mode = mode_for(&target);
 
@@ -578,8 +596,14 @@ pub fn overlay_attach(app: AppHandle, pid: u32, layout_flags: Option<u32>) -> Re
 
 /// Detach the injected overlay from `pid`: eject the DLL and clear the target so
 /// the sampler stops writing (sets `enabled = 0`). Idempotent.
+/// Async + blocking-pool: ejecting runs a remote `FreeLibrary` thread and waits
+/// on it — same off-main-thread rule as `overlay_attach`.
 #[tauri::command]
-pub fn overlay_detach(_app: AppHandle, pid: u32) -> Result<(), String> {
+pub async fn overlay_detach(_app: AppHandle, pid: u32) -> Result<(), String> {
+    crate::commands::run_blocking_err("overlay_detach", move || overlay_detach_blocking(pid)).await
+}
+
+fn overlay_detach_blocking(pid: u32) -> Result<(), String> {
     // Clear the sampler target first so it immediately stops publishing for it.
     clear_target_if(pid);
     write_disabled();

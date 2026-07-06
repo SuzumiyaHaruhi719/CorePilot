@@ -22,10 +22,26 @@
 //!   un-freezes the moment the game closes (it returns to the foreground), so the
 //!   queued event is delivered exactly when we want the report to pop.
 //!
-//! The thread mirrors the frontend recorder's record/finalize logic one-for-one
-//! so behaviour (blacklist precedence, whitelist force-record, alt-tab pause,
-//! discard-empty) is identical — only the execution context changed.
+//! Session model (v2): sessions are keyed **per PID** and run concurrently.
+//! A session ends ONLY when its process exits, recording is disabled, or its
+//! exe gets blacklisted — never because another window (even another game)
+//! took the foreground. That is what makes one continuous report per game
+//! run: alt-tabbing to anything, including a false-positive "game", no longer
+//! finalizes/splits the real session.
+//!
+//! Junk-session filter: at finalize, a session is persisted only if the user
+//! explicitly whitelisted the exe (record- or OSD-whitelist) OR it actually
+//! *rendered like a game* — ≥ [`MIN_RENDERED_SECS`] cumulative seconds of
+//! samples at ≥ [`crate::fps::GAME_FPS_MIN`] FPS. This is what solves the
+//! launcher-and-game-share-one-exe problem (dcs.exe): the DCS launcher is a
+//! separate PID that never sustains a game-like present rate, so its session
+//! is discarded, while the real game PID passes — no blacklist needed. It
+//! also drops storefront-library false positives (Steam installs tools, e.g.
+//! Tacview) that idle below a game-like rate. When the ETW present pipeline
+//! is down (no admin → every FPS is None), the filter bypasses itself rather
+//! than discarding real sessions.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -39,6 +55,16 @@ use crate::state::AppState;
 /// Sampling cadence — ~5 Hz, matching the spec (the old frontend recorder ran at
 /// ~1 Hz). A native thread can sustain this without the renderer-freeze risk.
 const SAMPLE_PERIOD: Duration = Duration::from_millis(200);
+
+/// A finalized session is only persisted if it accumulated at least this many
+/// seconds of samples at a game-like present rate (≥ `fps::GAME_FPS_MIN`),
+/// unless the exe is explicitly whitelisted. Launchers / tools / menus poked
+/// for a moment never reach this; any real play session does.
+const MIN_RENDERED_SECS: f64 = 30.0;
+
+/// Upper bound on simultaneously-tracked sessions — belt-and-suspenders so a
+/// pathological detection storm can't grow sample buffers without limit.
+const MAX_CONCURRENT: usize = 4;
 
 /// Recording configuration pushed from the frontend. The frontend owns the
 /// stores; it lowercases exe names and hands us flat lists so the recorder never
@@ -137,14 +163,17 @@ struct ActiveSession {
     /// Lowercased exe name of the detected game.
     exe: String,
     /// Full executable path, resolved once at session start (icon + path display).
+    /// (The session's PID is its key in the recorder's `active` map.)
     path: Option<String>,
-    /// Foreground PID being tracked.
-    pid: u32,
     /// Epoch ms when recording started (also the sample-`t` base).
     started_at: f64,
     cpu_name: Option<String>,
     gpu_name: Option<String>,
     samples: Vec<PerfSampleOut>,
+    /// Samples whose FPS was ≥ `fps::GAME_FPS_MIN` — the "actually rendered
+    /// like a game" evidence the finalize filter checks (each ≙ one
+    /// [`SAMPLE_PERIOD`] of game-rate rendering).
+    rendered_samples: u32,
 }
 
 /// **Push recorder config from the frontend.** The frontend calls this on mount
@@ -224,9 +253,10 @@ fn exe_path(app: &AppHandle, pid: u32) -> Option<String> {
 fn build_sample(session: &ActiveSession, pid: u32) -> PerfSampleOut {
     // CPU + memory and sensors come from the single-owner sampler snapshots, so
     // this 5 Hz path never locks `state.sys` or re-samples hardware (that pile-up
-    // froze the app). ≤1 sampler tick stale — fine for a session recorder.
-    let metrics = (*crate::sampler::metrics_snapshot()).clone();
-    let sensors = (*crate::sampler::sensors_snapshot()).clone();
+    // froze the app). ≤1 sampler tick stale — fine for a session recorder. Read
+    // through the Arc — no struct clone needed at 5 Hz × sessions.
+    let metrics = crate::sampler::metrics_snapshot();
+    let sensors = crate::sampler::sensors_snapshot();
     // NVML GPU snapshot (preferred for GPU util/temp/power/clocks/VRAM). Background
     // thread + shared NVML handle, so it cannot stall the IPC router.
     let gpu = crate::gpu::gpu_oc_info_snapshot();
@@ -321,13 +351,60 @@ fn build_sample(session: &ActiveSession, pid: u32) -> PerfSampleOut {
     }
 }
 
-/// Finalize a session: if it captured ≥1 sample, emit `perf://session` for the
-/// frontend to persist + display. Empty sessions are discarded (mirrors the
-/// frontend's `if (samples.length === 0) return`). Best-effort: an emit failure is
-/// logged, never fatal.
+/// True when a finished `session` deserves a persisted report. Explicit user
+/// intent (record- or OSD-whitelist) always keeps it; otherwise it must have
+/// rendered at a game-like rate for ≥ [`MIN_RENDERED_SECS`] cumulative — this
+/// is what silently drops launcher PIDs (dcs.exe launcher), storefront tools
+/// (Steam-installed Tacview) and other junk. With the ETW present pipeline
+/// down every FPS is `None`, so the render test would discard REAL sessions —
+/// bypass it then (pre-filter behavior).
+fn should_keep(session: &ActiveSession, white: &[String], osd_white: &[String]) -> bool {
+    let whitelisted =
+        white.iter().any(|n| *n == session.exe) || osd_white.iter().any(|n| *n == session.exe);
+    should_keep_inner(session.rendered_samples, whitelisted, crate::fps::etw_alive())
+}
+
+/// Pure decision core of [`should_keep`] (split out for unit testing).
+fn should_keep_inner(rendered_samples: u32, whitelisted: bool, etw_alive: bool) -> bool {
+    whitelisted
+        || !etw_alive
+        || f64::from(rendered_samples) * SAMPLE_PERIOD.as_secs_f64() >= MIN_RENDERED_SECS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn junk_filter() {
+        let need = (MIN_RENDERED_SECS / SAMPLE_PERIOD.as_secs_f64()) as u32; // 150
+        assert!(!should_keep_inner(0, false, true), "launcher/tool discarded");
+        assert!(!should_keep_inner(need - 1, false, true), "below threshold");
+        assert!(should_keep_inner(need, false, true), "real game kept");
+        assert!(should_keep_inner(0, true, true), "whitelist always kept");
+        assert!(should_keep_inner(0, false, false), "ETW down → bypass");
+    }
+}
+
+/// Finalize a session: if it captured ≥1 sample AND passes [`should_keep`],
+/// emit `perf://session` for the frontend to persist + display. Empty and
+/// junk (never-rendered) sessions are discarded. Best-effort: an emit failure
+/// is logged, never fatal.
 fn finalize(app: &AppHandle, session: ActiveSession) {
     if session.samples.is_empty() {
         return; // nothing worth keeping
+    }
+    {
+        let cfg = CONFIG.lock();
+        if !should_keep(&session, &cfg.white, &cfg.osd_white) {
+            tracing::info!(
+                "perf recorder: discarding junk session for {} ({} samples, {} game-rate)",
+                session.exe,
+                session.samples.len(),
+                session.rendered_samples
+            );
+            return;
+        }
     }
     let ended_at = now_epoch_ms();
     let payload = SessionPayload {
@@ -351,27 +428,29 @@ fn start(app: &AppHandle, exe: &str, pid: u32) -> ActiveSession {
     ActiveSession {
         exe: exe.to_lowercase(),
         path: exe_path(app, pid),
-        pid,
         started_at: now_epoch_ms(),
         cpu_name: cpu_name(app),
         gpu_name: gpu_name(),
         samples: Vec::new(),
+        rendered_samples: 0,
     }
 }
 
-/// One recorder tick. Mirrors the frontend `tick()` record/finalize logic exactly:
+/// One recorder tick over the pid-keyed session map:
 ///
-/// 1. Recording disabled → finalize any active session and stop.
-/// 2. Foreground PID changed off the tracked session → finalize if the tracked
-///    PID has exited, otherwise pause (alt-tabbed away; keep the session).
-/// 3. Blacklist precedence → if the foreground exe is blacklisted, finalize any
-///    session we were recording for it and skip.
-/// 4. Else, if `is_game || record-white || osd-white`, start a session for a new
-///    target (finalizing a previous, different one first).
-/// 5. Sample → append a data point when the live session matches the foreground.
-///
-/// `active` is the recorder thread's single owned session slot.
-fn tick(app: &AppHandle, active: &mut Option<ActiveSession>) {
+/// 1. Recording disabled → finalize everything and stop.
+/// 2. Reap: finalize every session whose process has exited — the ONLY normal
+///    end of a session. Focus changes never finalize anything, so alt-tabbing
+///    (even to another detected game) can no longer split a session.
+/// 3. Blacklist: DISCARD (not persist) any session whose exe is blacklisted —
+///    the user just told us this app must never be recorded — and never start
+///    one for a blacklisted foreground.
+/// 4. Start: foreground is a recordable target with no live session for its
+///    PID → open one alongside whatever else is recording. Same exe under a
+///    new PID (launcher → game handoff) gets its own session.
+/// 5. Sample every live session — foreground or background — so the time
+///    series has no holes.
+fn tick(app: &AppHandle, active: &mut HashMap<u32, ActiveSession>) {
     let fg = crate::fps::foreground_info_now();
     let (enabled, white, black, osd_white) = {
         let cfg = CONFIG.lock();
@@ -383,34 +462,38 @@ fn tick(app: &AppHandle, active: &mut Option<ActiveSession>) {
         )
     };
 
-    // 1. Recording disabled — finalize any active session and stop.
+    // 1. Recording disabled — finalize all active sessions and stop.
     if !enabled {
-        if let Some(cur) = active.take() {
+        for (_, cur) in active.drain() {
             finalize(app, cur);
         }
         return;
     }
 
-    // 2. Finalize ONLY when the recorded game's process exits — never on focus
-    //    loss. A backgrounded (alt-tabbed) game is still running and must keep
-    //    being recorded; pausing when it isn't the foreground is what punched
-    //    gaps into the time series.
-    if let Some(cur) = active.as_ref() {
-        if !crate::fps::pid_alive(cur.pid) {
-            // The game process exited — close out the report.
-            let cur = active.take().expect("checked Some above");
+    // 2. Reap exited processes → finalize their reports.
+    let dead: Vec<u32> = active
+        .keys()
+        .copied()
+        .filter(|&pid| !crate::fps::pid_alive(pid))
+        .collect();
+    for pid in dead {
+        if let Some(cur) = active.remove(&pid) {
             finalize(app, cur);
         }
     }
+
+    // 3. Blacklist wins over everything: drop (silently — the user said NEVER
+    //    record this) any session whose exe is now blacklisted. Handles both a
+    //    list edit mid-session and a false positive being killed live.
+    active.retain(|_, s| !black.iter().any(|n| *n == s.exe));
 
     // Normalize the foreground exe the way both the backend and Task-Manager rows
     // produce it (trimmed + lowercased) for case-insensitive list matching.
     let exe_lc: Option<String> = fg.exe.as_deref().map(|e| e.trim().to_lowercase());
 
     // The record white/black list takes precedence over auto-detection:
-    //   - black → NEVER record (kill any false-positive).
-    //   - white → force-record (even if NOT auto-detected as a game).
-    // The OSD whitelist also force-records (back-compat).
+    //   - black → NEVER record.
+    //   - white / OSD whitelist → force-record (even if NOT auto-detected).
     let rec_black = exe_lc
         .as_ref()
         .is_some_and(|e| black.iter().any(|n| n == e));
@@ -421,49 +504,34 @@ fn tick(app: &AppHandle, active: &mut Option<ActiveSession>) {
         .as_ref()
         .is_some_and(|e| osd_white.iter().any(|n| n == e));
 
-    // 3. Blacklist: never start recording a blacklisted foreground app; if we
-    //    were recording IT, finalize. We do NOT bail out here — a *different*
-    //    active game must keep being sampled below (don't gap it just because a
-    //    blacklisted app grabbed focus).
-    if rec_black {
-        if let Some(existing) = active.as_ref() {
-            if fg.pid == existing.pid {
-                let existing = active.take().expect("checked Some above");
-                finalize(app, existing);
-            }
-        }
-    } else if (fg.is_game || rec_white || osd_whitelisted) && fg.exe.is_some() {
-        // 4. Start / switch: record this foreground game (finalizing a previous,
-        //    different one first). While a game is already active and alive it
-        //    keeps recording even in the background (step 2 only ends on exit),
-        //    so this just picks up the *next* game once the foreground changes.
-        let exe = exe_lc.clone().expect("fg.exe is Some");
-        let is_new = match active.as_ref() {
-            None => true,
-            Some(existing) => existing.exe != exe,
-        };
-        if is_new {
-            if let Some(existing) = active.take() {
-                finalize(app, existing);
-            }
-            *active = Some(start(app, &exe, fg.pid));
+    // 4. Start a session for a newly-foregrounded recordable target. Existing
+    //    sessions keep running untouched (no finalize-on-switch).
+    if !rec_black
+        && (fg.is_game || rec_white || osd_whitelisted)
+        && fg.pid != 0
+        && !active.contains_key(&fg.pid)
+        && active.len() < MAX_CONCURRENT
+    {
+        if let Some(exe) = exe_lc {
+            active.insert(fg.pid, start(app, &exe, fg.pid));
         }
     }
 
-    // 5. Sample: append a data point for the live session — foreground OR
-    //    background. As long as its process is alive we keep sampling, so
-    //    alt-tabbing out no longer leaves a hole in the data.
-    if let Some(live) = active.as_ref() {
-        let s = build_sample(live, live.pid);
-        if let Some(live) = active.as_mut() {
-            live.samples.push(s);
+    // 5. Sample every live session (its own PID's FPS; system metrics are
+    //    machine-wide by nature) and tally game-rate evidence for the
+    //    finalize filter.
+    for (pid, live) in active.iter_mut() {
+        let s = build_sample(live, *pid);
+        if s.fps.is_some_and(|f| f >= crate::fps::GAME_FPS_MIN) {
+            live.rendered_samples += 1;
         }
+        live.samples.push(s);
     }
 }
 
 /// Start the long-lived recorder thread. Idempotent — safe to call once from
 /// `lib.rs` `setup`. Loops at [`SAMPLE_PERIOD`] forever; the owned `active` session
-/// slot lives on the thread (never shared), so high-frequency sampling never
+/// map lives on the thread (never shared), so high-frequency sampling never
 /// contends a lock with the rest of the app.
 pub fn start_recorder(app: AppHandle) {
     if RECORDER_STARTED.swap(true, Ordering::SeqCst) {
@@ -472,7 +540,7 @@ pub fn start_recorder(app: AppHandle) {
     std::thread::Builder::new()
         .name("corepilot-perf-recorder".into())
         .spawn(move || {
-            let mut active: Option<ActiveSession> = None;
+            let mut active: HashMap<u32, ActiveSession> = HashMap::new();
             loop {
                 // A transient metric/IPC failure must never kill the recorder. The
                 // tick itself uses best-effort reads (each source degrades to

@@ -1,4 +1,4 @@
-import { LazyStore } from "@tauri-apps/plugin-store";
+import { invoke } from "@tauri-apps/api/core";
 import type { StateStorage } from "zustand/middleware";
 
 /**
@@ -6,26 +6,26 @@ import type { StateStorage } from "zustand/middleware";
  *
  * WebView2's `localStorage` is buffered by Chromium and only flushed to disk
  * periodically / on graceful close, so a crash or hard kill loses recent
- * writes — which broke "settings auto-save". `tauri-plugin-store` writes to a
- * JSON file and we `save()` on every change, so each setting is persisted
- * immediately and survives crashes.
+ * writes. We previously used `tauri-plugin-store`, but its `save()` is a
+ * non-atomic truncate-then-write: a hard reset landing mid-write corrupted
+ * `corepilot.store.json` and silently wiped every profile/group/setting on
+ * the next launch. The backend now owns the IO (`src-tauri/src/persist.rs`):
+ * same file, same format, but atomic writes + a last-known-good backup that
+ * is auto-restored when the live file is corrupt or missing.
  *
- * All stores share one file, keyed by their persist `name`. On first read of a
- * key, we migrate any value left behind by the old localStorage persistence so
- * existing settings / groups / GPU profiles are preserved.
+ * All stores share one file, keyed by their persist `name`. On first read of
+ * a key, we migrate any value left behind by the old localStorage persistence
+ * so pre-plugin-store settings are still preserved.
  */
-const store = new LazyStore("corepilot.store.json");
-
 export const tauriStorage: StateStorage = {
   getItem: async (name) => {
-    const value = await store.get<string>(name);
+    const value = await invoke<string | null>("persist_get", { name });
     if (value != null) return value;
     // One-time migration from the previous localStorage-based persistence.
     try {
       const legacy = localStorage.getItem(name);
       if (legacy != null) {
-        await store.set(name, legacy);
-        await store.save();
+        await invoke("persist_set", { name, value: legacy });
         return legacy;
       }
     } catch {
@@ -34,11 +34,9 @@ export const tauriStorage: StateStorage = {
     return null;
   },
   setItem: async (name, value) => {
-    await store.set(name, value);
-    await store.save();
+    await invoke("persist_set", { name, value });
   },
   removeItem: async (name) => {
-    await store.delete(name);
-    await store.save();
+    await invoke("persist_delete", { name });
   },
 };

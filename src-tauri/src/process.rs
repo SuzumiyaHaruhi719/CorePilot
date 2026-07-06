@@ -52,8 +52,9 @@ pub struct ProcInfo {
     #[serde(with = "crate::serde_u64::str")]
     pub affinity: u64,
     /// Process owner account name (e.g. "SYSTEM", "Thomas", "LOCAL SERVICE"),
-    /// or `None` when the token/SID can't be resolved. Serialized as `userName`.
-    #[serde(rename = "userName")]
+    /// or `None` when the token/SID can't be resolved. Serialized as `user` —
+    /// it was previously renamed to `userName`, which the frontend never read
+    /// (`ProcInfo.user`), so the 用户 column showed "—" for every process.
     pub user: Option<String>,
     /// Open handle count for this process; 0 when inaccessible.
     pub handles: u32,
