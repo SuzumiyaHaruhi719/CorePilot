@@ -33,9 +33,11 @@
 //! explicitly whitelisted the exe (record- or OSD-whitelist) OR it actually
 //! *rendered like a game* — ≥ [`MIN_RENDERED_SECS`] cumulative seconds of
 //! samples at ≥ [`crate::fps::GAME_FPS_MIN`] FPS. This is what solves the
-//! launcher-and-game-share-one-exe problem (dcs.exe): the DCS launcher is a
-//! separate PID that never sustains a game-like present rate, so its session
-//! is discarded, while the real game PID passes — no blacklist needed. It
+//! launcher-and-game-share-one-exe problem (dcs.exe) together with the
+//! handoff check in `finalize` (`has_live_same_exe_child`): the DCS launcher
+//! plays a VIDEO background (≥20 fps, so FPS alone can't tell it apart) but
+//! always spawns the game as a same-exe child and exits — that signature
+//! discards it, while the real game PID passes — no blacklist needed. It
 //! also drops storefront-library false positives (Steam installs tools, e.g.
 //! Tacview) that idle below a game-like rate. When the ETW present pipeline
 //! is down (no admin → every FPS is None), the filter bypasses itself rather
@@ -386,11 +388,60 @@ mod tests {
     }
 }
 
-/// Finalize a session: if it captured ≥1 sample AND passes [`should_keep`],
-/// emit `perf://session` for the frontend to persist + display. Empty and
-/// junk (never-rendered) sessions are discarded. Best-effort: an emit failure
-/// is logged, never fatal.
-fn finalize(app: &AppHandle, session: ActiveSession) {
+/// True when a LIVE process exists whose parent is `pid` and whose exe name
+/// (lowercased) equals `exe` — the launcher→game handoff signature. A
+/// launcher that shares its exe with the game (dcs.exe: `bin\DCS.exe` shows a
+/// CEF launcher whose VIDEO background presents at ≥20 fps, defeating the
+/// render filter, then spawns the game and exits) is caught here at finalize:
+/// its just-spawned same-exe child is still alive, so the launcher session is
+/// discarded regardless of its FPS profile. A real game quitting has no
+/// same-exe child, so this never drops genuine sessions — unlike matching on
+/// exe name alone, which would eat a quick quit-and-relaunch.
+fn has_live_same_exe_child(pid: u32, exe: &str) -> bool {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return false;
+        };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut found = false;
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                if entry.th32ParentProcessID == pid {
+                    let len = entry
+                        .szExeFile
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_lowercase();
+                    if name == exe {
+                        found = true;
+                        break;
+                    }
+                }
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = windows::Win32::Foundation::CloseHandle(snapshot);
+        found
+    }
+}
+
+/// Finalize a session: if it captured ≥1 sample AND passes [`should_keep`]
+/// AND is not a launcher that just handed off to a same-exe child (see
+/// [`has_live_same_exe_child`]), emit `perf://session` for the frontend to
+/// persist + display. Empty and junk sessions are discarded. Best-effort: an
+/// emit failure is logged, never fatal. `pid` is the session's process id
+/// (its key in the recorder's map).
+fn finalize(app: &AppHandle, pid: u32, session: ActiveSession) {
     if session.samples.is_empty() {
         return; // nothing worth keeping
     }
@@ -405,6 +456,13 @@ fn finalize(app: &AppHandle, session: ActiveSession) {
             );
             return;
         }
+    }
+    if has_live_same_exe_child(pid, &session.exe) {
+        tracing::info!(
+            "perf recorder: discarding launcher session for {} (pid {pid} handed off to a same-exe child)",
+            session.exe
+        );
+        return;
     }
     let ended_at = now_epoch_ms();
     let payload = SessionPayload {
@@ -464,8 +522,8 @@ fn tick(app: &AppHandle, active: &mut HashMap<u32, ActiveSession>) {
 
     // 1. Recording disabled — finalize all active sessions and stop.
     if !enabled {
-        for (_, cur) in active.drain() {
-            finalize(app, cur);
+        for (pid, cur) in active.drain() {
+            finalize(app, pid, cur);
         }
         return;
     }
@@ -478,7 +536,7 @@ fn tick(app: &AppHandle, active: &mut HashMap<u32, ActiveSession>) {
         .collect();
     for pid in dead {
         if let Some(cur) = active.remove(&pid) {
-            finalize(app, cur);
+            finalize(app, pid, cur);
         }
     }
 
