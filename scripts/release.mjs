@@ -229,13 +229,20 @@ execFileSync(
 );
 
 step("Verifying the published manifest is reachable");
-const published = capture(
-  `gh release view ${TAG} --json isDraft,isPrerelease,assets -q '.isDraft,.isPrerelease,([.assets[].name]|join(","))'`,
-).split(/\r?\n/);
-if (published[0] !== "false" || published[1] !== "false") {
+// Parse gh's JSON in-process instead of piping through jq: `capture` runs its
+// command through the platform shell, and on Windows that's cmd.exe, which
+// mis-reads the jq filter's `|` as a shell pipe and shatters the command.
+// execFileSync takes an argv array, so no shell ever touches the arguments.
+const published = JSON.parse(
+  execFileSync("gh", ["release", "view", TAG, "--repo", REPO, "--json", "isDraft,isPrerelease,assets"], {
+    encoding: "utf8",
+    cwd: ROOT,
+  }),
+);
+if (published.isDraft || published.isPrerelease) {
   die(`release ${TAG} is a draft or prerelease — releases/latest/download/latest.json will 404 for every client.`);
 }
-if (!published[2]?.includes("latest.json")) die(`latest.json did not upload to ${TAG}`);
+if (!published.assets.some((a) => a.name === "latest.json")) die(`latest.json did not upload to ${TAG}`);
 
 console.log(`\n✓ ${TAG} published with ${assets.length} assets.`);
 console.log(`  Clients on ${VERSION}-or-older will offer this update on their next check.\n`);
