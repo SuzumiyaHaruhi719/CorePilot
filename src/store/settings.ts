@@ -63,6 +63,14 @@ interface SettingsState {
   /** Fan auto-tune: allow tuning while background load is present. The wizard's
    *  quiescence precheck then warns about accuracy instead of refusing to run. */
   tuneAllowBusy: boolean;
+  /** Check GitHub Releases for a newer version on launch. Manual checks in
+   *  Settings work regardless of this. */
+  autoCheckUpdates: boolean;
+  /** A version the user pressed "跳过此版本" on — never auto-prompted again.
+   *  Anything newer still prompts. */
+  skippedVersion: string | null;
+  /** Epoch ms of the last completed auto-check (debounce anchor). */
+  lastUpdateCheck: number;
   update: (patch: Partial<Omit<SettingsState, "update" | "togglePerfCard">>) => void;
   togglePerfCard: (card: PerfCard) => void;
 }
@@ -90,10 +98,36 @@ export const useSettings = create<SettingsState>()(
       gameNotify: true,
       ccdNoticeSeen: false,
       tuneAllowBusy: false,
+      autoCheckUpdates: true,
+      skippedVersion: null,
+      lastUpdateCheck: 0,
       update: (patch) => set(patch),
       togglePerfCard: (card) =>
         set((s) => ({ perfCards: { ...s.perfCards, [card]: !s.perfCards[card] } })),
     }),
-    { name: "corepilot-settings", version: 1, storage: createJSONStorage(() => tauriStorage) },
+    {
+      name: "corepilot-settings",
+      version: 2,
+      storage: createJSONStorage(() => tauriStorage),
+      /**
+       * v1 → v2 added the self-update keys. A `migrate` is MANDATORY on every
+       * version bump: without one zustand discards the whole persisted blob on
+       * mismatch, which here would silently reset theme, language, OSD and
+       * recorder preferences (it wiped real data once). Merging over the
+       * defaults keeps every v1 key and fills only what's new.
+       */
+      migrate: (persisted, version) => {
+        const s = (persisted ?? {}) as Partial<SettingsState>;
+        if (version < 2) {
+          return {
+            ...s,
+            autoCheckUpdates: s.autoCheckUpdates ?? true,
+            skippedVersion: s.skippedVersion ?? null,
+            lastUpdateCheck: s.lastUpdateCheck ?? 0,
+          };
+        }
+        return s;
+      },
+    },
   ),
 );

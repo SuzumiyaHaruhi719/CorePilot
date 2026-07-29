@@ -18,7 +18,7 @@ resolver = "2"
 
 [package]
 name = "corepilot"
-version = "0.4.0"
+version = "0.5.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -43,7 +43,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_ProcessStatus", "Win32_System_Memory", "Win32_System_Power", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Performance", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_DirectWrite", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_System_Services", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Ioctl", "Win32_System_IO"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_ProcessStatus", "Win32_System_Memory", "Win32_System_Power", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Performance", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_DirectWrite", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_System_Services", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Ioctl", "Win32_System_IO", "Win32_System_RemoteDesktop"] }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 sysinfo = "0.39.3"
@@ -58,6 +58,14 @@ tauri-plugin-store = "2.4.3"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
+# Self-update from GitHub Releases. Used for BOTH flavors: it owns the manifest
+# fetch, the semver compare and — critically — the minisign signature check.
+# CorePilot runs elevated with ring-0 (PawnIO/SMU) reach, so an unverified
+# update payload is a full-system compromise; verification is never bypassed.
+tauri-plugin-updater = "2"
+# Portable-flavor update payload is a zip of the three program files (there is no
+# installer to hand off to), so we extract it ourselves. See `updater.rs`.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 nvml-wrapper = "0.12"
 nvapi = "0.1.4"
 ferrisetw = "1"

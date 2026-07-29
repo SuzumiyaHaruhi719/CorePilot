@@ -73,6 +73,14 @@ pub(crate) fn exclusive_begin() -> bool {
     !CALIBRATING.swap(true, Ordering::SeqCst)
 }
 
+/// Whether a calibration / auto-tune currently holds fan exclusivity. The
+/// self-updater refuses to install during one: the tune parks fans at a test
+/// duty and only its own completion path restores them, so killing the app
+/// mid-sweep leaves the hardware pinned with nobody left to reset it.
+pub(crate) fn exclusive_active() -> bool {
+    CALIBRATING.load(Ordering::SeqCst)
+}
+
 /// Release exclusivity and force the engine to re-apply the user's config
 /// (mirrors the tail of `fan_calibrate`).
 pub(crate) fn exclusive_end() {

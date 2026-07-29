@@ -44,7 +44,7 @@
 //! than discarding real sessions.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use once_cell::sync::Lazy;
@@ -103,6 +103,19 @@ static CONFIG: Lazy<Mutex<RecorderConfig>> = Lazy::new(|| {
 
 /// Ensures the recorder thread is spawned at most once.
 static RECORDER_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// How many sessions are live right now. The `active` map itself is thread-local
+/// to the recorder loop (deliberately — no lock on the 5 Hz path), so this
+/// mirror is how the rest of the app can ask. Written once per tick.
+///
+/// The self-updater reads it: sessions only finalize when their process exits,
+/// so quitting the app to install discards whatever is mid-recording.
+static ACTIVE_SESSIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of game sessions currently being recorded.
+pub fn active_session_count() -> usize {
+    ACTIVE_SESSIONS.load(Ordering::Relaxed)
+}
 
 /// One ~5 Hz performance sample. **Field names and nullability mirror the frontend
 /// `PerfSample` (`src/lib/perf.ts`) exactly** so the emitted JSON deserializes
@@ -585,6 +598,9 @@ fn tick(app: &AppHandle, active: &mut HashMap<u32, ActiveSession>) {
         }
         live.samples.push(s);
     }
+
+    // Publish the count for readers outside this thread (see ACTIVE_SESSIONS).
+    ACTIVE_SESSIONS.store(active.len(), Ordering::Relaxed);
 }
 
 /// Start the long-lived recorder thread. Idempotent — safe to call once from

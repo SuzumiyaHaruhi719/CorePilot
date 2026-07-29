@@ -423,6 +423,27 @@ const EN: Record<string, string> = {
   "点击重命名": "Rename", "删除配置": "Delete profile", "移除": "Remove", "未发现进程": "No processes found",
   "分组名称": "Group name", "停止服务": "Stop service", "重启服务": "Restart service",
   "刷新服务列表": "Refresh service list", "刷新启动项": "Refresh startup items",
+  // Self-update (Settings → 更新, and the launch prompt)
+  "更新 · UPDATES": "UPDATES",
+  "检查 GitHub 上是否有新版本": "Check GitHub for a newer version",
+  "打开发布页": "Open releases page",
+  "检查更新": "Check for updates", "检查中…": "Checking…",
+  "已是最新版本。": "You're on the latest version.",
+  "下载并安装": "Download and install", "更新中…": "Updating…",
+  "跳过此版本": "Skip this version", "稍后提醒": "Remind me later", "立即更新": "Update now",
+  "启动时自动检查更新": "Check for updates at launch",
+  "每次启动检查一次(最快 4 小时一次),发现新版本时询问是否更新;游戏运行中不打扰。":
+    "Checks once per launch (at most every 4 hours) and asks before updating. Never interrupts while a game is running.",
+  "便携版:下载后就地替换程序文件并自动重启。设置与历史记录不受影响。":
+    "Portable build: the program files are replaced in place and the app restarts. Settings and history are untouched.",
+  "安装版:下载后运行安装程序并自动重启。设置与历史记录不受影响。":
+    "Installed build: the installer runs and the app restarts. Settings and history are untouched.",
+  "正在检查…": "Checking…", "正在下载…": "Downloading…", "正在校验签名…": "Verifying signature…",
+  "正在解压…": "Extracting…", "正在替换程序文件…": "Replacing program files…", "即将重启…": "Restarting…",
+  "风扇校准/智能调优正在运行。此时退出会把风扇停在测试转速且无人恢复 — 请先等它结束或中止。":
+    "A fan calibration / auto-tune is running. Quitting now would leave the fans parked at a test speed with nothing to restore them — let it finish or abort it first.",
+  "存储分析正在扫描,现在更新会丢弃本次扫描结果(需重新扫描)。":
+    "A disk scan is in progress; updating now discards its results and you'd have to rescan.",
   "诊断 · DEBUG": "DIAGNOSTICS", "导出调试日志": "Export debug logs", "调试日志": "Debug log", "导出失败": "Export failed",
   "将本次启动以来的完整日志保存到下载文件夹，便于反馈问题。":
     "Saves the complete log since this launch to your Downloads folder for bug reports.",

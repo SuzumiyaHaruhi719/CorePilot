@@ -502,6 +502,100 @@ pub async fn get_autostart() -> bool {
     .unwrap_or(false)
 }
 
+/// Create (or overwrite) the autostart scheduled task, aimed at THIS executable.
+///
+/// Blocking — spawns `schtasks` and waits. Never call from the main thread.
+#[cfg(target_os = "windows")]
+fn create_autostart_task() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const NO_WINDOW: u32 = 0x0800_0000;
+
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = exe.to_string_lossy().to_string();
+    // A real Windows path can't contain a double quote; refuse anything odd
+    // so we never inject extra tokens into the schtasks command line.
+    if exe.contains('"') {
+        return Err("可执行文件路径包含非法字符".into());
+    }
+    // schtasks /tr needs the program path quoted (Program Files has spaces).
+    // raw_arg writes the command line verbatim, so we emit `/tr "\"<exe>\""`
+    // → schtasks stores the action as a quoted path. (Command's own arg
+    // escaping of embedded quotes is version-fragile, hence raw_arg.)
+    let mut cmd = std::process::Command::new("schtasks");
+    cmd.raw_arg("/create")
+        .raw_arg("/f")
+        .raw_arg("/tn")
+        .raw_arg(AUTOSTART_TASK)
+        .raw_arg("/tr")
+        .raw_arg(format!("\"\\\"{exe}\\\"\""))
+        .raw_arg("/sc")
+        .raw_arg("onlogon")
+        .raw_arg("/rl")
+        .raw_arg("highest")
+        .creation_flags(NO_WINDOW);
+    let out = cmd
+        .output()
+        .map_err(|e| format!("创建开机自启动任务失败: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "创建开机自启动任务失败: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Re-aim the autostart task at the running executable if it points elsewhere.
+///
+/// An update can move the exe — an installer switching between per-user and
+/// per-machine scope relocates it — and a logon task whose action path no longer
+/// exists fails silently at boot: autostart just stops working, with nothing in
+/// the UI to show for it (the toggle keeps reading "on", because the task does
+/// still exist).
+///
+/// Only ever *repairs*: if the task is absent the user has autostart off and we
+/// leave it that way. Fire-and-forget on its own thread — `schtasks` spawns a
+/// child process and this is called from `setup`, which runs on the main thread.
+pub fn repair_autostart_path() {
+    #[cfg(target_os = "windows")]
+    std::thread::spawn(|| {
+        use std::os::windows::process::CommandExt;
+        const NO_WINDOW: u32 = 0x0800_0000;
+
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let exe = exe.to_string_lossy().to_string();
+
+        let Ok(out) = std::process::Command::new("schtasks")
+            .args(["/query", "/tn", AUTOSTART_TASK, "/fo", "LIST", "/v"])
+            .creation_flags(NO_WINDOW)
+            .output()
+        else {
+            return;
+        };
+        if !out.status.success() {
+            return; // no task → autostart is off → nothing to repair
+        }
+
+        // The action line is locale-dependent ("Task To Run:" / "要运行的任务:"),
+        // so match on the VALUE instead of the label: an exe path that appears
+        // anywhere in the dump is the path the task runs. A non-ASCII install
+        // path could be mangled by the console codepage and read as a mismatch —
+        // the consequence is one redundant, idempotent re-create, which is why
+        // this compares rather than parses.
+        let dump = String::from_utf8_lossy(&out.stdout).to_lowercase();
+        if dump.contains(&exe.to_lowercase()) {
+            return;
+        }
+
+        tracing::warn!("autostart task points elsewhere; re-aiming it at {exe}");
+        if let Err(e) = create_autostart_task() {
+            tracing::warn!("autostart re-aim failed: {e}");
+        }
+    });
+}
+
 /// Enable/disable "开机自启动" by creating/deleting a logon-triggered, highest-
 /// privileges scheduled task that runs THIS executable — so CorePilot launches
 /// elevated at logon with no UAC prompt. Pairs with "关闭后保留到托盘" for a silent
@@ -516,38 +610,7 @@ pub async fn set_autostart(enable: bool) -> Result<(), String> {
             use std::os::windows::process::CommandExt;
             const NO_WINDOW: u32 = 0x0800_0000;
             if enable {
-                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-                let exe = exe.to_string_lossy().to_string();
-                // A real Windows path can't contain a double quote; refuse anything odd
-                // so we never inject extra tokens into the schtasks command line.
-                if exe.contains('"') {
-                    return Err("可执行文件路径包含非法字符".into());
-                }
-                // schtasks /tr needs the program path quoted (Program Files has spaces).
-                // raw_arg writes the command line verbatim, so we emit `/tr "\"<exe>\""`
-                // → schtasks stores the action as a quoted path. (Command's own arg
-                // escaping of embedded quotes is version-fragile, hence raw_arg.)
-                let mut cmd = std::process::Command::new("schtasks");
-                cmd.raw_arg("/create")
-                    .raw_arg("/f")
-                    .raw_arg("/tn")
-                    .raw_arg(AUTOSTART_TASK)
-                    .raw_arg("/tr")
-                    .raw_arg(format!("\"\\\"{exe}\\\"\""))
-                    .raw_arg("/sc")
-                    .raw_arg("onlogon")
-                    .raw_arg("/rl")
-                    .raw_arg("highest")
-                    .creation_flags(NO_WINDOW);
-                let out = cmd
-                    .output()
-                    .map_err(|e| format!("创建开机自启动任务失败: {e}"))?;
-                if !out.status.success() {
-                    return Err(format!(
-                        "创建开机自启动任务失败: {}",
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    ));
-                }
+                create_autostart_task()?;
             } else {
                 let out = std::process::Command::new("schtasks")
                     .args(["/delete", "/f", "/tn", AUTOSTART_TASK])

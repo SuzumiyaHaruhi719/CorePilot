@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "CorePilot",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "identifier": "com.corepilot.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -25,15 +25,27 @@
         "shadow": true,
         "dragDropEnabled": true,
         "theme": "Dark",
-        "additionalBrowserArgs": "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling"
+        "additionalBrowserArgs": "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --no-proxy-server --disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling"
       }
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: asset: http://asset.localhost; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCQzk3OTdBOEI5N0JCRjEKUldUeHU1ZUxlbm5KTzVYS09UK1hpb3hYVElMWVo4Y1o0Y3U0NGVjMHk2YVpBK0dSNlM2dC9ZZkYK",
+      "endpoints": [
+        "https://github.com/SuzumiyaHaruhi719/CorePilot/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["nsis"],
     "externalBin": ["binaries/sensord"],
     "resources": {

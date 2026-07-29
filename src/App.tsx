@@ -13,6 +13,8 @@ import { usePerfRecorder } from "./hooks/usePerfRecorder";
 import { useDiskScanEvents } from "./hooks/useDiskScanEvents";
 import { useOverlayInjection } from "./hooks/useOverlayInjection";
 import { useLiveHistoryRecorder } from "./hooks/useSharedTelemetry";
+import { useUpdateCheck } from "./hooks/useUpdateCheck";
+import { UpdatePrompt } from "./components/update/UpdatePrompt";
 import { useGlobalI18n } from "./lib/i18n";
 import { useUi, type TabId } from "./store/ui";
 import { CoreAssignment } from "./tabs/CoreAssignment";
@@ -70,6 +72,7 @@ function App() {
   useDiskScanEvents();
   useOverlayInjection();
   useLiveHistoryRecorder();
+  useUpdateCheck();
   useGlobalI18n();
 
   useEffect(() => {
@@ -405,6 +408,10 @@ function App() {
         </div>
 
         <StatusBar />
+
+        {/* Launch-time "new version available" dialog. Renders nothing until
+            `useUpdateCheck` decides an interruption is warranted. */}
+        <UpdatePrompt />
       </div>
     </MotionConfig>
   );

@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Instant;
 
 use once_cell::sync::Lazy;
@@ -123,6 +123,22 @@ static CPU_SENSORS: Lazy<Mutex<Vec<CpuSensor>>> = Lazy::new(|| Mutex::new(Vec::n
 /// app restarts. The CAS keeps spawning idempotent (no double-spawn).
 static SIDECAR_ALIVE: AtomicBool = AtomicBool::new(false);
 
+/// PID of the live `sensord.exe` child (0 = none). The reader thread owns the
+/// `Child` handle, so this is the only way another module can reach the process.
+///
+/// The self-updater needs it: `sensord.exe` sits next to `corepilot.exe` and a
+/// running image locks its own file, so an update that replaces the program
+/// files must stop the sidecar first or it half-fails. See `updater::teardown`.
+static SIDECAR_PID: AtomicU32 = AtomicU32::new(0);
+
+/// PID of the running sensord sidecar, if one is alive.
+pub fn sidecar_pid() -> Option<u32> {
+    match SIDECAR_PID.load(Ordering::SeqCst) {
+        0 => None,
+        pid => Some(pid),
+    }
+}
+
 /// Ensure the `sensord` sidecar is running, spawning it if not, and read its
 /// line-delimited JSON on a background thread, updating [`SIDECAR`] with each
 /// parsed sample.
@@ -151,7 +167,10 @@ pub fn ensure_sidecar() {
 
     // Helper: release the alive-flag on any failure path so a subsequent
     // `ensure_sidecar()` call is free to retry the spawn.
-    let release = || SIDECAR_ALIVE.store(false, Ordering::SeqCst);
+    let release = || {
+        SIDECAR_ALIVE.store(false, Ordering::SeqCst);
+        SIDECAR_PID.store(0, Ordering::SeqCst);
+    };
 
     // Resolve `<dir of current exe>/sensord.exe`.
     let exe_path = match std::env::current_exe() {
@@ -188,6 +207,8 @@ pub fn ensure_sidecar() {
             return; // spawn failed (e.g. blocked) — stay graceful.
         }
     };
+
+    SIDECAR_PID.store(child.id(), Ordering::SeqCst);
 
     // Hand the sidecar's stdin to the fan engine (used as the fan-control
     // actuator). Taken before the child moves into the reader thread.
@@ -238,6 +259,7 @@ pub fn ensure_sidecar() {
             let _ = child.wait();
             // Mark dead LAST so a concurrent `ensure_sidecar()` that wins the CAS
             // after this point spawns a genuinely fresh process.
+            SIDECAR_PID.store(0, Ordering::SeqCst);
             SIDECAR_ALIVE.store(false, Ordering::SeqCst);
         });
 

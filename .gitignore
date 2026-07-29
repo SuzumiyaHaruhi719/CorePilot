@@ -40,3 +40,11 @@ branding/.*
 
 # Claude Code local agent data
 .claude/
+
+# Updater signing material + generated release manifest. The PRIVATE key must
+# never land in the repo — anyone holding it can sign an update that CorePilot
+# will install and run elevated. It lives at ~/.tauri/corepilot.key; only the
+# public half belongs in tauri.conf.json.
+*.key
+latest.json
+release/

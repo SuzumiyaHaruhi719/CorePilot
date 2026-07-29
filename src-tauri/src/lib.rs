@@ -33,6 +33,7 @@ pub mod telemetry;
 pub mod topology;
 pub mod tray;
 pub mod tweaks;
+pub mod updater;
 pub mod watchdog;
 pub mod winsvc;
 
@@ -59,10 +60,19 @@ use tauri::Manager;
 /// assets through the proxy, which can't serve them — the window comes up black.
 /// Disabling the proxy for our local-only WebView fixes that regardless of the
 /// user's proxy config (backend network ops are unaffected — they're native).
-pub const WEBVIEW_ARGS: &str = "--disable-background-timer-throttling \
-     --disable-renderer-backgrounding --disable-backgrounding-occluded-windows \
-     --no-proxy-server --remote-debugging-port=9222 \
-     --disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling";
+///
+/// INVARIANT: this string MUST stay byte-identical to `additionalBrowserArgs`
+/// in `tauri.conf.json` (the main window's args). All webviews share one
+/// browser process per user-data-dir, and WebView2 refuses to attach a webview
+/// whose requested environment options differ from the running browser's
+/// (`ERROR_INVALID_STATE`) — the OSD window then can never be created and its
+/// keep-alive fails silently forever. Field failure 2026-07-11: WebView2
+/// Runtime 150 stopped merging the `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` env
+/// var, so the previously-tolerated drift between the two strings (this one
+/// carried `--remote-debugging-port=9222` for release-build CDP diagnosis)
+/// became a hard mismatch and the OSD window vanished. Any new switch must be
+/// added to BOTH places or neither.
+pub const WEBVIEW_ARGS: &str = "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --no-proxy-server --disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling";
 
 /// CRITICAL-PATH INVARIANT (see docs/superpowers/specs/2026-06-21-critical-path-isolation-design.md):
 /// Tauri v2 runs the event loop AND routes every window's IPC on the MAIN thread.
@@ -121,6 +131,17 @@ pub fn run() {
 
     tracing::info!("CorePilot {} starting", env!("CARGO_PKG_VERSION"));
 
+    // Portable self-update handoff. The outgoing instance swaps the program
+    // files, spawns this one with `--await-predecessor <pid>`, then exits. We
+    // MUST outlast it before the builder below registers the single-instance
+    // plugin: otherwise this process finds the old one still alive, hands its
+    // argv over to something that is about to die, and quits — leaving no
+    // CorePilot running at all. See `updater::portable_install`.
+    if let Some(pid) = updater::predecessor_arg(std::env::args()) {
+        tracing::info!("waiting for predecessor pid {pid} to exit before starting");
+        updater::await_predecessor(pid, std::time::Duration::from_secs(10));
+    }
+
     // Enable SeDebugPrivilege once at startup. Even when CorePilot runs elevated,
     // OpenProcess(PROCESS_SET_INFORMATION) can fail on some processes (services,
     // other-context, or elevated peers like our own sensord sidecar) without this
@@ -157,12 +178,23 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
         .manage(tray::TrayPrefs::default())
         .setup(|app| {
             // Critical-path tripwire: log loudly if the main thread (the IPC router)
             // ever stalls. Observability only; see crate::watchdog.
             crate::watchdog::start(app.handle().clone());
+
+            // Reaching this point means the current binaries launched, so any
+            // `<name>.old` left by a portable update is now provably disposable.
+            crate::updater::cleanup_stale();
+
+            // An installer update can land the app somewhere other than where the
+            // autostart scheduled task points (a per-user ↔ per-machine install
+            // flip moves the exe), and a task aimed at a path that no longer
+            // exists fails silently at boot. Re-aim it at the running exe.
+            crate::commands::repair_autostart_path();
 
             // Start the background GPU-engine telemetry collector first (the ONE
             // shared \GPU Engine(*) collect feeding sensors / process list /
@@ -325,6 +357,8 @@ pub fn run() {
             commands::set_window_opacity,
             commands::get_autostart,
             commands::set_autostart,
+            updater::update_check,
+            updater::update_install,
             commands::smu_status,
             commands::smu_apply_co,
             commands::smu_apply_co_all,

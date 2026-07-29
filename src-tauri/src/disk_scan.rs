@@ -734,6 +734,15 @@ pub struct ScanProgress {
 /// iterate the whole map while holding an entry lock.
 static SCANS: Lazy<DashMap<ScanId, Arc<ScanHandle>>> = Lazy::new(DashMap::new);
 
+/// Whether any volume scan is still running. Used by the self-updater to warn
+/// that installing now throws away an in-flight scan (a full MFT pass is ~15 s
+/// of work the user would have to redo). A warning, not a block.
+pub fn any_scanning() -> bool {
+    SCANS
+        .iter()
+        .any(|e| ScanStatus::from_u8(e.status.load(Ordering::Relaxed)) == ScanStatus::Scanning)
+}
+
 // =============================================================================
 // Engine tunables (spec §2.6 / §2.7)
 // =============================================================================

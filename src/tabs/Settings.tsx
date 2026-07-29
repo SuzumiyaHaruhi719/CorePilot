@@ -39,6 +39,7 @@ import {
   type Theme,
 } from "../store/settings";
 import { useRecordTargets } from "../store/recordTargets";
+import { UpdateCard } from "../components/update/UpdateCard";
 
 interface SettingRowProps {
   title: string;
@@ -835,6 +836,7 @@ export function Settings() {
         </motion.div>
 
         <NetworkCard />
+        <UpdateCard />
         <DebugCard />
       </div>
     </>

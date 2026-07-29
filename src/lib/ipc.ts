@@ -876,6 +876,34 @@ export const api = {
   /** Enable/disable launching CorePilot elevated at Windows logon (scheduled task,
    *  no UAC prompt). Source of truth is the OS task, not a persisted setting. */
   setAutostart: (enable: boolean) => invoke<void>("set_autostart", { enable }),
+  /**
+   * Ask GitHub Releases whether a newer version exists. Facts only — whether to
+   * *prompt* is decided by `shouldPrompt` in `hooks/useUpdateCheck.ts`.
+   *
+   * Longer timeout than the default: the backend allows the manifest fetch 15 s
+   * before giving up, and a request that dies at 6 s here would report a
+   * misleading "timeout" while the real one is still deciding.
+   */
+  updateCheck: () => withTimeout(invoke<UpdateInfo>("update_check"), 20_000),
+  /**
+   * Download, verify and install the update. Re-checks blockers server-side, so
+   * a game launched while the prompt sat on screen still stops it.
+   *
+   * Never resolves on the happy path — both flavors exit the app to install, so
+   * the webview is gone before a response could arrive. Only rejections (a
+   * blocker, a network/signature failure) come back. No timeout for that reason:
+   * a slow download must not be cancelled out from under the installer.
+   */
+  updateInstall: () => invoke<void>("update_install"),
+  /**
+   * Open a URL in the default browser.
+   *
+   * Calls `tauri-plugin-opener`'s command directly rather than adding the
+   * `@tauri-apps/plugin-opener` npm package: the Rust plugin is already
+   * registered and `opener:default` is already in the capability set, so the
+   * package would only be a thin `invoke` wrapper we'd have to keep in step.
+   */
+  openExternal: (url: string) => invoke<void>("plugin:opener|open_url", { url }),
 };
 
 /**
@@ -915,6 +943,53 @@ export interface ForegroundInfo {
   pid: number;
   /** True when the foreground app is rendering frames (has recent presents). */
   isGame: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Self-update (see src-tauri/src/updater.rs)
+// ---------------------------------------------------------------------------
+
+/** Which distribution this build is: the NSIS install or the portable folder. */
+export type UpdateFlavor = "installer" | "portable";
+
+/** `block` = installing now would fail or strand hardware; `warn` = it costs
+ *  work in progress but is allowed. */
+export type BlockerSeverity = "block" | "warn";
+
+/** One reason not to install right now, with a ready-to-show Chinese message. */
+export interface UpdateBlocker {
+  id: string;
+  severity: BlockerSeverity;
+  message: string;
+}
+
+/** Result of an update check. Mirrors the Rust `UpdateInfo` (camelCase). */
+export interface UpdateInfo {
+  available: boolean;
+  currentVersion: string;
+  latestVersion: string | null;
+  /** Release notes (the GitHub release body) as plain text. */
+  notes: string | null;
+  pubDate: string | null;
+  flavor: UpdateFlavor;
+  /** A game holds the foreground — the auto-prompt is suppressed on this. */
+  gameForeground: boolean;
+  blockers: UpdateBlocker[];
+  releasesUrl: string;
+}
+
+/** Payload of `update://progress` — bytes fetched so far. `total` is null when
+ *  the server sends no Content-Length. */
+export interface UpdateProgressEvent {
+  downloaded: number;
+  total: number | null;
+}
+
+/** Payload of `update://state` — where the install got to, plus the reason it
+ *  stopped when `phase` is `failed`. */
+export interface UpdateStateEvent {
+  phase: "idle" | "checking" | "downloading" | "verifying" | "staging" | "swapping" | "ready" | "failed";
+  error?: string;
 }
 
 /** One installed game discovered from a storefront library (Steam/Epic/GOG). */

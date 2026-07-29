@@ -603,6 +603,26 @@ pub async fn overlay_detach(_app: AppHandle, pid: u32) -> Result<(), String> {
     crate::commands::run_blocking_err("overlay_detach", move || overlay_detach_blocking(pid)).await
 }
 
+/// PID that currently has `corepilot_overlay.dll` resident, if any.
+///
+/// The self-updater needs this: while the DLL is mapped into a game, its file on
+/// disk cannot be replaced, so an update must eject it first (or refuse). Also
+/// drives the auto-mode re-attach guard — see [`OverlayState::injected_pid`].
+pub(crate) fn injected_pid() -> Option<u32> {
+    STATE.lock().injected_pid
+}
+
+/// Eject the overlay DLL from whatever process holds it, if any. Best-effort and
+/// idempotent; returns the PID it detached from. Used by the updater's teardown
+/// so the DLL file is unmapped before the program files are replaced.
+pub(crate) fn eject_resident() -> Option<u32> {
+    let pid = injected_pid()?;
+    if let Err(e) = overlay_detach_blocking(pid) {
+        tracing::warn!("updater: overlay eject from pid {pid} failed: {e}");
+    }
+    Some(pid)
+}
+
 fn overlay_detach_blocking(pid: u32) -> Result<(), String> {
     // Clear the sampler target first so it immediately stops publishing for it.
     clear_target_if(pid);
