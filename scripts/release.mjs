@@ -86,6 +86,17 @@ if (!(process.env.TAURI_SIGNING_PRIVATE_KEY || process.env.TAURI_SIGNING_PRIVATE
   );
 }
 
+// Normalise the signing key to the contents form. The bundler (`tauri build`)
+// reads TAURI_SIGNING_PRIVATE_KEY only — never our _PATH alias — so without this
+// the build runs for minutes and then dies at signing with "a public key has
+// been found, but no private key". And `tauri signer sign` (portable zip, below)
+// maps BOTH env vars to mutually-exclusive CLI flags and refuses when both are
+// set, so once bridged the path form must go.
+if (process.env.TAURI_SIGNING_PRIVATE_KEY_PATH) {
+  process.env.TAURI_SIGNING_PRIVATE_KEY ??= readFileSync(process.env.TAURI_SIGNING_PRIVATE_KEY_PATH, "utf8").trim();
+  delete process.env.TAURI_SIGNING_PRIVATE_KEY_PATH;
+}
+
 const dirty = capture("git status --porcelain");
 if (dirty) die(`working tree is dirty — commit or stash first:\n${dirty}`);
 
