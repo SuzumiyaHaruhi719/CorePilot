@@ -2,12 +2,8 @@ import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { tf } from "../lib/i18n";
 import { api, type PerfSessionEvent } from "../lib/ipc";
-import {
-  downsample,
-  gameDisplayName,
-  summarize,
-  type PerfSession,
-} from "../lib/perf";
+import { gameDisplayName } from "../lib/perf";
+import { saveSamples, type PerfSessionMeta } from "../lib/perfSamples";
 import { usePerfHistory } from "../store/perfHistory";
 import {
   isPermissionGranted,
@@ -34,8 +30,8 @@ import { useRecordTargets } from "../store/recordTargets";
  *     whitelist), we send the flat, lowercased lists to the recorder thread via
  *     `api.perfRecorderConfig`. The backend never parses the store itself.
  *  2. **Listen for finished sessions.** The backend emits `perf://session` when a
- *     recorded game exits. We build the full `PerfSession` (summarize + downsample
- *     the samples), persist it to history, fire the game notification, and — when
+ *     recorded game exits. We write its samples to their own file, add the
+ *     metadata row to history, fire the game notification, and — when
  *     "auto-show report" is on — surface the report.
  *
  * Why the popup timing still works: the listener lives in the MAIN window. When
@@ -111,29 +107,52 @@ export function usePerfRecorder(): void {
     };
 
     /**
-     * Persist + surface a finished session emitted by the backend. Builds the full
-     * `PerfSession` the report renders (id/name/refreshHz + summary + downsampled
-     * samples) from the backend payload, whose `samples` already match the
-     * frontend `PerfSample` shape.
+     * Persist + surface a finished session emitted by the backend. The row that
+     * lands in history is METADATA only (id/name/refreshHz + summary, ~1 KB);
+     * the ~1200 downsampled samples go to their own file.
+     *
+     * Order matters: the samples file is written and AWAITED first, then the
+     * history row is added. A crash in that gap leaves an orphan file (swept on
+     * the next hydration) — never a history row that charts nothing. If the
+     * write fails outright we still keep the session, with its samples inline as
+     * a fat row, and the store's post-hydration repair retries the split later;
+     * dropping a just-recorded run would be the worse outcome.
      */
-    const onSession = (payload: PerfSessionEvent) => {
-      if (!payload.samples || payload.samples.length === 0) return; // nothing to keep
-      const session: PerfSession = {
-        id: crypto.randomUUID(),
-        exe: payload.exe,
-        path: payload.path,
-        name: gameDisplayName(payload.exe),
-        startedAt: payload.startedAt,
-        endedAt: payload.endedAt,
-        durationSec: payload.durationSec,
-        cpuName: payload.cpuName,
-        gpuName: payload.gpuName,
-        refreshHz: null,
-        // Summarize from the FULL series, then downsample for storage (matches the
-        // old in-app recorder's finalize exactly).
-        summary: summarize(payload.samples),
-        samples: downsample(payload.samples),
+    const onSession = async (payload: PerfSessionEvent) => {
+      if (!payload.samples || payload.samples.length === 0) return;
+      const id = crypto.randomUUID();
+      const session: PerfSessionMeta = {
+        id, exe: payload.meta.exe, path: payload.meta.path,
+        name: gameDisplayName(payload.meta.exe), startedAt: payload.meta.startedAt,
+        endedAt: payload.meta.endedAt, durationSec: payload.meta.durationSec,
+        cpuName: payload.meta.cpuName, gpuName: payload.meta.gpuName, refreshHz: null,
+        summary: payload.summary,
       };
+      try {
+        await saveSamples(id, payload.samples); // file first; also primes the LRU
+      } catch {
+        session.samples = payload.samples; // never lose a run over a failed write
+      }
+      // Wait for the history store to finish hydrating before adding the row.
+      // The v1→v2 migrate is multi-second (up to 50 sequential fsync'd sample
+      // writes); a game exiting inside that window would add the session to the
+      // pre-hydration state, and zustand would then overwrite `sessions` with
+      // the migrated blob — silently losing the run that just finished.
+      // Bounded, because hydration can never finish at all: when zustand's
+      // rehydrate chain rejects (a poisoned persist mutex makes every
+      // `persist_set` fail) it calls back with the error and stops — it never
+      // flips `hasHydrated` and never fires the finish listeners. An unbounded
+      // await there dropped the finished run on the floor, and since the samples
+      // file was already written, the next launch's orphan sweep deleted that
+      // too: the run was lost twice. Proceeding on timeout is safe — zustand
+      // applies the rehydrated state BEFORE persisting it, so the worst case is
+      // appending to state that is already correct.
+      if (!usePerfHistory.persist.hasHydrated()) {
+        await Promise.race([
+          new Promise<void>((r) => usePerfHistory.persist.onFinishHydration(() => r())),
+          new Promise<void>((r) => setTimeout(r, 20_000)),
+        ]);
+      }
       usePerfHistory.getState().addSession(session);
       void notify(tf(`${session.name} 性能报告已生成`, `${session.name} performance report generated`));
       if (useSettings.getState().autoShowReport) void surfaceReport(session.id);
@@ -154,7 +173,7 @@ export function usePerfRecorder(): void {
     // persisting duplicate sessions. The `disposed` flag detaches it immediately.
     let unlisten: (() => void) | undefined;
     let disposed = false;
-    void listen<PerfSessionEvent>("perf://session", (e) => onSession(e.payload)).then((fn) => {
+    void listen<PerfSessionEvent>("perf://session", (e) => void onSession(e.payload)).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;
     });

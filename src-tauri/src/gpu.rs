@@ -4,9 +4,8 @@
 //! adapters, so the RTX 4090 is index 0 even with an AMD iGPU present). The
 //! AMD iGPU is invisible to NVML and unaffected.
 //!
-//! NVML is initialised **once** into a process-wide shared handle
-//! ([`SHARED_NVML`]) and every command borrows it; see that static for why
-//! per-call `Nvml::init()` was a multi-second stall under GPU-tool contention.
+//! NVML is owned by one serialized state machine and sampled by one worker thread;
+//! this prevents overlapping calls during driver replacement and permits recovery.
 //! Nothing here may panic: NVML or device acquisition failures map to
 //! `Err(String)` for the apply/reset commands, or to a struct with
 //! `available: false` for the info command.
@@ -22,6 +21,10 @@ use nvml_wrapper::{Device, Nvml};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Convert milliwatts (NVML's power unit) to watts.
 fn mw_to_w(mw: u32) -> f64 {
@@ -51,7 +54,7 @@ fn clamp_u32(value: u32, min: u32, max: u32) -> u32 {
 
 /// GPU tuning snapshot returned to the frontend. When `available` is false the
 /// numeric fields are zeroed/defaulted and should be ignored by the UI.
-#[derive(Serialize, Default)]
+#[derive(Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GpuOcInfo {
     /// Whether an NVIDIA GPU was found and queried. If false, ignore the rest.
@@ -109,6 +112,18 @@ pub struct GpuOcInfo {
     /// Memory clock offset bounds (MHz).
     pub mem_offset_min_mhz: i32,
     pub mem_offset_max_mhz: i32,
+    /// Whether `temperature` came from a *successful* NVML read. `available`
+    /// only means the device was acquired; without this flag a failed
+    /// temperature query was indistinguishable from a genuine 0 °C, and
+    /// `sensors.rs` treats `Some(0.0)` as a real reading — permanently
+    /// suppressing the LibreHardwareMonitor fallback (GPU stuck at 0 °C
+    /// forever). `#[serde(skip)]` keeps the wire format the frontend sees
+    /// byte-identical.
+    #[serde(skip)]
+    pub temp_valid: bool,
+    /// Same guard for `power_usage_w` (0 W would suppress the sidecar too).
+    #[serde(skip)]
+    pub power_valid: bool,
 }
 
 /// Requested tuning changes. Every field is optional; `None` means "leave as-is".
@@ -157,80 +172,195 @@ fn is_unsupported(err: &NvmlError) -> bool {
     matches!(err, NvmlError::NotSupported)
 }
 
-/// Process-wide NVML handle, initialised **exactly once**.
-///
-/// `Nvml::init()` enumerates GPU adapters through a DXGKRNL kernel query
-/// (`NtGdiDdDDIQueryAdapterInfo`) that costs ~1.8 s while other GPU tools (Armoury
-/// Crate / AURA / the NVIDIA overlay) are hammering the adapter. Doing it *per
-/// call* — as every GPU read used to — turned each `gpu_temp_power` /
-/// `gpu_oc_info_snapshot` into a multi-second stall: it pinned `get_sensors` under
-/// the `SAMPLER` lock and let the 5 Hz perf-recorder peg a whole core in NVML init
-/// (diagnosed 2026-06-19). Initialising once and sharing the handle amortises that
-/// cost to a single startup hit; every later call only does the cheap device read.
-///
-/// `Nvml` is `Send + Sync` (NVML is documented thread-safe), so handing out a
-/// `&'static Nvml` to concurrent callers is sound. `None` when no NVIDIA GPU /
-/// NVML is present, in which case every GPU read degrades to `None` as before.
-static SHARED_NVML: Lazy<Option<Nvml>> = Lazy::new(|| Nvml::init().ok());
-
-/// A cheap accessor over the shared [`SHARED_NVML`] handle that hands out a
-/// borrowed [`Device`] through a closure — same API as before, but no per-call
-/// `Nvml::init()`. A `Device` borrows its `Nvml`; here it borrows the `'static`
-/// shared handle and is created *inside* [`with_device`], so it never escapes.
-struct GpuHandle {
-    nvml: &'static Nvml,
+/// NVML is process-global and can be torn down while Windows replaces the driver.
+/// Keep the handle and every device operation behind one mutex so no two callers
+/// can enter nvml.dll during that teardown window.
+enum NvmlState {
+    Ready(Nvml),
+    Lost {
+        retry_at: Instant,
+        backoff: Duration,
+    },
+    Absent {
+        retry_at: Instant,
+        backoff: Duration,
+    },
 }
 
-impl GpuHandle {
-    /// Get a handle over the shared NVML instance (initialising NVML once, on the
-    /// first call process-wide). `Err` when NVML/NVIDIA is unavailable.
-    fn init() -> Result<Self, String> {
-        SHARED_NVML
-            .as_ref()
-            .map(|nvml| GpuHandle { nvml })
-            .ok_or_else(|| "NVML unavailable".to_string())
-    }
+static NVML: Lazy<Mutex<NvmlState>> = Lazy::new(|| {
+    Mutex::new(NvmlState::Absent {
+        retry_at: Instant::now(),
+        backoff: Duration::from_secs(5),
+    })
+});
+static GPU_SNAPSHOT: Lazy<Mutex<Arc<GpuOcInfo>>> =
+    Lazy::new(|| Mutex::new(Arc::new(GpuOcInfo::default())));
+/// Demand stamp for the FULL snapshot (~20 NVML calls) — `gpu_oc_info_snapshot`
+/// consumers only (GPU tab, overlay, recorder, taskbar plate).
+static GPU_DEMAND_MS: AtomicU64 = AtomicU64::new(0);
+/// Demand stamp for the two-call temperature/power read. Kept separate from
+/// `GPU_DEMAND_MS` so the once-per-second `gpu_temp_power` telemetry caller
+/// cannot pin the worker into running the full ~20-call snapshot forever.
+static GPU_LIGHT_DEMAND_MS: AtomicU64 = AtomicU64::new(0);
+static GPU_THREAD: std::sync::Once = std::sync::Once::new();
 
-    /// Run `f` with the primary NVIDIA device (index 0). The `Device` is created
-    /// here and dropped when `f` returns, so its borrow of the shared `nvml` never
-    /// escapes. `f` gets `&mut Device` so it can call both the read (`&self`) and
-    /// the mutating (`&mut self`) NVML methods. Returns the device-acquisition
-    /// error as a human-readable string if index 0 can't be opened.
-    fn with_device<T>(&self, f: impl FnOnce(&mut Device<'_>) -> T) -> Result<T, String> {
-        let mut device = self
-            .nvml
-            .device_by_index(0)
-            .map_err(|e| format!("No NVIDIA GPU at index 0: {e}"))?;
-        Ok(f(&mut device))
+/// The two fields `gpu_temp_power` needs. `None` means the NVML read failed, so
+/// the caller falls back to the sidecar instead of believing a fabricated 0.
+#[derive(Clone, Copy, Default)]
+struct GpuLight {
+    temp_c: Option<f32>,
+    power_w: Option<f32>,
+}
+
+static GPU_LIGHT: Lazy<Mutex<GpuLight>> = Lazy::new(|| Mutex::new(GpuLight::default()));
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn is_gpu_lost(err: &NvmlError) -> bool {
+    matches!(
+        err,
+        NvmlError::GpuLost
+            | NvmlError::Uninitialized
+            | NvmlError::DriverNotLoaded
+            | NvmlError::Unknown
+            | NvmlError::LibraryNotFound
+    )
+}
+
+fn mark_failed(lost: bool, backoff: Duration) -> NvmlState {
+    let next = (backoff * 2).min(Duration::from_secs(60));
+    let retry_at = Instant::now() + backoff;
+    if lost {
+        NvmlState::Lost {
+            retry_at,
+            backoff: next,
+        }
+    } else {
+        NvmlState::Absent {
+            retry_at,
+            backoff: next,
+        }
     }
 }
 
-/// Cached "is there an NVIDIA GPU" probe. Reuses the one shared handle rather than
-/// running a second `Nvml::init()`.
-static NVML_PRESENT: Lazy<bool> = Lazy::new(|| SHARED_NVML.is_some());
-
-/// Lightweight GPU temperature (°C) and power (W) read for the telemetry sampler.
-/// Using NVML here keeps the Monitor/StatusBar consistent with the GPU tab and
-/// `nvidia-smi` (NVML core temp), rather than the sidecar's hotspot reading. Each
-/// field is independent; returns `(None, None)` on systems without an NVIDIA GPU
-/// (the sampler then falls back to the LibreHardwareMonitor sidecar).
-pub fn gpu_temp_power() -> (Option<f32>, Option<f32>) {
-    if !*NVML_PRESENT {
-        return (None, None);
+/// Hold NVML's mutex for device acquisition and the entire closure. The old
+/// shared handle allowed sampler and recorder calls to overlap in nvml.dll.
+fn with_device<T>(f: impl FnOnce(&mut Device<'_>) -> T) -> Result<T, String> {
+    let mut state = NVML.lock();
+    if !matches!(*state, NvmlState::Ready(_)) {
+        let (retry_at, backoff, was_lost) = match &*state {
+            NvmlState::Lost { retry_at, backoff } => (*retry_at, *backoff, true),
+            NvmlState::Absent { retry_at, backoff } => (*retry_at, *backoff, false),
+            NvmlState::Ready(_) => unreachable!(),
+        };
+        if Instant::now() < retry_at {
+            return Err("NVML不可用 / NVML unavailable".into());
+        }
+        match Nvml::init() {
+            Ok(n) => *state = NvmlState::Ready(n),
+            Err(e) => {
+                *state = mark_failed(was_lost || is_gpu_lost(&e), backoff);
+                return Err(format!("NVML不可用 / NVML unavailable: {e}"));
+            }
+        }
     }
-    let Ok(handle) = GpuHandle::init() else {
-        return (None, None);
+    let nvml = match &mut *state {
+        NvmlState::Ready(n) => n,
+        _ => unreachable!(),
     };
-    handle
-        .with_device(|device| {
-            let temp = device
-                .temperature(TemperatureSensor::Gpu)
-                .ok()
-                .map(|t| t as f32);
-            let power = device.power_usage().ok().map(|mw| mw as f32 / 1000.0);
-            (temp, power)
-        })
-        .unwrap_or((None, None))
+    match nvml.device_by_index(0) {
+        Ok(mut device) => Ok(f(&mut device)),
+        Err(e) => {
+            if is_gpu_lost(&e) {
+                let old = std::mem::replace(
+                    &mut *state,
+                    NvmlState::Absent {
+                        retry_at: Instant::now(),
+                        backoff: Duration::from_secs(5),
+                    },
+                );
+                drop(old);
+                *state = mark_failed(true, Duration::from_secs(5));
+            }
+            Err(format!("No NVIDIA GPU at index 0: {e}"))
+        }
+    }
+}
+
+/// A demand stamp counts as live for 3 s after the last request.
+fn demand_fresh(stamp: u64, now: u64) -> bool {
+    stamp != 0 && now.saturating_sub(stamp) <= 3_000
+}
+
+/// Two NVML calls — the trimmed body behind [`gpu_temp_power`].
+fn read_temp_power() -> GpuLight {
+    with_device(|device| GpuLight {
+        temp_c: device
+            .temperature(TemperatureSensor::Gpu)
+            .ok()
+            .map(|t| t as f32),
+        power_w: device.power_usage().ok().map(|mw| mw_to_w(mw) as f32),
+    })
+    .unwrap_or_default()
+}
+
+fn start_gpu_thread() {
+    GPU_THREAD.call_once(|| {
+        let spawned = thread::Builder::new()
+            .name("corepilot-gpu-nvml".into())
+            .spawn(|| loop {
+                let now = now_ms();
+                if demand_fresh(GPU_DEMAND_MS.load(Ordering::Relaxed), now) {
+                    // Full snapshot (~20 NVML calls). It already contains the
+                    // light fields, so a full consumer keeps telemetry fresh.
+                    let info = build_gpu_info();
+                    *GPU_LIGHT.lock() = GpuLight {
+                        temp_c: info.temp_valid.then(|| info.temperature as f32),
+                        power_w: info.power_valid.then(|| info.power_usage_w as f32),
+                    };
+                    *GPU_SNAPSHOT.lock() = Arc::new(info);
+                } else if demand_fresh(GPU_LIGHT_DEMAND_MS.load(Ordering::Relaxed), now) {
+                    // Telemetry-only demand: two NVML reads, not twenty.
+                    *GPU_LIGHT.lock() = read_temp_power();
+                }
+                thread::sleep(Duration::from_millis(
+                    if crate::perf_recorder::active_session_count() > 0 {
+                        200
+                    } else {
+                        1000
+                    },
+                ));
+            });
+        // Panicking here (the old `.expect`) would kill the caller — now the
+        // sampler thread, once per second — AND poison this `Once`, so every
+        // later caller panics too and all telemetry dies. Warn instead and
+        // leave the snapshots at their defaults (`available: false`).
+        if let Err(e) = spawned {
+            tracing::warn!("corepilot-gpu-nvml thread failed to spawn: {e}");
+        }
+    });
+}
+
+fn request_snapshot() {
+    GPU_DEMAND_MS.store(now_ms(), Ordering::Relaxed);
+    start_gpu_thread();
+}
+
+/// Lightweight telemetry reads use the published snapshot, never NVML directly.
+/// `None` on either field means the NVML read failed (or the GPU is absent), so
+/// `sensors.rs` can fall back to the LibreHardwareMonitor sidecar.
+pub fn gpu_temp_power() -> (Option<f32>, Option<f32>) {
+    // Stamp only the LIGHT demand: requesting the full snapshot here made the
+    // worker run all ~20 NVML calls every second (200 ms while recording).
+    GPU_LIGHT_DEMAND_MS.store(now_ms(), Ordering::Relaxed);
+    start_gpu_thread();
+    let light = *GPU_LIGHT.lock();
+    (light.temp_c, light.power_w)
 }
 
 /// Highest attainable graphics clock (MHz). Prefers `max_clock_info`, which is
@@ -257,13 +387,8 @@ fn max_graphics_clock(device: &Device) -> u32 {
         .unwrap_or(0)
 }
 
-/// Query the current GPU tuning snapshot. Never fails: if NVML is unavailable
-/// or no NVIDIA GPU exists, returns `GpuOcInfo { available: false, .. }`.
-///
-/// Async + blocking-pool: each call re-inits NVML and issues ~15 driver reads —
-/// tens to hundreds of ms under system load. Polled at ~1 Hz by the GPU pages
-/// AND the OSD overlay (whenever a gpu.* metric is shown), so as a sync command
-/// it contributed to the recurring main-thread "未响应" stalls.
+/// Return the latest worker-published snapshot. Readers only clone an `Arc`;
+/// NVML calls happen on `corepilot-gpu-nvml`, not on the UI or sampler thread.
 #[tauri::command]
 pub async fn gpu_oc_info() -> GpuOcInfo {
     crate::commands::run_blocking_default("gpu_oc_info", gpu_oc_info_snapshot).await
@@ -272,117 +397,124 @@ pub async fn gpu_oc_info() -> GpuOcInfo {
 /// Synchronous body of [`gpu_oc_info`], for callers already off the main thread
 /// (overlay sampler, perf recorder, CLI).
 pub fn gpu_oc_info_snapshot() -> GpuOcInfo {
-    let handle = match GpuHandle::init() {
-        Ok(h) => h,
-        Err(_) => return GpuOcInfo::default(),
-    };
+    request_snapshot();
+    GPU_SNAPSHOT.lock().clone().as_ref().clone()
+}
 
+fn build_gpu_info() -> GpuOcInfo {
     // The whole snapshot is built inside `with_device` so the borrowed `Device`
     // never outlives its `Nvml`. Device-acquisition failure → `available: false`.
-    handle
-        .with_device(|device| {
-            let mut info = GpuOcInfo {
-                available: true,
-                ..Default::default()
-            };
+    with_device(|device| {
+        let mut info = GpuOcInfo {
+            available: true,
+            ..Default::default()
+        };
 
-            info.name = device.name().unwrap_or_default();
-            info.driver_version = device.nvml().sys_driver_version().unwrap_or_default();
+        info.name = device.name().unwrap_or_default();
+        info.driver_version = device.nvml().sys_driver_version().unwrap_or_default();
 
-            info.graphics_clock = device.clock_info(Clock::Graphics).unwrap_or(0);
-            info.mem_clock = device.clock_info(Clock::Memory).unwrap_or(0);
-            info.sm_clock = device.clock_info(Clock::SM).unwrap_or(0);
+        info.graphics_clock = device.clock_info(Clock::Graphics).unwrap_or(0);
+        info.mem_clock = device.clock_info(Clock::Memory).unwrap_or(0);
+        info.sm_clock = device.clock_info(Clock::SM).unwrap_or(0);
 
-            info.temperature = device
-                .temperature(TemperatureSensor::Gpu)
-                .map(|t| t as i32)
-                .unwrap_or(0);
-
-            info.power_usage_w = device.power_usage().map(mw_to_w).unwrap_or(0.0);
-
-            // Power limit + constraints. `supports_power_limit` is true only if both the
-            // enforced limit and the constraints are readable (and not NotSupported).
-            let enforced = device.enforced_power_limit();
-            let constraints = device.power_management_limit_constraints();
-            info.supports_power_limit = !matches!(&enforced, Err(e) if is_unsupported(e))
-                && !matches!(&constraints, Err(e) if is_unsupported(e))
-                && enforced.is_ok()
-                && constraints.is_ok();
-            if let Ok(limit) = enforced {
-                info.power_limit_w = mw_to_w(limit);
+        // Keep the failure visible: a zeroed field is only trustworthy when the
+        // matching `*_valid` flag is set (see `GpuOcInfo::temp_valid`).
+        match device.temperature(TemperatureSensor::Gpu) {
+            Ok(t) => {
+                info.temperature = t as i32;
+                info.temp_valid = true;
             }
-            if let Ok(c) = constraints {
-                info.power_limit_min_w = mw_to_w(c.min_limit);
-                info.power_limit_max_w = mw_to_w(c.max_limit);
+            Err(_) => info.temperature = 0,
+        }
+
+        match device.power_usage() {
+            Ok(mw) => {
+                info.power_usage_w = mw_to_w(mw);
+                info.power_valid = true;
             }
+            Err(_) => info.power_usage_w = 0.0,
+        }
 
-            // Fan: probe fan 0. NotSupported (or no fans) => manual control unavailable.
-            let fan0 = device.fan_speed(0);
-            info.supports_fan_control = fan0.is_ok();
-            info.fan_speed_pct = fan0.unwrap_or(0);
+        // Power limit + constraints. `supports_power_limit` is true only if both the
+        // enforced limit and the constraints are readable (and not NotSupported).
+        let enforced = device.enforced_power_limit();
+        let constraints = device.power_management_limit_constraints();
+        info.supports_power_limit = !matches!(&enforced, Err(e) if is_unsupported(e))
+            && !matches!(&constraints, Err(e) if is_unsupported(e))
+            && enforced.is_ok()
+            && constraints.is_ok();
+        if let Ok(limit) = enforced {
+            info.power_limit_w = mw_to_w(limit);
+        }
+        if let Ok(c) = constraints {
+            info.power_limit_min_w = mw_to_w(c.min_limit);
+            info.power_limit_max_w = mw_to_w(c.max_limit);
+        }
 
-            if let Ok(util) = device.utilization_rates() {
-                info.utilization_gpu = util.gpu;
-                info.utilization_mem = util.memory;
-            }
+        // Fan: probe fan 0. NotSupported (or no fans) => manual control unavailable.
+        let fan0 = device.fan_speed(0);
+        info.supports_fan_control = fan0.is_ok();
+        info.fan_speed_pct = fan0.unwrap_or(0);
 
-            if let Ok(mem) = device.memory_info() {
-                info.mem_used_bytes = mem.used;
-                info.mem_total_bytes = mem.total;
-            }
+        if let Ok(util) = device.utilization_rates() {
+            info.utilization_gpu = util.gpu;
+            info.utilization_mem = util.memory;
+        }
 
-            // Locked-clocks support: presence of supported graphics clocks is the
-            // proxy. A non-zero max also feeds the UI's slider range.
-            info.max_graphics_clock_mhz = max_graphics_clock(device);
-            // Core-clock locking (NVML) is replaced by NVAPI clock OFFSETS — the lock
-            // crippled GeForce to its minimum; offsets are the real Afterburner control.
-            info.supports_locked_clocks = false;
-            info.supports_clock_offset = crate::nvapi_oc::available();
-            let (c_lo, c_hi, m_lo, m_hi) = crate::nvapi_oc::ranges();
-            info.core_offset_min_mhz = c_lo;
-            info.core_offset_max_mhz = c_hi;
-            info.mem_offset_min_mhz = m_lo;
-            info.mem_offset_max_mhz = m_hi;
+        if let Ok(mem) = device.memory_info() {
+            info.mem_used_bytes = mem.used;
+            info.mem_total_bytes = mem.total;
+        }
 
-            // Temp limit (thermal target). On consumer GeForce the GPU_MAX threshold is
-            // NOT settable via NVML, but the ACOUSTIC_CURR threshold IS — it's the
-            // temperature the card tries to hold (what Afterburner calls "temp limit").
-            // Read current, capture the factory default once, and probe set-ability a
-            // single time with a no-op set, caching the result.
-            if let Ok(cur) = device.temperature_threshold(TemperatureThreshold::AcousticCurr) {
-                info.temp_limit_c = cur;
-                info.temp_limit_min_c = device
-                    .temperature_threshold(TemperatureThreshold::AcousticMin)
-                    .unwrap_or(TEMP_LIMIT_FLOOR);
-                info.temp_limit_max_c = device
-                    .temperature_threshold(TemperatureThreshold::AcousticMax)
-                    .unwrap_or(90);
-                {
-                    let mut def = DEFAULT_TEMP_LIMIT.lock();
-                    if def.is_none() {
-                        *def = Some(cur);
-                    }
+        // Locked-clocks support: presence of supported graphics clocks is the
+        // proxy. A non-zero max also feeds the UI's slider range.
+        info.max_graphics_clock_mhz = max_graphics_clock(device);
+        // Core-clock locking (NVML) is replaced by NVAPI clock OFFSETS — the lock
+        // crippled GeForce to its minimum; offsets are the real Afterburner control.
+        info.supports_locked_clocks = false;
+        info.supports_clock_offset = crate::nvapi_oc::available();
+        let (c_lo, c_hi, m_lo, m_hi) = crate::nvapi_oc::ranges();
+        info.core_offset_min_mhz = c_lo;
+        info.core_offset_max_mhz = c_hi;
+        info.mem_offset_min_mhz = m_lo;
+        info.mem_offset_max_mhz = m_hi;
+
+        // Temp limit (thermal target). On consumer GeForce the GPU_MAX threshold is
+        // NOT settable via NVML, but the ACOUSTIC_CURR threshold IS — it's the
+        // temperature the card tries to hold (what Afterburner calls "temp limit").
+        // Read current, capture the factory default once, and probe set-ability a
+        // single time with a no-op set, caching the result.
+        if let Ok(cur) = device.temperature_threshold(TemperatureThreshold::AcousticCurr) {
+            info.temp_limit_c = cur;
+            info.temp_limit_min_c = device
+                .temperature_threshold(TemperatureThreshold::AcousticMin)
+                .unwrap_or(TEMP_LIMIT_FLOOR);
+            info.temp_limit_max_c = device
+                .temperature_threshold(TemperatureThreshold::AcousticMax)
+                .unwrap_or(90);
+            {
+                let mut def = DEFAULT_TEMP_LIMIT.lock();
+                if def.is_none() {
+                    *def = Some(cur);
                 }
-                let cached = *TEMP_LIMIT_SETTABLE.lock();
-                let settable = match cached {
-                    Some(v) => v,
-                    None => {
-                        let ok = device
-                            .set_temperature_threshold(
-                                TemperatureThreshold::AcousticCurr,
-                                cur as i32,
-                            )
-                            .is_ok();
-                        *TEMP_LIMIT_SETTABLE.lock() = Some(ok);
-                        ok
-                    }
-                };
-                info.supports_temp_limit = settable;
             }
+            let cached = *TEMP_LIMIT_SETTABLE.lock();
+            let settable = match cached {
+                Some(v) => v,
+                None => {
+                    let ok = device
+                        .set_temperature_threshold(TemperatureThreshold::AcousticCurr, cur as i32)
+                        .is_ok();
+                    *TEMP_LIMIT_SETTABLE.lock() = Some(ok);
+                    ok
+                }
+            };
+            info.supports_temp_limit = settable;
+        }
 
-            info
-        })
-        .unwrap_or_default()
+        info
+    })
+    .unwrap_or_default()
 }
 
 /// Debug probe: for every NVML temperature-threshold type, read it and attempt
@@ -390,10 +522,6 @@ pub fn gpu_oc_info_snapshot() -> GpuOcInfo {
 /// temp-limit is unsupported on consumer GeForce (and reveals any alternative
 /// settable threshold). Not wired into the GUI — used by the CLI.
 pub fn gpu_temp_probe() -> Vec<String> {
-    let handle = match GpuHandle::init() {
-        Ok(h) => h,
-        Err(e) => return vec![format!("init failed: {e}")],
-    };
     let thresholds = [
         ("GpuMax", TemperatureThreshold::GpuMax),
         ("AcousticMin", TemperatureThreshold::AcousticMin),
@@ -402,21 +530,20 @@ pub fn gpu_temp_probe() -> Vec<String> {
         ("Slowdown", TemperatureThreshold::Slowdown),
         ("Shutdown", TemperatureThreshold::Shutdown),
     ];
-    handle
-        .with_device(|device| {
-            let mut out = Vec::new();
-            for (name, t) in thresholds {
-                match device.temperature_threshold(t) {
-                    Ok(cur) => match device.set_temperature_threshold(t, cur as i32) {
-                        Ok(()) => out.push(format!("{name}: read={cur}C  SET=OK (SETTABLE)")),
-                        Err(e) => out.push(format!("{name}: read={cur}C  SET=Err({e})")),
-                    },
-                    Err(e) => out.push(format!("{name}: read=Err({e})")),
-                }
+    with_device(|device| {
+        let mut out = Vec::new();
+        for (name, t) in thresholds {
+            match device.temperature_threshold(t) {
+                Ok(cur) => match device.set_temperature_threshold(t, cur as i32) {
+                    Ok(()) => out.push(format!("{name}: read={cur}C  SET=OK (SETTABLE)")),
+                    Err(e) => out.push(format!("{name}: read={cur}C  SET=Err({e})")),
+                },
+                Err(e) => out.push(format!("{name}: read=Err({e})")),
             }
-            out
-        })
-        .unwrap_or_else(|e| vec![format!("init failed: {e}")])
+        }
+        out
+    })
+    .unwrap_or_else(|e| vec![format!("init failed: {e}")])
 }
 
 /// Apply the requested tuning changes. Each control is attempted independently;
@@ -435,10 +562,9 @@ pub async fn gpu_oc_apply(settings: GpuOcSettings) -> Result<(), String> {
 /// Synchronous body of [`gpu_oc_apply`], also called directly by the CLI probe
 /// (which has no async runtime), mirroring `gpu_engine_loads_now`.
 pub fn gpu_oc_apply_impl(settings: GpuOcSettings) -> Result<(), String> {
-    let handle = GpuHandle::init()?;
     // All mutations run inside `with_device`; the closure returns the collapsed
     // per-control result, and `?` propagates a device-acquisition failure.
-    handle.with_device(|device| {
+    with_device(|device| {
         // Count requested controls so we can return Err only if ALL of them failed.
         let mut requested = 0usize;
         let mut failures: Vec<String> = Vec::new();
@@ -511,8 +637,7 @@ pub fn gpu_oc_apply_impl(settings: GpuOcSettings) -> Result<(), String> {
             // have no baseline (or worse, a baseline equal to an already-applied
             // value). Read the live current threshold and store it once.
             if DEFAULT_TEMP_LIMIT.lock().is_none() {
-                if let Ok(cur) = device.temperature_threshold(TemperatureThreshold::AcousticCurr)
-                {
+                if let Ok(cur) = device.temperature_threshold(TemperatureThreshold::AcousticCurr) {
                     let mut def = DEFAULT_TEMP_LIMIT.lock();
                     if def.is_none() {
                         *def = Some(cur);
@@ -534,7 +659,9 @@ pub fn gpu_oc_apply_impl(settings: GpuOcSettings) -> Result<(), String> {
         }
 
         finish(requested, failures)
-    })?
+    })??;
+    *GPU_SNAPSHOT.lock() = Arc::new(build_gpu_info());
+    Ok(())
 }
 
 /// Async wrapper: NVML writes off the main thread (see gpu_oc_apply).
@@ -549,8 +676,7 @@ pub async fn gpu_oc_reset() -> Result<(), String> {
 /// returns `Err` only when every attempted reset failed.
 /// Synchronous body of [`gpu_oc_reset`], also called directly by the CLI probe.
 pub fn gpu_oc_reset_impl() -> Result<(), String> {
-    let handle = GpuHandle::init()?;
-    handle.with_device(|device| {
+    with_device(|device| {
         let mut requested = 0usize;
         let mut failures: Vec<String> = Vec::new();
 
@@ -637,7 +763,9 @@ pub fn gpu_oc_reset_impl() -> Result<(), String> {
         }
 
         finish(requested, failures)
-    })?
+    })??;
+    *GPU_SNAPSHOT.lock() = Arc::new(build_gpu_info());
+    Ok(())
 }
 
 /// Collapse per-control outcomes into a single command result: `Ok` if nothing

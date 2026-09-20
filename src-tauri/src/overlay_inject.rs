@@ -42,7 +42,6 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 use crate::overlay::{classify_target, is_anticheat_protected, GraphicsApi, OverlayTarget};
-use crate::state::AppState;
 
 /// File name of the injectable overlay DLL (built by `cargo build -p
 /// corepilot-overlay --release`). Resolved next to the running executable, with
@@ -59,8 +58,14 @@ const SAMPLE_PERIOD: Duration = Duration::from_millis(333);
 /// sets a specific layout. "Show everything" — the sampler writes the
 /// unavailable sentinel (NaN / `u32::MAX`) for metrics this machine can't read,
 /// and the DLL renders `—` for those, so an all-on default degrades cleanly.
-const DEFAULT_LAYOUT_FLAGS: u32 =
-    show::FPS | show::FRAMETIME | show::CPU | show::GPU | show::VRAM | show::RAM | show::DISK | show::NET;
+const DEFAULT_LAYOUT_FLAGS: u32 = show::FPS
+    | show::FRAMETIME
+    | show::CPU
+    | show::GPU
+    | show::VRAM
+    | show::RAM
+    | show::DISK
+    | show::NET;
 
 /// Shared writer + attach state. The `OsdShared` writer mapping lives here for the
 /// whole app lifetime (created in [`start_sampler`]); `target_pid` is the PID the
@@ -151,8 +156,29 @@ pub struct OverlayStatus {
     pub mode: OverlayMode,
     /// Localised explanation, e.g. "检测到反作弊，已自动改用窗口叠加（避免封号）".
     pub reason: String,
+    pub reason_zh: String,
+    pub reason_en: String,
     /// Whether the injected overlay is currently attached to this exact PID.
     pub attached: bool,
+}
+
+impl Default for OverlayStatus {
+    fn default() -> Self {
+        let target = OverlayTarget {
+            pid: 0,
+            api: GraphicsApi::Unknown,
+            anticheat: false,
+            injectable: false,
+        };
+        Self {
+            target,
+            mode: OverlayMode::None,
+            reason: "未检测到前台游戏".into(),
+            reason_zh: "未检测到前台游戏".into(),
+            reason_en: "No foreground game detected".into(),
+            attached: false,
+        }
+    }
 }
 
 /// u64 bytes → u32 MB, saturating. `u32::MAX` is the block's "unavailable"
@@ -174,15 +200,10 @@ fn opt_f64_as_f32(v: Option<f64>) -> f32 {
 /// seqlock with `enabled = 1`. The metric→field mapping mirrors the frontend
 /// `src/lib/osd.ts` (`OSD_METRICS` / `fetchOsdData`) one-for-one so the in-frame
 /// overlay and the window overlay always agree on sources and fallbacks.
-fn publish_metrics(writer: &OsdShared, app: &AppHandle, pid: u32, flags: u32, row_colors: [u32; row::COUNT]) {
-    // --- system CPU + memory (shared `System` in AppState) ---
-    let metrics = {
-        let state = app.state::<AppState>();
-        let mut sys = state.sys.lock();
-        crate::sysmon::sample(&mut sys)
-    };
-    // --- telemetry sidecar + PDH (temps/power/clock/disk/net/vram fallback) ---
-    let sensors = crate::sensors::sample();
+fn publish_metrics(writer: &OsdShared, pid: u32, flags: u32, row_colors: [u32; row::COUNT]) {
+    // Use single-owner snapshots; re-sampling here shares PDH state and state.sys.
+    let metrics = crate::sampler::metrics_snapshot();
+    let sensors = crate::sampler::sensors_snapshot();
     // --- NVML GPU snapshot (preferred for GPU util/temp/power/clocks/VRAM) ---
     let gpu = crate::gpu::gpu_oc_info_snapshot();
     // --- frame pacing for THIS pid (not the foreground) ---
@@ -207,13 +228,28 @@ fn publish_metrics(writer: &OsdShared, app: &AppHandle, pid: u32, flags: u32, ro
     };
     // Clocks/fan only come from NVML; 0 from NVML means "unknown" → sentinel.
     let nonzero = |v: u32| (v != 0).then_some(v as f32);
-    let gpu_clock = if gpu.available { nonzero(gpu.graphics_clock) } else { None };
-    let gpu_mem_clock = if gpu.available { nonzero(gpu.mem_clock) } else { None };
-    let gpu_fan = if gpu.available { Some(gpu.fan_speed_pct as f32) } else { None };
+    let gpu_clock = if gpu.available {
+        nonzero(gpu.graphics_clock)
+    } else {
+        None
+    };
+    let gpu_mem_clock = if gpu.available {
+        nonzero(gpu.mem_clock)
+    } else {
+        None
+    };
+    let gpu_fan = if gpu.available {
+        Some(gpu.fan_speed_pct as f32)
+    } else {
+        None
+    };
 
     // VRAM: prefer NVML used/total, else the PDH/DXGI sidecar values.
     let (vram_used_mb, vram_total_mb) = if gpu.available && gpu.mem_total_bytes > 0 {
-        (bytes_to_mb(gpu.mem_used_bytes), bytes_to_mb(gpu.mem_total_bytes))
+        (
+            bytes_to_mb(gpu.mem_used_bytes),
+            bytes_to_mb(gpu.mem_total_bytes),
+        )
     } else if let (Some(used), Some(total)) = (sensors.vram_used, sensors.vram_total) {
         (bytes_to_mb(used), bytes_to_mb(total))
     } else {
@@ -222,7 +258,10 @@ fn publish_metrics(writer: &OsdShared, app: &AppHandle, pid: u32, flags: u32, ro
 
     // RAM from the system sample (bytes → MB).
     let (ram_used_mb, ram_total_mb) = if metrics.mem_total > 0 {
-        (bytes_to_mb(metrics.mem_used), bytes_to_mb(metrics.mem_total))
+        (
+            bytes_to_mb(metrics.mem_used),
+            bytes_to_mb(metrics.mem_total),
+        )
     } else {
         (u32::MAX, u32::MAX)
     };
@@ -335,7 +374,7 @@ pub fn start_sampler(app: AppHandle) {
                             // deadlock: overlay_set_palette never holds ROW_COLORS
                             // while awaiting STATE.
                             let row_colors = *ROW_COLORS.lock();
-                            publish_metrics(writer, &app, pid, flags, row_colors);
+                            publish_metrics(writer, pid, flags, row_colors);
                         }
                     }
                     _ => write_disabled(),
@@ -348,7 +387,7 @@ pub fn start_sampler(app: AppHandle) {
 }
 
 /// Publish `enabled = 0` (overlay hides) without touching the metric fields.
-fn write_disabled() {
+pub(crate) fn write_disabled() {
     if let Some(writer) = STATE.lock().writer.as_ref() {
         writer.write(|b| b.enabled = 0);
     }
@@ -450,18 +489,34 @@ fn resolve_overlay_dll(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// Localised reason string for a classification + mode.
-fn reason_for(target: &OverlayTarget, mode: OverlayMode) -> String {
+fn reason_for(target: &OverlayTarget, mode: OverlayMode) -> (String, String) {
     match mode {
-        OverlayMode::Inject => format!("✅ 可注入（{}）", api_label(target.api)),
-        OverlayMode::Window if target.anticheat => {
-            "⚠️ 检测到反作弊，已自动改用窗口叠加（避免封号）".to_string()
+        OverlayMode::Inject => {
+            let a = api_label(target.api);
+            (format!("✅ 可注入（{a}）"), format!("✅ Injectable ({a})"))
         }
+        OverlayMode::Window if target.anticheat => (
+            "⚠️ 检测到反作弊，已自动改用窗口叠加（避免封号）".into(),
+            "⚠️ Anti-cheat detected; using window overlay to avoid a ban".into(),
+        ),
         OverlayMode::Window => match target.api {
-            GraphicsApi::Vulkan => "⚠️ Vulkan 暂不支持注入，已改用窗口叠加".to_string(),
-            GraphicsApi::Unknown => "⚠️ 未检测到受支持的图形 API，已改用窗口叠加".to_string(),
-            _ => "⚠️ 不支持的图形 API，已改用窗口叠加".to_string(),
+            GraphicsApi::Vulkan => (
+                "⚠️ Vulkan 暂不支持注入，已改用窗口叠加".into(),
+                "⚠️ Vulkan injection is not supported; using window overlay".into(),
+            ),
+            GraphicsApi::Unknown => (
+                "⚠️ 未检测到受支持的图形 API，已改用窗口叠加".into(),
+                "⚠️ No supported graphics API detected; using window overlay".into(),
+            ),
+            _ => (
+                "⚠️ 不支持的图形 API，已改用窗口叠加".into(),
+                "⚠️ Unsupported graphics API; using window overlay".into(),
+            ),
         },
-        OverlayMode::None => "未检测到前台游戏".to_string(),
+        OverlayMode::None => (
+            "未检测到前台游戏".into(),
+            "No foreground game detected".into(),
+        ),
     }
 }
 
@@ -570,6 +625,8 @@ fn overlay_attach_blocking(
                 // Distinct from the probe's "可注入": the DLL is now injected and
                 // drawing in the game's own frame (so it follows the game window).
                 reason: format!("✅ 已注入（{}）", api_label(target.api)),
+                reason_zh: format!("✅ 已注入（{}）", api_label(target.api)),
+                reason_en: format!("✅ Injected ({})", api_label(target.api)),
                 target,
                 mode,
                 attached: true,
@@ -577,20 +634,31 @@ fn overlay_attach_blocking(
         }
         OverlayMode::Window => {
             // Anti-cheat or unsupported API: the window overlay is the safe path.
-            let _ = crate::osd::osd_set_visible(app.clone(), true);
+            let h = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                let _ = crate::osd::osd_set_visible(h, true);
+            });
+            let (reason_zh, reason_en) = reason_for(&target, mode);
             Ok(OverlayStatus {
-                reason: reason_for(&target, mode),
+                reason: reason_zh.clone(),
+                reason_zh,
+                reason_en,
                 target,
                 mode,
                 attached: false,
             })
         }
-        OverlayMode::None => Ok(OverlayStatus {
-            reason: reason_for(&target, mode),
-            target,
-            mode,
-            attached: false,
-        }),
+        OverlayMode::None => {
+            let (reason_zh, reason_en) = reason_for(&target, mode);
+            Ok(OverlayStatus {
+                reason: reason_zh.clone(),
+                reason_zh,
+                reason_en,
+                target,
+                mode,
+                attached: false,
+            })
+        }
     }
 }
 
@@ -701,18 +769,21 @@ pub fn overlay_set_palette(row_colors: Vec<u32>) -> Result<(), String> {
 /// the current foreground app (via [`crate::fps::foreground_pid_public`]). Lets the
 /// UI explain what's happening ("injectable (DX12)" / "anti-cheat → window" / …).
 #[tauri::command]
-pub fn overlay_status(pid: Option<u32>) -> OverlayStatus {
-    let resolved_pid = match pid {
-        Some(p) => p,
-        None => crate::fps::foreground_pid_public(),
-    };
-    let target = classify_target(resolved_pid);
-    let mode = mode_for(&target);
-    let attached = STATE.lock().target_pid == Some(resolved_pid) && resolved_pid != 0;
-    OverlayStatus {
-        reason: reason_for(&target, mode),
-        target,
-        mode,
-        attached,
-    }
+pub async fn overlay_status(pid: Option<u32>) -> OverlayStatus {
+    crate::commands::run_blocking_default("overlay_status", move || {
+        let resolved_pid = pid.unwrap_or_else(crate::fps::foreground_pid_public);
+        let target = classify_target(resolved_pid);
+        let mode = mode_for(&target);
+        let attached = STATE.lock().target_pid == Some(resolved_pid) && resolved_pid != 0;
+        let (reason_zh, reason_en) = reason_for(&target, mode);
+        OverlayStatus {
+            reason: reason_zh.clone(),
+            reason_zh,
+            reason_en,
+            target,
+            mode,
+            attached,
+        }
+    })
+    .await
 }

@@ -49,14 +49,6 @@ use tauri::AppHandle;
 
 use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateSolidBrush,
-    DeleteDC, DeleteObject, EndPaint, FillRect, GetMonitorInfoW, GetTextExtentPoint32W,
-    InvalidateRect, MonitorFromWindow, SelectObject, SetBkMode, SetTextColor, TextOutW,
-    ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE, FW_BOLD,
-    FW_NORMAL, GetDC, HBITMAP, HBRUSH, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, SRCCOPY, TRANSPARENT,
-};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
 };
@@ -73,6 +65,14 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateSolidBrush,
+    DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetMonitorInfoW, GetTextExtentPoint32W,
+    InvalidateRect, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TextOutW,
+    ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE, FW_BOLD,
+    FW_NORMAL, HBITMAP, HBRUSH, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
+};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{
     SHAppBarMessage, SHQueryUserNotificationState, ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP,
@@ -82,10 +82,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows, FindWindowW,
     GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowLongW, GetWindowRect, KillTimer,
     LoadCursorW, PostQuitMessage, RegisterClassW, SetLayeredWindowAttributes, SetTimer,
-    SetWindowPos, ShowWindow, TranslateMessage, GWL_STYLE, HWND_TOPMOST, IDC_ARROW, MSG,
-    SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_PAINT,
-    WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZE, WS_POPUP, WS_THICKFRAME, LWA_COLORKEY,
+    SetWindowPos, ShowWindow, TranslateMessage, GWL_STYLE, HWND_TOPMOST, IDC_ARROW, LWA_COLORKEY,
+    MSG, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_ENDSESSION, WM_PAINT, WM_TIMER,
+    WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_MAXIMIZE, WS_POPUP, WS_THICKFRAME,
 };
 
 /// Ensures the native window thread is spawned at most once (mirrors
@@ -452,7 +452,11 @@ impl TickCfg {
             size: if custom { cfg.size } else { d.size },
             bold: if custom { cfg.bold } else { d.bold },
             item_space: if custom { cfg.item_space } else { d.item_space },
-            inner_space: if custom { cfg.inner_space } else { d.inner_space },
+            inner_space: if custom {
+                cfg.inner_space
+            } else {
+                d.inner_space
+            },
             padding: if custom { cfg.padding } else { d.padding },
             colors_enabled: cfg.colors_enabled,
             bg: cfg.bg,
@@ -656,13 +660,9 @@ impl Readings {
         match key {
             "cpu.util" => self.cpu_util.map(|v| ("CPU", format!("{:.1}%", v))),
             "cpu.temp" => self.cpu_temp.map(|v| ("CPU", format!("{:.1}°C", v))),
-            "cpu.freq" => self
-                .cpu_clock
-                .map(|v| ("CCLK", format!("{:.0}MHz", v))),
+            "cpu.freq" => self.cpu_clock.map(|v| ("CCLK", format!("{:.0}MHz", v))),
             "cpu.power" => self.cpu_power.map(|v| ("CPU", format!("{:.0}W", v))),
-            "mem.used" => self
-                .mem_used
-                .map(|v| ("RAM", fmt_bytes(v as f64, 1))),
+            "mem.used" => self.mem_used.map(|v| ("RAM", fmt_bytes(v as f64, 1))),
             "mem.util" => self.mem_pct.map(|v| ("RAM", format!("{:.0}%", v))),
             "gpu.util" => self.gpu_util.map(|v| ("GPU", format!("{:.1}%", v))),
             "gpu.temp" => self.gpu_temp.map(|v| ("GPU", format!("{:.1}°C", v))),
@@ -671,9 +671,7 @@ impl Readings {
             "gpu.memClock" => self.gpu_mem_clock.map(|v| ("GPU", format!("{:.0}MHz", v))),
             "gpu.fan" => self.gpu_fan.map(|v| ("GPU", format!("{:.0}%", v))),
             "gpu.vramPct" => self.gpu_vram_pct.map(|v| ("GPU", format!("{:.0}%", v))),
-            "gpu.vramUsed" => self
-                .gpu_vram_used
-                .map(|v| ("GPU", fmt_bytes(v as f64, 1))),
+            "gpu.vramUsed" => self.gpu_vram_used.map(|v| ("GPU", fmt_bytes(v as f64, 1))),
             "disk.util" => self.disk_util.map(|v| ("DISK", format!("{:.0}%", v))),
             // Disk read/write: a small "R"/"W" mini-label drawn inline with the rate
             // (same inline-glyph pattern as net.up/down's ▲/▼ — see `tick`).
@@ -904,15 +902,14 @@ unsafe fn init_d2d(rs: &mut RenderState) {
     if rs.d2d_factory.is_some() && rs.dwrite_factory.is_some() && rs.dc_target.is_some() {
         return;
     }
-    let factory: ID2D1Factory =
-        match D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::warn!("taskbar monitor: D2D1CreateFactory failed: {e}");
-                rs.use_d2d = false;
-                return;
-            }
-        };
+    let factory: ID2D1Factory = match D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!("taskbar monitor: D2D1CreateFactory failed: {e}");
+            rs.use_d2d = false;
+            return;
+        }
+    };
     let dwrite: IDWriteFactory = match DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) {
         Ok(f) => f,
         Err(e) => {
@@ -944,7 +941,12 @@ unsafe fn init_d2d(rs: &mut RenderState) {
     };
     // White brush; color is re-set per segment in paint.
     let brush = match target.CreateSolidColorBrush(
-        &D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+        &D2D1_COLOR_F {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        },
         None,
     ) {
         Ok(b) => b,
@@ -1119,9 +1121,7 @@ unsafe fn foreground_is_fullscreen() -> bool {
     // caption or a sizing (thick) frame — i.e. all normal/maximized apps. A
     // borderless fullscreen game has none of these.
     let style = GetWindowLongW(fg, GWL_STYLE) as u32;
-    if (style & WS_MAXIMIZE.0) != 0
-        || (style & WS_CAPTION.0) != 0
-        || (style & WS_THICKFRAME.0) != 0
+    if (style & WS_MAXIMIZE.0) != 0 || (style & WS_CAPTION.0) != 0 || (style & WS_THICKFRAME.0) != 0
     {
         return false;
     }
@@ -1267,7 +1267,14 @@ unsafe fn tick() {
                     width: lw,
                     class: FieldClass::Other,
                 };
-                groups.push((cat, Group { label, values: vec![vseg], width: 0 }));
+                groups.push((
+                    cat,
+                    Group {
+                        label,
+                        values: vec![vseg],
+                        width: 0,
+                    },
+                ));
             }
         }
 
@@ -1297,8 +1304,7 @@ unsafe fn tick() {
         // (worst-case field widths, not the momentary live string widths).
         for (_, g) in groups.iter_mut() {
             g.width = g.label.width
-                + g
-                    .values
+                + g.values
                     .iter()
                     .map(|v| inner + class_w(v.class, v.width))
                     .sum::<i32>();
@@ -1399,7 +1405,11 @@ unsafe fn tick() {
         // Rows with no Block-A anchor start Block B at `pad` (single-line, or a row
         // whose first group isn't CPU/GPU).
         let block_a_w = lw_a + fw_a.iter().map(|w| inner + w).sum::<i32>();
-        let block_b_x = if lw_a > 0 { pad + block_a_w + item } else { pad };
+        let block_b_x = if lw_a > 0 {
+            pad + block_a_w + item
+        } else {
+            pad
+        };
 
         // Cursor walk → absolute `x`/`field_w` per cell. Returns the row's end x.
         let mut cells_layout: Vec<Vec<Cell>> = Vec::with_capacity(rows_layout.len());
@@ -1637,7 +1647,10 @@ unsafe fn paint(rs: &mut RenderState) {
 
     let mut rect = RECT::default();
     let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(rs.hwnd, &mut rect);
-    let (w, h) = ((rect.right - rect.left).max(1), (rect.bottom - rect.top).max(1));
+    let (w, h) = (
+        (rect.right - rect.left).max(1),
+        (rect.bottom - rect.top).max(1),
+    );
 
     // (Re)build the cached back buffer on size change only — never per paint.
     if rs.buf_dc.is_invalid() || rs.buf_size != (w, h) || rs.buf_bmp.is_invalid() {
@@ -1660,7 +1673,11 @@ unsafe fn paint(rs: &mut RenderState) {
     // window-switch / tray / Start-menu blink.
     if !rs.buf_dc.is_invalid() && !rs.buf_bmp.is_invalid() {
         let mem = rs.buf_dc;
-        let drawn = if rs.use_d2d { paint_d2d(rs, mem, &rect) } else { false };
+        let drawn = if rs.use_d2d {
+            paint_d2d(rs, mem, &rect)
+        } else {
+            false
+        };
         if !drawn {
             paint_gdi(rs, mem, &rect);
         }
@@ -1668,7 +1685,11 @@ unsafe fn paint(rs: &mut RenderState) {
     } else {
         // Buffer allocation failed (out of GDI handles?) — draw direct rather
         // than blank.
-        let drawn = if rs.use_d2d { paint_d2d(rs, hdc, &rect) } else { false };
+        let drawn = if rs.use_d2d {
+            paint_d2d(rs, hdc, &rect)
+        } else {
+            false
+        };
         if !drawn {
             paint_gdi(rs, hdc, &rect);
         }
@@ -1774,14 +1795,11 @@ unsafe fn paint_gdi(rs: &RenderState, hdc: HDC, rect: &RECT) {
 }
 
 /// Window procedure. Runs on the render thread (the only thread that pumps this
-/// window's messages). Handles the repaint/re-dock timer, owner-draw paint, and
-/// teardown. Everything else falls through to `DefWindowProcW`.
-unsafe extern "system" fn wndproc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+/// window's messages). Handles the repaint/re-dock timer, owner-draw paint,
+/// teardown, and — because this is the process's only window the session manager
+/// talks to — the `WM_ENDSESSION` hardware restore. Everything else falls
+/// through to `DefWindowProcW`.
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_TIMER => {
             if wparam.0 == TICK_TIMER {
@@ -1795,6 +1813,31 @@ unsafe extern "system" fn wndproc(
                     paint(rs);
                 }
             });
+            LRESULT(0)
+        }
+        WM_ENDSESSION => {
+            // Windows shutdown / logoff / fast-user-switch. Nothing else in this
+            // process hears about it: there is no `RunEvent::Exit`, so without
+            // this arm the sidecar is never told `autoall` and the Nuvoton keeps
+            // the last software PWM — fans pinned at e.g. 25% across the reboot
+            // with the BIOS not back in control. This window is a real top-level
+            // WS_POPUP with a null parent, created unconditionally at startup,
+            // so the session manager does deliver the message here.
+            // `wparam == TRUE` means the session really is ending (a FALSE means
+            // the shutdown was cancelled — restoring fans then would be wrong).
+            // `shutdown_teardown` is once-guarded (AcqRel), so calling it from
+            // this thread is idempotent and safe alongside the normal exit path.
+            if wparam.0 != 0 {
+                // Raise the shutdown flag FIRST. tao's own WM_ENDSESSION handler
+                // moves its event-loop runner to `Destroyed`; any background
+                // thread that then posts a closure (the main-thread watchdog at
+                // 2 s, the OSD keep-alive at 60 s) panics in
+                // `runner.rs: cannot move state from Destroyed` — 5 of the 6
+                // entries in crash.log, each 2-22 s after a shutdown began. Those
+                // threads check this flag before posting.
+                crate::SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::updater::shutdown_teardown();
+            }
             LRESULT(0)
         }
         WM_DESTROY => {

@@ -38,6 +38,13 @@ const EMPTY: OsdData = { metrics: null, sensors: null, gpu: null, fps: null };
 /** Poll interval for the foreground app + metrics (ms). */
 const TICK_MS = 1000;
 
+/** Grid the overlay window's size is snapped up to. MUST stay equal to
+ *  `OSD_SIZE_QUANTUM` in src-tauri/src/osd.rs: the backend rounds the requested
+ *  size up to it (so metric-driven width jitter stops churning WebView2 surface
+ *  resizes, which leak GDI objects upstream), and the centered positions here
+ *  round to the same grid so the plate stops sliding sideways as digits change. */
+const OSD_SIZE_QUANTUM = 16;
+
 /** OLED anti burn-in: how often to nudge the overlay, and the small inward
  *  pixel offsets it cycles through (kept tiny so the plate never clips). */
 const OLED_SHIFT_MS = 45_000;
@@ -167,6 +174,18 @@ export function OsdOverlay() {
     let alive = true;
     let inFlight = false;
     const tick = async () => {
+      // Page-liveness beat, FIRST — before every early return below. This is the
+      // only signal the backend has that the overlay's RENDERER is still alive:
+      // wry installs no WebView2 ProcessFailed handler, so a crashed OSD page
+      // leaves a live, transparent, topmost window rendering nothing, and every
+      // backend self-heal (keep-alive, z-order re-assert) sees a perfectly
+      // healthy window. The Rust guard reloads, then rebuilds, a window whose
+      // page stops beating for 180 s. It has to be ahead of BOTH short-circuits:
+      // the backpressure return (a wedged backend is not a dead page — reloading
+      // would not help) and the idle/parked return below (an overlay parked
+      // off-screen is idle by design and must keep beating, or it would be
+      // rebuilt every 3 minutes forever).
+      api.osdHeartbeat().catch(() => {});
       // Backpressure: never overlap polls. If the previous tick's invokes haven't
       // resolved (slow/wedged backend), skip this one instead of piling up.
       if (inFlight) return;
@@ -189,9 +208,6 @@ export function OsdOverlay() {
       if (!alive) return;
       const exe = info?.exe ?? null;
       const isGame = info?.isGame ?? false;
-      // Only commit a NEW fg snapshot when it actually changed — a fresh object
-      // every tick re-rendered the whole overlay tree once a second forever.
-      setFg((p) => (p.exe === exe && p.isGame === isGame ? p : { exe, isGame }));
       // Resolve visibility from the JUST-fetched foreground info + live store
       // state — NOT the stale `show` closed over from the previous render. This
       // lets a game gaining focus fetch its metrics in the SAME tick, so the
@@ -206,14 +222,7 @@ export function OsdOverlay() {
       const whitelisted = !!n && tgts.some((t) => t.name === n && t.list === "white");
       const followFg = !!info && (isGame || whitelisted);
       const m = followFg ? await api.osdTargetMonitor().catch(() => null) : null;
-      // Same-value dedupe: the monitor tuple is a fresh array each fetch; only
-      // commit when the bounds actually changed.
-      if (alive)
-        setMon((p) =>
-          p === m || (p && m && p[0] === m[0] && p[1] === m[1] && p[2] === m[2] && p[3] === m[3])
-            ? p
-            : m,
-        );
+      let d: OsdData | null = null;
       if (showNow) {
         // Derive the fetch flags from the freshly-resolved config + foreground
         // kind (desktop hides FPS), so the right data is fetched on the first
@@ -221,14 +230,37 @@ export function OsdOverlay() {
         const metrics = isGame
           ? freshCfg.metrics
           : freshCfg.metrics.filter((k) => !k.startsWith("fps"));
-        const d = await withTimeout(
+        d = await withTimeout(
           fetchOsdData(
             metrics.some((k) => k.startsWith("gpu.")),
             metrics.some((k) => k.startsWith("fps")),
           ),
         );
-        if (alive) setData(d);
       }
+      if (!alive) return;
+      // ATOMIC COMMIT — all three pieces land in ONE render.
+      //
+      // These used to be committed as they arrived, with an `await` between each,
+      // so React flushed a separate render per piece: first the new foreground
+      // alongside the PREVIOUS monitor and the PREVIOUS plate data, then the
+      // monitor, then the data. The layout effect ran on every one of those, so
+      // on each app switch the window was placed using the old monitor and a
+      // plate measured from stale (often narrower) values — visibly off, worst of
+      // all for a centered position, where x is `(monitorW - plateW) / 2` and a
+      // wrong plateW offsets it by half the error. It then jumped into place over
+      // the next two renders. Harmless while the overlay was still being demoted
+      // behind the game, but `osd_set_bounds` now re-asserts HWND_TOPMOST on every
+      // push (see osd.rs), so that first wrong placement became visible.
+      // Committing together costs the overlay one data fetch of extra latency on
+      // the tick a game appears, and in exchange it appears already correct
+      // instead of appearing crooked and sliding over.
+      setFg((p) => (p.exe === exe && p.isGame === isGame ? p : { exe, isGame }));
+      setMon((p) =>
+        p === m || (p && m && p[0] === m[0] && p[1] === m[1] && p[2] === m[2] && p[3] === m[3])
+          ? p
+          : m,
+      );
+      if (d) setData(d);
       } finally {
         inFlight = false;
       }
@@ -263,6 +295,19 @@ export function OsdOverlay() {
     const r = el.getBoundingClientRect();
     const w = Math.max(1, Math.ceil(r.width));
     const h = Math.max(1, Math.ceil(r.height));
+    // Width used ONLY for the centered positions, snapped up to the same grid the
+    // backend snaps the window size to (OSD_SIZE_QUANTUM in osd.rs).
+    //
+    // A centered plate sits at `(monitorW - plateW) / 2`, so every change in plate
+    // width moves it by HALF that change — and the plate is as wide as its digits:
+    // one FPS reading dropping from three digits to two shrinks it by ~12 px and
+    // slides the whole overlay 6 px sideways, several times a second. (The corner
+    // positions are immune: they anchor to an edge, so width changes only grow the
+    // plate inward.) Snapping the centering width to the 16 px grid means x only
+    // moves when the window itself is resized, which the same grid already makes
+    // rare. `w` — not centerW — still drives the size and the clamp, so the plate
+    // is never clipped and never pushed off the monitor edge.
+    const centerW = Math.ceil(w / OSD_SIZE_QUANTUM) * OSD_SIZE_QUANTUM;
     // Anchor to the game's monitor when following one (mon), else the primary
     // monitor's work area. mon is only set for a foreground game (see tick).
     const [mx, my, mw, mh] = mon ?? [0, 0, window.screen.availWidth, window.screen.availHeight];
@@ -278,7 +323,7 @@ export function OsdOverlay() {
       y = my + Math.min(Math.max(cfg.freeY * mh, 0), Math.max(0, mh - h));
     } else {
       x = center
-        ? mx + Math.min(Math.max((mw - w) / 2 + ox, 0), Math.max(0, mw - w))
+        ? mx + Math.min(Math.max((mw - centerW) / 2 + ox, 0), Math.max(0, mw - w))
         : left
           ? mx + margin + ox
           : mx + mw - w - margin - ox;

@@ -19,8 +19,8 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::ChildStdin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -38,6 +38,7 @@ struct Raw {
     controls: Vec<(String, String, Option<f32>, bool, String)>,
     /// Whether the sidecar has produced at least one parseable line.
     got_any: bool,
+    received_at: Option<Instant>,
 }
 
 static SNAP: Lazy<Mutex<Raw>> = Lazy::new(|| Mutex::new(Raw::default()));
@@ -66,11 +67,17 @@ static ENGINE_STARTED: AtomicBool = AtomicBool::new(false);
 /// True while an AI calibration sweep is running; pauses the engine so it does
 /// not fight the sweep's manual duty writes.
 static CALIBRATING: AtomicBool = AtomicBool::new(false);
+static SIDECAR_GENERATION: AtomicU64 = AtomicU64::new(0);
+static INGEST_GENERATION: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Try to take exclusive manual control of the fans (pauses the engine).
 /// Returns false if a calibration/tune already holds it.
 pub(crate) fn exclusive_begin() -> bool {
-    !CALIBRATING.swap(true, Ordering::SeqCst)
+    let was = CALIBRATING.swap(true, Ordering::SeqCst);
+    if !was {
+        let _ = send("interval 1000");
+    }
+    !was
 }
 
 /// Whether a calibration / auto-tune currently holds fan exclusivity. The
@@ -85,6 +92,7 @@ pub(crate) fn exclusive_active() -> bool {
 /// (mirrors the tail of `fan_calibrate`).
 pub(crate) fn exclusive_end() {
     CALIBRATING.store(false, Ordering::SeqCst);
+    let _ = send("interval 1400");
     LAST.lock().clear();
     CURVE_DUTY.lock().clear();
     apply_once();
@@ -105,8 +113,15 @@ pub(crate) fn config_restore(cfgs: Vec<FanChannelConfig>) {
 
 /// Latest temperature readings by sensor id (curve sources).
 pub(crate) fn temps_by_id() -> HashMap<String, f32> {
-    SNAP.lock()
-        .temps
+    let raw = SNAP.lock();
+    let fresh = raw
+        .received_at
+        .map(|t| t.elapsed() <= Duration::from_secs(10))
+        .unwrap_or(false);
+    if !fresh {
+        return HashMap::new();
+    }
+    raw.temps
         .iter()
         .filter_map(|(id, _, v)| v.map(|x| (id.clone(), x)))
         .collect()
@@ -231,6 +246,7 @@ pub fn register_sidecar_stdin(stdin: ChildStdin) {
 pub fn clear() {
     *SNAP.lock() = Raw::default();
     *SIDECAR_STDIN.lock() = None;
+    SIDECAR_GENERATION.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Parse one sidecar JSON line and update the snapshot. Unknown shapes are
@@ -264,6 +280,7 @@ pub fn ingest_line(line: &str) {
     };
 
     let mut raw = Raw::default();
+    raw.received_at = Some(Instant::now());
 
     if let Some(arr) = json.get("fans").and_then(|v| v.as_array()) {
         for f in arr {
@@ -298,6 +315,11 @@ pub fn ingest_line(line: &str) {
         json.get("fans").is_some() || json.get("controls").is_some() || json.get("temps").is_some();
 
     if raw.got_any {
+        let generation = SIDECAR_GENERATION.load(Ordering::SeqCst);
+        if INGEST_GENERATION.swap(generation, Ordering::SeqCst) != generation {
+            LAST.lock().clear();
+            CURVE_DUTY.lock().clear();
+        }
         *SNAP.lock() = raw;
     }
 }
@@ -335,31 +357,33 @@ pub fn send_command(cmd: &str) -> bool {
 }
 
 /// Write a single line command to the sidecar; drop the handle on failure.
-fn send(cmd: &str) {
+fn send(cmd: &str) -> bool {
     let mut guard = SIDECAR_STDIN.lock();
     let Some(stdin) = guard.as_mut() else {
-        return;
+        return false;
     };
     let line = format!("{cmd}\n");
     if stdin.write_all(line.as_bytes()).is_err() || stdin.flush().is_err() {
         *guard = None; // sidecar gone — stop trying until re-registered
+        return false;
     }
+    true
 }
 
-pub(crate) fn send_set(id: &str, pct: f32) {
+pub(crate) fn send_set(id: &str, pct: f32) -> bool {
     // Never forward an id that could inject extra tokens/commands into the
     // sidecar's line-oriented stdin protocol.
     if !is_valid_control_id(id) {
-        return;
+        return false;
     }
-    send(&format!("set {id} {:.0}", pct.clamp(0.0, 100.0)));
+    send(&format!("set {id} {:.0}", pct.clamp(0.0, 100.0)))
 }
 
-fn send_auto(id: &str) {
+fn send_auto(id: &str) -> bool {
     if !is_valid_control_id(id) {
-        return;
+        return false;
     }
-    send(&format!("auto {id}"));
+    send(&format!("auto {id}"))
 }
 
 // --- curve math ----------------------------------------------------------------
@@ -476,7 +500,9 @@ fn apply_once() {
         match c.mode.as_str() {
             "manual" => {
                 let target = c.manual_pct.clamp(floor, 100.0);
-                send_set(&c.control_id, target);
+                if !send_set(&c.control_id, target) {
+                    continue;
+                }
                 last.insert(
                     c.control_id.clone(),
                     ("manual".to_string(), target.round() as i32),
@@ -502,7 +528,9 @@ fn apply_once() {
                         .map(|(m, _)| m == "auto")
                         .unwrap_or(false);
                     if !already_auto {
-                        send_auto(&c.control_id);
+                        if !send_auto(&c.control_id) {
+                            continue;
+                        }
                         last.insert(c.control_id.clone(), ("auto".to_string(), 0));
                     }
                     // Header handed back to BIOS — forget the ramp so re-acquiring
@@ -544,7 +572,9 @@ fn apply_once() {
                 // swallowed by the hysteresis and the fan actually eases.
                 let ramping = (next - target).abs() > f32::EPSILON;
                 if changed || ramping {
-                    send_set(&c.control_id, next);
+                    if !send_set(&c.control_id, next) {
+                        continue;
+                    }
                     last.insert(c.control_id.clone(), ("curve".to_string(), di));
                 }
             }
@@ -556,7 +586,9 @@ fn apply_once() {
                     .unwrap_or(false);
                 curve_duty.remove(&c.control_id);
                 if !already_auto {
-                    send_auto(&c.control_id);
+                    if !send_auto(&c.control_id) {
+                        continue;
+                    }
                     last.insert(c.control_id.clone(), ("auto".to_string(), 0));
                 }
             }
@@ -598,6 +630,10 @@ fn split_id<'a>(id: &'a str, seg: &str) -> Option<(&'a str, &'a str)> {
 
 fn build_state() -> FanState {
     let raw = SNAP.lock().clone();
+    let fresh = raw
+        .received_at
+        .map(|t| t.elapsed() <= Duration::from_secs(10))
+        .unwrap_or(false);
 
     let temps: Vec<FanTempSource> = raw
         .temps
@@ -605,7 +641,7 @@ fn build_state() -> FanState {
         .map(|(id, name, c)| FanTempSource {
             id: id.clone(),
             name: name.clone(),
-            c: *c,
+            c: if fresh { *c } else { None },
         })
         .collect();
 
@@ -631,9 +667,9 @@ fn build_state() -> FanState {
             id: id.clone(),
             name: name.clone(),
             hw: hw.clone(),
-            pct: *pct,
+            pct: if fresh { *pct } else { None },
             controllable: *controllable,
-            rpm,
+            rpm: if fresh { rpm } else { None },
             rpm_name,
         });
     }
@@ -967,10 +1003,12 @@ pub async fn fan_calibrate(
         ));
     }
 
+    let _ = send("interval 1000");
     let result =
         tauri::async_runtime::spawn_blocking(move || calibrate_headers(&app, &targets)).await;
 
     CALIBRATING.store(false, Ordering::SeqCst);
+    let _ = send("interval 1400");
     // Force the engine to re-apply the user's real config now (LAST is stale after
     // the sweep drove the fans directly, so clear it first to defeat hysteresis).
     // Also drop the smoothed curve duties so each fan re-seeds its ramp from the

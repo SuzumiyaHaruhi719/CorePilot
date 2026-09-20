@@ -11,7 +11,11 @@
 //! process's loaded modules via ToolHelp. The sampler (writes metrics to the
 //! shared block) and the injector are wired on top of this.
 
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use serde::Serialize;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
@@ -77,6 +81,13 @@ const ANTICHEAT_MODULE_MARKERS: &[&str] = &[
 
 /// Graphics-API module markers, in detection priority order (a process can load
 /// several DXGI DLLs; resolve to the highest-level renderer first).
+const CLASSIFICATION_CACHE_TTL: Duration = Duration::from_secs(10);
+
+/// Cache module walks because status polls run every 1.5 seconds and a ToolHelp
+/// walk can stall the UI; the TTL limits stale data when a PID is recycled.
+static CLASSIFICATION_CACHE: Lazy<Mutex<HashMap<u32, (Instant, OverlayTarget)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 const API_MARKERS: &[(&str, GraphicsApi)] = &[
     ("vulkan-1.dll", GraphicsApi::Vulkan),
     ("d3d12.dll", GraphicsApi::Dx12),
@@ -179,12 +190,30 @@ pub struct OverlayTarget {
 
 /// Classify a target process for the overlay (does not inject).
 pub fn classify_target(pid: u32) -> OverlayTarget {
+    if pid == 0 {
+        return OverlayTarget {
+            pid,
+            api: GraphicsApi::Unknown,
+            anticheat: false,
+            injectable: false,
+        };
+    }
+    let now = Instant::now();
+    if let Some((at, target)) = CLASSIFICATION_CACHE.lock().get(&pid) {
+        if now.duration_since(*at) < CLASSIFICATION_CACHE_TTL {
+            return target.clone();
+        }
+    }
     let api = detect_graphics_api(pid);
     let anticheat = is_anticheat_protected(pid);
-    OverlayTarget {
+    let target = OverlayTarget {
         pid,
         api,
         anticheat,
         injectable: api.is_hookable() && !anticheat,
-    }
+    };
+    CLASSIFICATION_CACHE
+        .lock()
+        .insert(pid, (now, target.clone()));
+    target
 }

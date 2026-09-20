@@ -20,6 +20,16 @@ use corepilot_osd_ipc::{anchor, row, show, OsdShared, OsdSharedBlock};
 use imgui::{Condition, Ui, WindowFlags};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 
+// Keep the freshness clock in the injected DLL tiny and non-blocking. The
+// overlay crate intentionally does not enable the larger SystemInformation
+// Windows feature just for this one kernel32 call.
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetTickCount64() -> u64;
+}
+
+const PUBLISH_STALE_AFTER_MS: u64 = 5_000;
+
 use crate::format::{
     bps_or_dash, clock_or_dash, fixed_or_dash, int_or_dash, mem_pair_g, pct_or_dash, rgba_to_f32s,
     temp_or_dash, watts_or_dash,
@@ -49,6 +59,11 @@ pub struct OsdRenderLoop {
     reader: RenderThreadReader,
     /// Cached PID of the host process (cheap, never changes for our lifetime).
     self_pid: u32,
+    /// Last seqlock value observed and when it changed. The publisher normally
+    /// advances this every 333 ms; expiring it prevents stale metrics surviving
+    /// a CorePilot crash while the mapping handle remains open in the game.
+    last_seq: Option<u32>,
+    last_seq_change_tick: u64,
 }
 
 impl OsdRenderLoop {
@@ -61,6 +76,10 @@ impl OsdRenderLoop {
         Self {
             reader: RenderThreadReader(None),
             self_pid,
+            last_seq: None,
+            // Initialising this on construction gives a newly discovered block
+            // a normal five-second grace period on its first observed sequence.
+            last_seq_change_tick: tick_count_ms(),
         }
     }
 
@@ -77,14 +96,19 @@ impl OsdRenderLoop {
 
     /// Decide whether this frame should draw, and return the snapshot if so.
     ///
-    /// Gates, in order: a readable mapping, a valid+current block, `enabled == 1`,
-    /// and PID targeting (`target_pid == 0` means "any process", otherwise it must
-    /// match ours). Returning `None` means "draw nothing this frame".
+    /// Gates, in order: a readable mapping, a valid+current block, a fresh
+    /// publisher sequence, `enabled == 1`, and PID targeting (`target_pid == 0`
+    /// means "any process", otherwise it must match ours). Returning `None` means
+    /// "draw nothing this frame".
     fn snapshot_if_active(&mut self) -> Option<OsdSharedBlock> {
         let self_pid = self.self_pid;
-        let reader = self.reader()?;
-        let block = reader.read();
-        if !block.is_valid() || block.enabled == 0 {
+        // End the reader borrow before updating freshness state on `self`.
+        let block = {
+            let reader = self.reader()?;
+            reader.read()
+        };
+        let now = tick_count_ms();
+        if !self.sequence_is_fresh(block.seq, now) || !block.is_valid() || block.enabled == 0 {
             return None;
         }
         if block.target_pid != 0 && block.target_pid != self_pid {
@@ -92,6 +116,25 @@ impl OsdRenderLoop {
         }
         Some(block)
     }
+
+    /// Track publisher progress without waiting on the mapping or spinning in
+    /// the render path. A stuck sequence means CorePilot died mid-update (or
+    /// stopped publishing), so treating it as disabled avoids frozen numbers.
+    fn sequence_is_fresh(&mut self, seq: u32, now: u64) -> bool {
+        if self.last_seq != Some(seq) {
+            self.last_seq = Some(seq);
+            self.last_seq_change_tick = now;
+            return true;
+        }
+        now.saturating_sub(self.last_seq_change_tick) <= PUBLISH_STALE_AFTER_MS
+    }
+}
+
+#[inline]
+fn tick_count_ms() -> u64 {
+    // SAFETY: GetTickCount64 is a leaf kernel32 API with no pointer or handle
+    // arguments; it cannot block on game-owned state and is safe per frame.
+    unsafe { GetTickCount64() }
 }
 
 impl Default for OsdRenderLoop {
@@ -376,6 +419,33 @@ mod tests {
         assert_eq!(rows[0].text, "FPS 60");
         assert_eq!(rows[1].text, "赛博朋克2077");
         assert_eq!(rows[1].kind, None);
+    }
+
+    #[test]
+    fn sequence_expires_after_publisher_stops() {
+        let mut loop_state = OsdRenderLoop {
+            reader: RenderThreadReader(None),
+            self_pid: 1,
+            last_seq: None,
+            last_seq_change_tick: 0,
+        };
+        assert!(loop_state.sequence_is_fresh(8, 100));
+        assert!(loop_state.sequence_is_fresh(8, 5_100));
+        assert!(!loop_state.sequence_is_fresh(8, 5_101));
+        // Any publisher progress gives the overlay another grace period.
+        assert!(loop_state.sequence_is_fresh(10, 5_101));
+    }
+
+    #[test]
+    fn sequence_freshness_handles_tick_wrap_safely() {
+        let mut loop_state = OsdRenderLoop {
+            reader: RenderThreadReader(None),
+            self_pid: 1,
+            last_seq: None,
+            last_seq_change_tick: 0,
+        };
+        assert!(loop_state.sequence_is_fresh(3, u64::MAX));
+        assert!(loop_state.sequence_is_fresh(3, 0));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { AlertTriangle, ArrowDown, ArrowUp, ChevronRight, Loader2, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { memo, useMemo, useState, type MouseEvent } from "react";
+import { memo, useCallback, useMemo, useState, type MouseEvent } from "react";
 import { cn } from "../../lib/cn";
 import { formatBytes } from "../../lib/format";
 import { useTf } from "../../lib/i18n";
@@ -23,6 +23,16 @@ interface TmProcessTableProps {
   /** First read failed — show a retry/error state. */
   error?: boolean;
 }
+
+// Skip layout/paint for rows scrolled out of the viewport. `auto` makes the
+// browser remember each row's real height after its first paint, so scrollbar
+// size and scroll offsets stay exactly as they are today. This is a paint-cost
+// cut, NOT virtualization — every row stays in the DOM, so scroll position,
+// find-in-page and focus order are unchanged.
+// A leaf row grows to two lines when the process has a file description, hence
+// the taller placeholder; group/child rows are always single-line.
+const ROW_CV_2LINE = "[content-visibility:auto] [contain-intrinsic-size:auto_36px]";
+const ROW_CV_1LINE = "[content-visibility:auto] [contain-intrinsic-size:auto_30px]";
 
 interface HeadProps {
   k: SortKey;
@@ -186,6 +196,7 @@ const LeafRow = memo(function LeafRow({ p, cols, detailed, onEndTask, onRowConte
       onContextMenu={(e) => onRowContextMenu?.(e, p)}
       className={cn(
         "group grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] hover:bg-surface2/50",
+        ROW_CV_2LINE,
         cols,
       )}
     >
@@ -227,14 +238,19 @@ const GroupRow = memo(function GroupRow({
   expanded,
   onToggle,
   onRowContextMenu,
-}: RowProps & { g: ProcGroup; expanded: boolean; onToggle: () => void }) {
+}: RowProps & { g: ProcGroup; expanded: boolean; onToggle: (key: string) => void }) {
   return (
     <button
       type="button"
-      onClick={onToggle}
+      // The group key is closed over HERE, inside the memo, so the parent can
+      // hand every group the same stable `onToggle`. An `() => toggle(g.key)`
+      // built in the parent's map would be a new function per group per render
+      // and would defeat this component's memo on every 1.5 s poll.
+      onClick={() => onToggle(g.key)}
       onContextMenu={(e) => onRowContextMenu?.(e, g.members[0])}
       className={cn(
         "no-drag grid w-full items-center gap-2 border-b border-line/40 bg-surface2/35 px-3 py-[7px] text-left text-[12.5px] transition-colors hover:bg-surface2/70",
+        ROW_CV_1LINE,
         cols,
       )}
     >
@@ -267,6 +283,7 @@ const ChildRow = memo(function ChildRow({ p, cols, detailed, onEndTask, onRowCon
       onContextMenu={(e) => onRowContextMenu?.(e, p)}
       className={cn(
         "group grid items-center gap-2 border-b border-line/30 bg-surface/30 px-3 py-[6px] text-[12.5px] hover:bg-surface2/50",
+        ROW_CV_1LINE,
         cols,
       )}
     >
@@ -333,14 +350,14 @@ export function TmProcessTable({
     [processes, sortKey, sortDir],
   );
 
-  function toggle(key: string) {
+  const toggle = useCallback((key: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
       return next;
     });
-  }
+  }, []);
 
   const rowProps = useMemo(
     () => ({ cols, detailed, onEndTask, onRowContextMenu }),
@@ -376,7 +393,7 @@ export function TmProcessTable({
             const isOpen = expanded.has(g.key);
             return (
               <div key={g.key}>
-                <GroupRow g={g} expanded={isOpen} onToggle={() => toggle(g.key)} {...rowProps} />
+                <GroupRow g={g} expanded={isOpen} onToggle={toggle} {...rowProps} />
                 <AnimatePresence initial={false}>
                   {isOpen && (
                     <motion.div

@@ -121,9 +121,8 @@ mod imp {
     }
     #[inline]
     fn u64_at(b: &[u8], o: usize) -> Option<u64> {
-        b.get(o..o + 8).map(|s| {
-            u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]])
-        })
+        b.get(o..o + 8)
+            .map(|s| u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]))
     }
 
     /// One extracted file record (pass-1 output), indexed by MFT number.
@@ -618,7 +617,11 @@ mod imp {
                     return None;
                 }
             }
-            let mut parent_id = if cur == ROOT_MFT { 0u32 } else { node_of[cur as usize] };
+            let mut parent_id = if cur == ROOT_MFT {
+                0u32
+            } else {
+                node_of[cur as usize]
+            };
             for &dmft in chain.iter().rev() {
                 if node_of[dmft as usize] != SENTINEL {
                     parent_id = node_of[dmft as usize];
@@ -674,7 +677,13 @@ mod imp {
             };
             if rec.is_dir {
                 let _ = ensure_dir(
-                    mft, records, &mut node_of, &mut nodes, &mut interner, own_alloc, own_logical,
+                    mft,
+                    records,
+                    &mut node_of,
+                    &mut nodes,
+                    &mut interner,
+                    own_alloc,
+                    own_logical,
                     own_files,
                 );
             }
@@ -702,8 +711,14 @@ mod imp {
                 continue;
             }
             let Some(pid) = ensure_dir(
-                rec.parent_mft, records, &mut node_of, &mut nodes, &mut interner, own_alloc,
-                own_logical, own_files,
+                rec.parent_mft,
+                records,
+                &mut node_of,
+                &mut nodes,
+                &mut interner,
+                own_alloc,
+                own_logical,
+                own_files,
             ) else {
                 continue;
             };
@@ -865,26 +880,27 @@ mod imp {
                     let rec = &mut chunk[r..r + rec_size];
                     // Panic-guard the per-record parse: a malformed record must be
                     // skipped, never crash. A flood of them trips the sanity gate.
-                    let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                        if !apply_fixup(rec, bytes_per_sector) {
-                            return (false, None, (0u64, 0u64), 0u64);
-                        }
-                        // Distinguish "free record" (None, not bad) from "in-use
-                        // but unparseable" by re-checking the in-use flag.
-                        let in_use = u16_at(rec, 0x16)
-                            .map(|f| f & FLAG_RECORD_IN_USE != 0)
-                            .unwrap_or(false);
-                        let info = parse_record(rec);
-                        // Capture this record's own unnamed $DATA size — for a base
-                        // record it's the file's size; for an extension record it's
-                        // the spilled fragment a fragmented file points to.
-                        let data = unnamed_data_sizes(rec);
-                        // BaseFileRecordSegment: 0 ⇒ this IS a base record; else the
-                        // MFT# of the base this extension record belongs to.
-                        let base_ref = u64_at(rec, 0x20).unwrap_or(0) & 0x0000_FFFF_FFFF_FFFF;
-                        (in_use, info, data, base_ref)
-                    }))
-                    .unwrap_or((false, None, (0, 0), 0));
+                    let parsed =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                            if !apply_fixup(rec, bytes_per_sector) {
+                                return (false, None, (0u64, 0u64), 0u64);
+                            }
+                            // Distinguish "free record" (None, not bad) from "in-use
+                            // but unparseable" by re-checking the in-use flag.
+                            let in_use = u16_at(rec, 0x16)
+                                .map(|f| f & FLAG_RECORD_IN_USE != 0)
+                                .unwrap_or(false);
+                            let info = parse_record(rec);
+                            // Capture this record's own unnamed $DATA size — for a base
+                            // record it's the file's size; for an extension record it's
+                            // the spilled fragment a fragmented file points to.
+                            let data = unnamed_data_sizes(rec);
+                            // BaseFileRecordSegment: 0 ⇒ this IS a base record; else the
+                            // MFT# of the base this extension record belongs to.
+                            let base_ref = u64_at(rec, 0x20).unwrap_or(0) & 0x0000_FFFF_FFFF_FFFF;
+                            (in_use, info, data, base_ref)
+                        }))
+                        .unwrap_or((false, None, (0, 0), 0));
 
                     let (in_use, mut info, data, base_ref) = parsed;
                     if in_use {
@@ -911,8 +927,7 @@ mod imp {
                                     dirs_seen += 1;
                                 } else {
                                     files_seen += 1;
-                                    bytes_logical =
-                                        bytes_logical.saturating_add(ri.logical);
+                                    bytes_logical = bytes_logical.saturating_add(ri.logical);
                                     bytes_alloc = bytes_alloc.saturating_add(ri.alloc);
                                     // Running per-dir tally for the animation frames.
                                     let p = ri.parent_mft as usize;

@@ -19,6 +19,7 @@
 // process exit) every control we ever drove is returned to BIOS default so a fan
 // is never left pinned if CorePilot exits.
 
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.Versioning;
 using System.Text.Json;
@@ -52,7 +53,10 @@ internal sealed class UpdateVisitor : IVisitor
 [SupportedOSPlatform("windows")]
 internal static class Program
 {
-    private const int PollIntervalMs = 1000;
+    private const int DefaultPollIntervalMs = 1000;
+    private static int _pollIntervalMs = DefaultPollIntervalMs;
+    private static int _reopens;
+    private static int _updateMs;
 
     /// <summary>Serializes all LibreHardwareMonitor access (poll updates and
     /// control writes happen on different threads).</summary>
@@ -71,6 +75,7 @@ internal static class Program
 
     /// <summary>Controls we have driven via SetSoftware — reset to default on exit.</summary>
     private static readonly HashSet<string> _touched = new();
+    private static readonly Dictionary<string, float> _drivenValues = new();
 
     /// <summary>True once we've read a nonzero motherboard fan RPM — gates the
     /// re-open-on-stale logic so a fanless board doesn't thrash.</summary>
@@ -116,6 +121,7 @@ internal static class Program
             return ListControls();
         }
 
+        StartParentDeathWatcher(args);
         var stdout = Console.Out;
 
         // One LHM Computer (CPU + GPU + Motherboard/Super-I/O). The Nuvoton
@@ -156,9 +162,8 @@ internal static class Program
                 // that restores RPM we keep refreshing at the live cadence; one that
                 // stays all-zero means a genuine BIOS fan-stop, so we back off and
                 // never churn the kernel driver while fans are legitimately parked.
-                // (Driven fans are NOT reset here — the chip holds the last PWM
-                // across the reopen and the engine re-applies via the rebuilt map;
-                // ResetTouched runs on the exit paths so nothing is left pinned.)
+                // Close() restores controls to BIOS/default mode, so restore the
+                // requested PWM here before the first post-reopen sample.
                 long nowTick = Environment.TickCount64;
                 // Reopen when the board has spun this session (normal stale-bank
                 // refresh) OR during cold start (first reads already 0, so
@@ -173,6 +178,8 @@ internal static class Program
                     {
                         try { computer.Close(); } catch { /* ignore */ }
                         computer = OpenComputer();
+                        _reopens++;
+                        ReapplyDrivenValues(computer);
                     }
                     _lastReopenTick = nowTick;
                     if (coldStart)
@@ -207,7 +214,7 @@ internal static class Program
                 break; // stdout closed (parent exited)
             }
 
-            Thread.Sleep(PollIntervalMs);
+            Thread.Sleep(Volatile.Read(ref _pollIntervalMs));
         }
 
         ResetTouched();
@@ -261,6 +268,30 @@ internal static class Program
             // stdin error/closed — fall through to reset.
         }
         ResetTouched();
+        Environment.Exit(0);
+    }
+
+    private static void StartParentDeathWatcher(string[] args)
+    {
+        for (int i = 0; i + 1 < args.Length; i++)
+        {
+            if (!string.Equals(args[i], "--parent", StringComparison.OrdinalIgnoreCase)
+                || !int.TryParse(args[i + 1], out int parentPid) || parentPid <= 0)
+                continue;
+            var watcher = new Thread(() =>
+            {
+                try
+                {
+                    using Process parent = Process.GetProcessById(parentPid);
+                    parent.WaitForExit();
+                }
+                catch { /* parent already exited */ }
+                ResetTouched();
+                Environment.Exit(0);
+            }) { IsBackground = true, Name = "sensord-parent-watch" };
+            watcher.Start();
+            return;
+        }
     }
 
     private static void HandleCommand(string raw)
@@ -295,6 +326,11 @@ internal static class Program
                             }
                         }
                         _touched.Clear();
+                        _drivenValues.Clear();
+                        break;
+                    case "interval" when parts.Length == 2 && int.TryParse(parts[1], out int intervalMs):
+                        // Clamp bad values so an accidental command cannot busy-loop the sidecar.
+                        _pollIntervalMs = Math.Clamp(intervalMs, 500, 5000);
                         break;
                     // SMU tuning (Curve Optimizer / PBO). Only ever runs on an
                     // explicit user-opted command; every write is clamped in the host.
@@ -331,6 +367,7 @@ internal static class Program
         pct = Math.Clamp(pct, min, max);
         control.SetSoftware(pct);
         _touched.Add(id);
+        _drivenValues[id] = pct;
     }
 
     private static void ApplyAuto(string id)
@@ -339,7 +376,26 @@ internal static class Program
         {
             sensor.Control.SetDefault();
             _touched.Remove(id);
+            _drivenValues.Remove(id);
         }
+    }
+
+    private static void ReapplyDrivenValues(Computer? computer)
+    {
+        if (computer is null || _drivenValues.Count == 0) return;
+        void Visit(IHardware hardware)
+        {
+            foreach (ISensor sensor in hardware.Sensors)
+            {
+                string id = sensor.Identifier.ToString() ?? string.Empty;
+                if (_drivenValues.TryGetValue(id, out float value) && sensor.Control != null)
+                {
+                    try { sensor.Control.SetSoftware(value); } catch { }
+                }
+            }
+            foreach (IHardware child in hardware.SubHardware) Visit(child);
+        }
+        foreach (IHardware hardware in computer.Hardware) Visit(hardware);
     }
 
     private static void ResetTouched()
@@ -356,6 +412,7 @@ internal static class Program
                     }
                 }
                 _touched.Clear();
+                _drivenValues.Clear();
             }
         }
         catch
@@ -397,6 +454,8 @@ internal static class Program
                     version = ver,
                     versionStr = $"{(ver >> 16) & 0xff}.{(ver >> 8) & 0xff}.{ver & 0xff}",
                 },
+                reopens = Volatile.Read(ref _reopens),
+                updateMs = Volatile.Read(ref _updateMs),
             }, JsonOpts));
             return;
         }
@@ -431,7 +490,12 @@ internal static class Program
         }
 
         WriteJsonLine(JsonSerializer.Serialize(
-            new { smuReply = new { cmd = sub, ok = r.ok, detail = r.detail } }, JsonOpts));
+            new
+            {
+                smuReply = new { cmd = sub, ok = r.ok, detail = r.detail },
+                reopens = Volatile.Read(ref _reopens),
+                updateMs = Volatile.Read(ref _updateMs),
+            }, JsonOpts));
     }
 
     private static bool ParseNum(string s, out double v) =>
@@ -478,7 +542,10 @@ internal static class Program
 
         lock (Gate)
         {
+            Stopwatch updateTimer = Stopwatch.StartNew();
             computer.Accept(visitor);
+            updateTimer.Stop();
+            _updateMs = (int)Math.Min(updateTimer.ElapsedMilliseconds, int.MaxValue);
 
             foreach (IHardware hardware in computer.Hardware)
             {
@@ -740,12 +807,18 @@ internal static class Program
             temps = temps.ConvertAll(t => new { t.id, t.name, c = t.value }),
             controls = controls.ConvertAll(c => new { c.id, c.name, pct = c.pct, c.controllable, c.hw }),
             cpu = cpuSensors.ConvertAll(s => new { s.name, s.type, value = s.value }),
+            reopens = Volatile.Read(ref _reopens),
+            updateMs = Volatile.Read(ref _updateMs),
         };
         return JsonSerializer.Serialize(payload, JsonOpts);
     }
 
-    private static string NullLine() =>
-        "{\"cpuPower\":null,\"cpuTemp\":null,\"gpuPower\":null,\"gpuTemp\":null,\"fans\":[],\"temps\":[],\"controls\":[],\"cpu\":[]}";
+    private static string NullLine() => JsonSerializer.Serialize(new
+    {
+        cpuPower = (double?)null, cpuTemp = (double?)null, gpuPower = (double?)null, gpuTemp = (double?)null,
+        fans = Array.Empty<object>(), temps = Array.Empty<object>(), controls = Array.Empty<object>(), cpu = Array.Empty<object>(),
+        reopens = Volatile.Read(ref _reopens), updateMs = Volatile.Read(ref _updateMs),
+    }, JsonOpts);
 
     /// <summary>Return a finite double or null (NaN/Infinity -> null) so the
     /// emitted JSON stays strict.</summary>

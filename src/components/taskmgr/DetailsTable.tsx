@@ -28,6 +28,12 @@ const COLS =
 // crushing every cell. Kept as a full literal so Tailwind's scanner sees it.
 const MIN_W = "min-w-[760px]";
 
+// Skip layout/paint for rows scrolled out of view. `auto` lets the browser
+// remember each row's real height after its first paint, so scrollbar size and
+// scroll offsets are unchanged. Paint-cost cut only, NOT virtualization: every
+// row stays in the DOM. Details rows are always single-line.
+const ROW_CV = "[content-visibility:auto] [contain-intrinsic-size:auto_30px]";
+
 function Head({
   k,
   label,
@@ -95,7 +101,7 @@ export function DetailsTable({
           <div
             key={p.pid}
             onContextMenu={(e) => onRowContextMenu?.(e, p)}
-            className={cn(MIN_W, "group grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] hover:bg-surface2/50", COLS)}
+            className={cn(MIN_W, ROW_CV, "group grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] hover:bg-surface2/50", COLS)}
           >
             <span className="truncate text-ink" title={p.name}>
               {p.name}

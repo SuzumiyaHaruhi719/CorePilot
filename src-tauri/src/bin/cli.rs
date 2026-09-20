@@ -10,12 +10,13 @@
 //!   cli services [filter]             # Windows services
 //!   cli startup                       # startup entries
 //!   cli processes [filter] [limit]    # process list (default top 40 by CPU)
+//!   cli fps [pid] [seconds]           # live frame pacing from the ETW present stream
 //!
 //! Mutating commands (gpu-apply/gpu-reset) require admin, same as the app.
 
 use std::time::Duration;
 
-use corepilot_lib::{affinity, gpu, optimize, process, sensors, topology, winsvc};
+use corepilot_lib::{affinity, fps, gpu, optimize, process, sensors, topology, winsvc};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -37,6 +38,28 @@ fn main() {
             let _ = process::gpu_engine_loads_now();
             std::thread::sleep(Duration::from_millis(600));
             print_json(&process::gpu_engine_loads_now());
+        }
+        // Frame pacing straight from the ETW present stream, without the GUI.
+        // The ETW session needs a moment to attach and the percentile lows need
+        // enough retained frames to be meaningful, so sample for a few seconds
+        // rather than printing one cold reading. `pid` defaults to the current
+        // foreground window's process.
+        "fps" => {
+            let pid = args
+                .get(2)
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or_else(fps::foreground_pid_public);
+            let secs = args.get(3).and_then(|s| s.parse::<u64>().ok()).unwrap_or(6);
+            eprintln!("sampling pid {pid} for {secs}s (ETW needs admin) ...");
+            for _ in 0..secs {
+                std::thread::sleep(Duration::from_secs(1));
+                let st = fps::stats_for_pid(pid);
+                eprintln!(
+                    "  fps={:?} frametime_ms={:?} low1={:?} low01={:?}",
+                    st.fps, st.frametime_ms, st.low1, st.low01
+                );
+            }
+            print_json(&fps::stats_for_pid(pid));
         }
         "topology" => print_json(&topology::detect()),
         "sensors" => print_json(&sensors::sample()),
@@ -154,4 +177,5 @@ fn usage() {
     eprintln!("  cli topology | sensors | memory | power-plan");
     eprintln!("  cli services [filter] | startup");
     eprintln!("  cli processes [filter] [limit]");
+    eprintln!("  cli fps [pid] [seconds]");
 }

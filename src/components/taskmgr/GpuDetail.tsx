@@ -4,7 +4,10 @@ import { useEffect, useState } from "react";
 import { cn } from "../../lib/cn";
 import { accentHue } from "../../lib/colors";
 import { formatBytes } from "../../lib/format";
-import { api, type GpuOcInfo, withTimeout } from "../../lib/ipc";
+import { api, withTimeout } from "../../lib/ipc";
+import { useSharedGpuOc } from "../../hooks/useSharedTelemetry";
+import { useUiActive } from "../../hooks/useUiActive";
+import { useSettings } from "../../store/settings";
 import { Sparkline } from "../charts/Sparkline";
 
 /** Engine graphs shown, in Windows Task-Manager order. */
@@ -34,25 +37,44 @@ function Info({ label, value }: { label: string; value: string }) {
  * Renders nothing when no NVIDIA GPU is present (the basic GPU card still shows).
  */
 export function GpuDetail() {
-  const [info, setInfo] = useState<GpuOcInfo | null>(null);
+  // NVML snapshot comes from the app-wide shared poller. This panel used to run
+  // its own hard-coded 1000 ms interval — it ignored the user's 刷新间隔 setting
+  // entirely, and it ran CONCURRENTLY with PerfView's own `gpu_oc_info` interval
+  // (PerfView renders this component), so the page issued two independent ~20-call
+  // NVML reads per second. One poller now serves both, at the user's cadence, and
+  // it stops outright while nobody can see the window.
+  const info = useSharedGpuOc();
   const [utilHist, setUtilHist] = useState<number[]>([]);
   const [vramHist, setVramHist] = useState<number[]>([]);
   const [engines, setEngines] = useState<Record<string, number>>({});
   const [engHist, setEngHist] = useState<Record<string, number[]>>({});
+  const pollMs = useSettings((s) => s.pollMs);
+  const uiActive = useUiActive((s) => s.active);
 
+  // Advance the NVML-backed sparklines in step with the shared poller. Driving
+  // them off the value (rather than a private timer) keeps them aligned with the
+  // numbers printed beside them; a private timer would sample the same snapshot
+  // twice or skip one whenever the two intervals drifted apart.
   useEffect(() => {
+    if (!info) return;
+    setUtilHist((h) => push(h, info.utilizationGpu));
+    setVramHist((h) => push(h, info.memTotalBytes > 0 ? (info.memUsedBytes / info.memTotalBytes) * 100 : 0));
+  }, [info]);
+
+  // Per-engine PDH aggregate. Separate command, so it keeps its own interval —
+  // now at the user's poll rate, and paused while the window is hidden/covered
+  // (these graphs are read-only eye candy; nothing downstream consumes them).
+  useEffect(() => {
+    if (!uiActive) return;
     let alive = true;
     let inFlight = false;
     const tick = async () => {
       if (inFlight) return;
       inFlight = true;
       try {
-        const [i, e] = await withTimeout(Promise.all([api.gpuOcInfo(), api.gpuEngines()]));
+        const e = await withTimeout(api.gpuEngines());
         if (!alive) return;
-        setInfo(i);
         setEngines(e);
-        setUtilHist((h) => push(h, i.utilizationGpu));
-        setVramHist((h) => push(h, i.memTotalBytes > 0 ? (i.memUsedBytes / i.memTotalBytes) * 100 : 0));
         setEngHist((prev) => {
           const next: Record<string, number[]> = { ...prev };
           for (const name of ENGINES) next[name] = push(prev[name] ?? [], e[name] ?? 0);
@@ -65,12 +87,12 @@ export function GpuDetail() {
       }
     };
     void tick();
-    const id = setInterval(tick, 1000);
+    const id = setInterval(() => void tick(), Math.max(pollMs, 1000));
     return () => {
       alive = false;
       clearInterval(id);
     };
-  }, []);
+  }, [pollMs, uiActive]);
 
   if (info && !info.available) return null;
 

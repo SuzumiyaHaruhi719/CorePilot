@@ -1,6 +1,6 @@
 import { Check, Download, ListTree, Loader2, Plus, Power, Upload } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import type { CSSProperties } from "react";
+import { useMemo, type CSSProperties } from "react";
 import { cn } from "../../lib/cn";
 import { groupColor, isLightTheme } from "../../lib/colors";
 import { useTf } from "../../lib/i18n";
@@ -29,8 +29,12 @@ interface GroupRailProps {
 // matched patterns, not process instances: a group with N rules could otherwise
 // report far more than N "active" when names like svchost.exe run many copies,
 // which read as a nonsensical "657 / 239".)
-function activeCount(group: GroupRule, processes: ProcInfo[]): number {
-  const running = new Set(processes.map((p) => p.name.toLowerCase()));
+//
+// `running` is built ONCE per render by the caller. It used to be rebuilt inside
+// this function, i.e. ~350 `toLowerCase()` calls and 350 Set inserts per group
+// per 1.5 s poll — the rail's cost scaled with (groups × processes) for a number
+// that fits in a tooltip.
+function activeCount(group: GroupRule, running: ReadonlySet<string>): number {
   return group.patterns.reduce((n, pat) => (running.has(pat.toLowerCase()) ? n + 1 : n), 0);
 }
 
@@ -50,6 +54,18 @@ export function GroupRail({
   const selectedId = useGroups((s) => s.selectedId);
   const select = useGroups((s) => s.select);
   const addGroup = useGroups((s) => s.addGroup);
+
+  // One pass over the roster per poll, shared by every group's counter and by
+  // the 全部进程 total below.
+  const { running, settableCount } = useMemo(() => {
+    const names = new Set<string>();
+    let settable = 0;
+    for (const p of processes) {
+      names.add(p.name.toLowerCase());
+      if (p.settable) settable += 1;
+    }
+    return { running: names, settableCount: settable };
+  }, [processes]);
 
   return (
     <div className="flex w-[244px] shrink-0 flex-col border-r border-line">
@@ -82,12 +98,12 @@ export function GroupRail({
             <ListTree size={14} className={selectedId === null ? "text-accent-bright" : "text-dim"} />
             <span className="text-[13px] font-medium text-ink">全部进程</span>
           </div>
-          <span className="nums text-[11px] text-muted">{processes.filter((p) => p.settable).length}</span>
+          <span className="nums text-[11px] text-muted">{settableCount}</span>
         </button>
         <div className="hud-label px-1 pt-1.5 text-[9.5px] text-dim">分组</div>
         <AnimatePresence initial={false}>
           {groups.map((group) => {
-          const active = activeCount(group, processes);
+          const active = activeCount(group, running);
           const selected = group.id === selectedId;
           const color = groupColor(group.hue);
           return (
@@ -175,7 +191,9 @@ export function GroupRail({
           <span
             className={cn(
               "grid h-[15px] w-[15px] shrink-0 place-items-center rounded border transition-colors",
-              optimizeOnStartup ? "border-accent bg-accent-bright text-white" : "border-line",
+              // text-on-accent, not text-white: the tick sits on the accent fill,
+              // which is neon yellow/green on the bright-accent themes.
+              optimizeOnStartup ? "border-accent bg-accent-bright text-on-accent" : "border-line",
             )}
           >
             {optimizeOnStartup && <Check size={10} strokeWidth={3} />}

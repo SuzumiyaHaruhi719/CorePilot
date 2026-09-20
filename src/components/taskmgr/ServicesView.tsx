@@ -12,6 +12,12 @@ const COLS = "grid-cols-[minmax(110px,0.9fr)_52px_minmax(0,1.5fr)_70px_minmax(0,
 // description / group columns. Full literal so Tailwind's scanner picks it up.
 const MIN_W = "min-w-[720px]";
 
+// Skip layout/paint for rows scrolled out of view. `auto` lets the browser
+// remember each row's real height after its first paint, so scrollbar size and
+// scroll offsets are unchanged. Paint-cost cut only, NOT virtualization: every
+// row stays in the DOM. Service rows are always single-line.
+const ROW_CV = "[content-visibility:auto] [contain-intrinsic-size:auto_30px]";
+
 const STATUS_STYLE: Record<string, string> = {
   running: "text-ok",
   stopped: "text-dim",
@@ -161,7 +167,7 @@ export function ServicesView() {
           {visible.map((svc) => (
             <div
               key={svc.name}
-              className={cn(MIN_W, "grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] transition-colors hover:bg-surface2/50", COLS)}
+              className={cn(MIN_W, ROW_CV, "grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] transition-colors hover:bg-surface2/50", COLS)}
             >
               <span className="truncate text-ink" title={svc.display || svc.name}>
                 {svc.name}

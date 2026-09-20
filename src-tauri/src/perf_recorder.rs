@@ -121,7 +121,7 @@ pub fn active_session_count() -> usize {
 /// `PerfSample` (`src/lib/perf.ts`) exactly** so the emitted JSON deserializes
 /// straight into it. `#[serde(rename_all = "camelCase")]` turns e.g. `frametime_ms`
 /// into `frametimeMs`; every metric is `Option<f64>` → `number | null` in TS.
-#[derive(Serialize, Clone)]
+#[derive(Default, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct PerfSampleOut {
     /// Milliseconds since session start.
@@ -148,28 +148,54 @@ struct PerfSampleOut {
     net_up: Option<f64>,
 }
 
-/// Payload emitted on `perf://session` when a session finalizes (≥1 sample). The
-/// frontend wraps this into a full `PerfSession` (adds id/name/refreshHz/summary
-/// and downsamples `samples`). camelCase to match the frontend's expectations.
+/// Summary statistics computed from the full (pre-downsample) series.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PerfSummaryOut {
+    avg_fps: Option<f64>,
+    min_fps: Option<f64>,
+    max_fps: Option<f64>,
+    low1: Option<f64>,
+    low01: Option<f64>,
+    avg_frametime_ms: Option<f64>,
+    avg_cpu_load: Option<f64>,
+    avg_cpu_temp: Option<f64>,
+    max_cpu_temp: Option<f64>,
+    avg_cpu_power: Option<f64>,
+    max_cpu_power: Option<f64>,
+    avg_cpu_clock: Option<f64>,
+    avg_gpu_load: Option<f64>,
+    avg_gpu_temp: Option<f64>,
+    max_gpu_temp: Option<f64>,
+    avg_gpu_power: Option<f64>,
+    max_gpu_power: Option<f64>,
+    avg_gpu_clock: Option<f64>,
+    avg_vram_load: Option<f64>,
+    max_vram_load: Option<f64>,
+    avg_mem_load: Option<f64>,
+    energy_wh: Option<f64>,
+    co2_kg: Option<f64>,
+}
+
+/// Payload emitted on `perf://session` when a session finalizes.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SessionPayload {
-    /// Lowercased exe, e.g. "subnautica2-win64-shipping.exe".
+    meta: SessionMeta,
+    summary: PerfSummaryOut,
+    samples: Vec<PerfSampleOut>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SessionMeta {
     exe: String,
-    /// Full executable path (for the report's path display + the real exe icon
-    /// on the history cards), or null when it couldn't be resolved.
     path: Option<String>,
-    /// Epoch ms when recording started.
     started_at: f64,
-    /// Epoch ms when the session finalized.
     ended_at: f64,
-    /// Whole seconds recorded.
     duration_sec: u64,
     cpu_name: Option<String>,
     gpu_name: Option<String>,
-    /// Full (pre-downsample) time series. The frontend summarizes from this and
-    /// then downsamples for storage.
-    samples: Vec<PerfSampleOut>,
 }
 
 /// Live recording state, owned by the recorder thread (never shared). Mirrors the
@@ -376,7 +402,11 @@ fn build_sample(session: &ActiveSession, pid: u32) -> PerfSampleOut {
 fn should_keep(session: &ActiveSession, white: &[String], osd_white: &[String]) -> bool {
     let whitelisted =
         white.iter().any(|n| *n == session.exe) || osd_white.iter().any(|n| *n == session.exe);
-    should_keep_inner(session.rendered_samples, whitelisted, crate::fps::etw_alive())
+    should_keep_inner(
+        session.rendered_samples,
+        whitelisted,
+        crate::fps::etw_alive(),
+    )
 }
 
 /// Pure decision core of [`should_keep`] (split out for unit testing).
@@ -393,7 +423,10 @@ mod tests {
     #[test]
     fn junk_filter() {
         let need = (MIN_RENDERED_SECS / SAMPLE_PERIOD.as_secs_f64()) as u32; // 150
-        assert!(!should_keep_inner(0, false, true), "launcher/tool discarded");
+        assert!(
+            !should_keep_inner(0, false, true),
+            "launcher/tool discarded"
+        );
         assert!(!should_keep_inner(need - 1, false, true), "below threshold");
         assert!(should_keep_inner(need, false, true), "real game kept");
         assert!(should_keep_inner(0, true, true), "whitelist always kept");
@@ -448,6 +481,162 @@ fn has_live_same_exe_child(pid: u32, exe: &str) -> bool {
     }
 }
 
+const CHART_POINTS: usize = 1200;
+
+fn finite_values(samples: &[PerfSampleOut], f: impl Fn(&PerfSampleOut) -> Option<f64>) -> Vec<f64> {
+    samples
+        .iter()
+        .filter_map(f)
+        .filter(|v| v.is_finite())
+        .collect()
+}
+fn average(xs: &[f64]) -> Option<f64> {
+    if xs.is_empty() {
+        None
+    } else {
+        Some(xs.iter().sum::<f64>() / xs.len() as f64)
+    }
+}
+fn extrema(mut xs: Vec<f64>) -> (Option<f64>, Option<f64>) {
+    if xs.is_empty() {
+        return (None, None);
+    }
+    let mut min = xs[0];
+    let mut max = xs[0];
+    for x in xs.drain(1..) {
+        if x < min {
+            min = x;
+        }
+        if x > max {
+            max = x;
+        }
+    }
+    (Some(min), Some(max))
+}
+fn percentile(mut xs: Vec<f64>, p: f64) -> Option<f64> {
+    if xs.is_empty() {
+        return None;
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((p / 100.0) * (xs.len() - 1) as f64).round() as usize;
+    Some(xs[idx.min(xs.len() - 1)])
+}
+fn sum_power(s: &PerfSampleOut) -> Option<f64> {
+    match (
+        s.cpu_power.filter(|v| v.is_finite()),
+        s.gpu_power.filter(|v| v.is_finite()),
+    ) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+    }
+}
+fn energy_wh(samples: &[PerfSampleOut]) -> Option<f64> {
+    if samples.len() < 2 {
+        return None;
+    }
+    let mut wh = 0.0;
+    let mut any = false;
+    for pair in samples.windows(2) {
+        let dt = pair[1].t - pair[0].t;
+        if !dt.is_finite() || dt <= 0.0 {
+            continue;
+        }
+        let a = sum_power(&pair[0]);
+        let b = sum_power(&pair[1]);
+        let Some(avg_w) = (match (a, b) {
+            (None, None) => None,
+            (Some(x), Some(y)) => Some((x + y) / 2.0),
+            (Some(x), None) | (None, Some(x)) => Some(x),
+        }) else {
+            continue;
+        };
+        wh += avg_w * (dt / 3_600_000.0);
+        any = true;
+    }
+    any.then_some(wh)
+}
+fn summarize_rust(samples: &[PerfSampleOut]) -> PerfSummaryOut {
+    macro_rules! avg {
+        ($f:ident) => {
+            average(&finite_values(samples, |s| s.$f))
+        };
+    }
+    macro_rules! ext {
+        ($f:ident) => {{
+            let (min, max) = extrema(finite_values(samples, |s| s.$f));
+            (min, max)
+        }};
+    }
+    let (min_fps, max_fps) = ext!(fps);
+    let e = energy_wh(samples);
+    PerfSummaryOut {
+        avg_fps: avg!(fps),
+        min_fps,
+        max_fps,
+        low1: percentile(finite_values(samples, |s| s.fps), 1.0),
+        low01: percentile(finite_values(samples, |s| s.fps), 0.1),
+        avg_frametime_ms: avg!(frametime_ms),
+        avg_cpu_load: avg!(cpu_load),
+        avg_cpu_temp: avg!(cpu_temp),
+        max_cpu_temp: ext!(cpu_temp).1,
+        avg_cpu_power: avg!(cpu_power),
+        max_cpu_power: ext!(cpu_power).1,
+        avg_cpu_clock: avg!(cpu_clock),
+        avg_gpu_load: avg!(gpu_load),
+        avg_gpu_temp: avg!(gpu_temp),
+        max_gpu_temp: ext!(gpu_temp).1,
+        avg_gpu_power: avg!(gpu_power),
+        max_gpu_power: ext!(gpu_power).1,
+        avg_gpu_clock: avg!(gpu_clock),
+        avg_vram_load: avg!(vram_load),
+        max_vram_load: ext!(vram_load).1,
+        avg_mem_load: avg!(mem_load),
+        energy_wh: e,
+        co2_kg: e.map(|v| v / 1000.0 * 0.55),
+    }
+}
+fn quantize(v: Option<f64>) -> Option<f64> {
+    v.map(|x| (x * 100.0).round() / 100.0)
+}
+fn quantize_sample(mut s: PerfSampleOut) -> PerfSampleOut {
+    s.t = s.t.round();
+    macro_rules! q { ($($f:ident),+) => { $(s.$f = quantize(s.$f);)+ }; }
+    q!(
+        fps,
+        frametime_ms,
+        cpu_load,
+        cpu_temp,
+        cpu_power,
+        cpu_clock,
+        gpu_load,
+        gpu_temp,
+        gpu_power,
+        gpu_clock,
+        vram_load,
+        mem_load,
+        gpu_mem_clock,
+        gpu_mem_ctrl_load,
+        gpu_fan,
+        disk_load,
+        disk_read,
+        disk_write,
+        net_down,
+        net_up
+    );
+    s
+}
+fn downsample_rust(samples: Vec<PerfSampleOut>) -> Vec<PerfSampleOut> {
+    if samples.len() <= CHART_POINTS {
+        return samples.into_iter().map(quantize_sample).collect();
+    }
+    let step = samples.len() as f64 / CHART_POINTS as f64;
+    let mut out: Vec<_> = (0..CHART_POINTS)
+        .map(|i| samples[(i as f64 * step).floor() as usize].clone())
+        .collect();
+    out[CHART_POINTS - 1] = samples[samples.len() - 1].clone();
+    out.into_iter().map(quantize_sample).collect()
+}
+
 /// Finalize a session: if it captured ≥1 sample AND passes [`should_keep`]
 /// AND is not a launcher that just handed off to a same-exe child (see
 /// [`has_live_same_exe_child`]), emit `perf://session` for the frontend to
@@ -478,15 +667,19 @@ fn finalize(app: &AppHandle, pid: u32, session: ActiveSession) {
         return;
     }
     let ended_at = now_epoch_ms();
+    let summary = summarize_rust(&session.samples);
     let payload = SessionPayload {
-        exe: session.exe,
-        path: session.path,
-        started_at: session.started_at,
-        ended_at,
-        duration_sec: ((ended_at - session.started_at) / 1000.0).round().max(0.0) as u64,
-        cpu_name: session.cpu_name,
-        gpu_name: session.gpu_name,
-        samples: session.samples,
+        meta: SessionMeta {
+            exe: session.exe,
+            path: session.path,
+            started_at: session.started_at,
+            ended_at,
+            duration_sec: ((ended_at - session.started_at) / 1000.0).round().max(0.0) as u64,
+            cpu_name: session.cpu_name,
+            gpu_name: session.gpu_name,
+        },
+        summary,
+        samples: downsample_rust(session.samples),
     };
     if let Err(e) = app.emit("perf://session", &payload) {
         tracing::warn!("failed to emit perf://session: {e}");
@@ -630,4 +823,43 @@ pub fn start_recorder(app: AppHandle) {
             }
         })
         .ok();
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+
+    fn sample(t: f64, fps: Option<f64>, cpu_power: Option<f64>) -> PerfSampleOut {
+        PerfSampleOut {
+            t,
+            fps,
+            cpu_power,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn summary_and_downsample_match_ts_fixture() {
+        // Fixture mirrors the TypeScript reference: finite-only aggregates,
+        // round(p / 100 * (n - 1)) percentile index, trapezoid energy, and
+        // first/last-preserving evenly spaced downsampling.
+        let input = vec![
+            sample(0.0, Some(10.0), Some(100.0)),
+            sample(1000.0, Some(20.0), Some(200.0)),
+            sample(2000.0, None, None),
+            sample(3000.0, Some(30.0), Some(300.0)),
+        ];
+        let out = summarize_rust(&input);
+        assert_eq!(out.avg_fps, Some(20.0));
+        assert_eq!(out.min_fps, Some(10.0));
+        assert_eq!(out.max_fps, Some(30.0));
+        assert_eq!(out.low1, Some(10.0));
+        assert_eq!(out.low01, Some(10.0));
+        assert!((out.energy_wh.unwrap() - 0.18055555555555555).abs() < 1e-15);
+        assert!((out.co2_kg.unwrap() - 0.00009930555555555556).abs() < 1e-16);
+        assert_eq!(downsample_rust(input.clone()).len(), input.len());
+        let q = quantize_sample(sample(1.234, Some(12.3456), None));
+        assert_eq!(q.t, 1.0);
+        assert_eq!(q.fps, Some(12.35));
+    }
 }

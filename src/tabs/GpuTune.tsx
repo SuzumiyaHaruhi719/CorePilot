@@ -27,9 +27,10 @@ import { accentHue, hueColor, isLightTheme } from "../lib/colors";
 import { useT, useTf } from "../lib/i18n";
 import { formatBytes } from "../lib/format";
 import { hoverPop } from "../lib/motion";
-import { api, withTimeout, type GpuOcInfo, type GpuOcSettings } from "../lib/ipc";
+import { api, type GpuOcInfo, type GpuOcSettings } from "../lib/ipc";
+import { refreshGpuOc, useSharedGpuOc } from "../hooks/useSharedTelemetry";
 import { useGpuProfiles, type GpuProfile } from "../store/gpuProfiles";
-import { useSettings } from "../store/settings";
+import { REASON_DISPLAY_FAULT, REASON_UNCLEAN_SHUTDOWN, useGpuOcGuard } from "../store/gpuOcGuard";
 
 /**
  * Lowest manual fan speed the UI lets you request, % of max. Mirrors the backend
@@ -43,6 +44,33 @@ function getErrorMessage(e: unknown): string {
   if (typeof e === "string") return e;
   if (e instanceof Error) return e.message;
   return "操作失败";
+}
+
+/**
+ * Why the startup auto-apply was skipped, in the user's language.
+ *
+ * The backend deliberately hands over a stable tag rather than a sentence
+ * (rule 7 — user-visible text is `tf(zh, en)` on this side). An unrecognised tag
+ * still gets a real explanation instead of a blank banner: the skip already
+ * happened, so silence here would just look like the overclock vanished.
+ */
+function blockReasonText(tf: (zh: string, en: string) => string, reason: string): string {
+  if (reason === REASON_DISPLAY_FAULT) {
+    return tf(
+      "上次关机前检测到显卡驱动错误，已暂停启动时自动应用超频",
+      "A display-driver fault was logged before the last shutdown — the startup auto-apply was skipped",
+    );
+  }
+  if (reason === REASON_UNCLEAN_SHUTDOWN) {
+    return tf(
+      "检测到上次异常关机，已暂停启动时自动应用超频",
+      "The last shutdown was unclean — the startup auto-apply was skipped",
+    );
+  }
+  return tf(
+    "上次运行期间检测到系统异常，已暂停启动时自动应用超频",
+    "A system fault was logged during the last session — the startup auto-apply was skipped",
+  );
 }
 
 function tempHue(t: number): number {
@@ -138,12 +166,14 @@ function ControlCard({ icon: Icon, iconClass, title, supported, right, children 
 export function GpuTune() {
   const t = useT();
   const tf = useTf();
-  const pollMs = useSettings((s) => s.pollMs);
   const { profiles, activeId, applyOnStartup, startupError, addProfile, updateProfile, deleteProfile, setActive, setApplyOnStartup, setStartupError } =
     useGpuProfiles();
 
-  const [info, setInfo] = useState<GpuOcInfo | null>(null);
-  const [infoLoaded, setInfoLoaded] = useState(false);
+  // Session-only: set by App.tsx when the startup crash guard skipped the
+  // auto-apply. Never persisted — see store/gpuOcGuard.ts.
+  const ocBlock = useGpuOcGuard((s) => s.block);
+  const setOcBlock = useGpuOcGuard((s) => s.setBlock);
+
   const [status, setStatus] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
   const okStatus = (message: string) => setStatus({ kind: "ok", message });
   const errStatus = (message: string) => setStatus({ kind: "error", message });
@@ -192,32 +222,26 @@ export function GpuTune() {
     else if (fallback && fallback.tempLimitC > 0) setTempLimit(fallback.tempLimitC);
   }
 
-  // Live readout polling.
+  // Live readout — from the app-wide shared poller (PerfView / GpuDetail read the
+  // same one). `gpu_oc_info` is ~20 NVML calls per read; this page used to add a
+  // third independent interval on top of those two. The shared poller also stops
+  // while nobody can see the window, so leaving this tab open in the tray during
+  // a game no longer hammers NVML behind the game.
+  const info = useSharedGpuOc();
+
+  // "The first read has come back (or given up)" — the spinner-vs-content gate.
+  // A card-less machine still answers with `available: false`, so `info` going
+  // non-null covers it; the timer is only for the case the old code got from
+  // `withTimeout` — a backend that never answers at all must still drop the
+  // spinner rather than leave the page loading forever.
+  const [infoLoaded, setInfoLoaded] = useState(false);
   useEffect(() => {
-    let alive = true;
-    let inFlight = false;
-    const tick = async () => {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const i = await withTimeout(api.gpuOcInfo());
-        if (alive) {
-          setInfo(i);
-          setInfoLoaded(true);
-        }
-      } catch {
-        if (alive) setInfoLoaded(true);
-      } finally {
-        inFlight = false;
-      }
-    };
-    void tick();
-    const id = setInterval(tick, Math.max(800, pollMs));
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-  }, [pollMs]);
+    if (info) setInfoLoaded(true);
+  }, [info]);
+  useEffect(() => {
+    const id = window.setTimeout(() => setInfoLoaded(true), 4000);
+    return () => window.clearTimeout(id);
+  }, []);
 
   // Seed sliders once from the live card (or the active saved profile).
   useEffect(() => {
@@ -236,8 +260,7 @@ export function GpuTune() {
     try {
       await api.gpuOcApply(s);
       okStatus(label);
-      const fresh = await api.gpuOcInfo();
-      setInfo(fresh);
+      await refreshGpuOc();
     } catch (e: unknown) {
       errStatus(getErrorMessage(e));
     } finally {
@@ -251,17 +274,16 @@ export function GpuTune() {
     try {
       await api.gpuOcReset();
       setActive(null);
-      const fresh = await api.gpuOcInfo();
-      setInfo(fresh);
+      const fresh = await refreshGpuOc();
       setPowerOn(true);
-      setPowerW(Math.round(fresh.powerLimitW));
+      if (fresh) setPowerW(Math.round(fresh.powerLimitW));
       setCoreOffOn(false);
       setCoreOffset(0);
       setMemOffOn(false);
       setMemOffset(0);
       setFanAuto(true);
       setTempOn(false);
-      if (fresh.tempLimitC > 0) setTempLimit(fresh.tempLimitC);
+      if (fresh && fresh.tempLimitC > 0) setTempLimit(fresh.tempLimitC);
       okStatus("已恢复出厂默认");
     } catch (e: unknown) {
       errStatus(getErrorMessage(e));
@@ -299,14 +321,33 @@ export function GpuTune() {
       await api.gpuOcApply(p.settings);
       setActive(p.id);
       okStatus(tf(`已应用配置「${p.name}」`, `Applied profile “${p.name}”`));
-      const fresh = await api.gpuOcInfo();
-      setInfo(fresh);
+      await refreshGpuOc();
     } catch (e: unknown) {
       errStatus(getErrorMessage(e));
     } finally {
       setApplying(false);
       setPendingId(null);
     }
+  }
+
+  // ── Crash-guard banner ────────────────────────────────────────────────────
+  // The profile the startup apply WOULD have used. "仍然应用" goes through
+  // `loadProfile` rather than a bare `api.gpuOcApply` so the deliberate path is
+  // identical to clicking the profile in the list: same re-entry guard, same
+  // status line, same post-apply refresh. Both actions clear the banner —
+  // whatever happened, the user has now decided, and a failed apply still says
+  // so in the status line below.
+  const blockedProfile = ocBlock ? (profiles.find((p) => p.id === activeId) ?? null) : null;
+
+  async function applyBlockedProfile() {
+    if (!blockedProfile) return;
+    await loadProfile(blockedProfile);
+    setOcBlock(null);
+  }
+
+  async function resetFromBlock() {
+    await reset();
+    setOcBlock(null);
   }
 
   const isErrorStatus = status?.kind === "error";
@@ -339,6 +380,32 @@ export function GpuTune() {
         </div>
       ) : (
         <div className="min-h-0 flex-1 space-y-4 overflow-auto px-6 pb-6">
+          {ocBlock && (
+            <div className="flex flex-wrap items-start gap-2 rounded-xl border border-warn/40 bg-warn/10 px-3 py-2.5 text-[12px] text-warn">
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+              <span className="min-w-0 flex-1">
+                {blockReasonText(tf, ocBlock.reason)}
+                {ocBlock.detail && <span className="ml-1 opacity-70">({ocBlock.detail})</span>}
+              </span>
+              <div className="flex shrink-0 items-center gap-1.5">
+                {blockedProfile && (
+                  <Button variant="ghost" disabled={applying} onClick={() => void applyBlockedProfile()}>
+                    {tf("仍然应用", "Apply anyway")}
+                  </Button>
+                )}
+                <Button variant="ghost" disabled={applying} onClick={() => void resetFromBlock()}>
+                  {tf("恢复默认", "Reset to stock")}
+                </Button>
+                <button
+                  onClick={() => setOcBlock(null)}
+                  className="no-drag shrink-0 cursor-pointer rounded px-1 text-warn/80 hover:text-warn"
+                  aria-label={tf("关闭", "Dismiss")}
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          )}
           {startupError && (
             <div className="flex items-start gap-2 rounded-xl border border-danger/40 bg-danger/10 px-3 py-2.5 text-[12px] text-danger">
               <AlertTriangle size={14} className="mt-0.5 shrink-0" />

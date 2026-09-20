@@ -1,6 +1,6 @@
 import { motion } from "motion/react";
 import { Activity, ChevronDown, Cpu, Database, Gauge, Leaf, MonitorPlay, Timer, Zap } from "lucide-react";
-import { useCallback, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { formatBytes } from "../../lib/format";
 import { hueColor } from "../../lib/colors";
 import { useTf } from "../../lib/i18n";
@@ -8,9 +8,9 @@ import {
   CO2_KG_PER_KWH,
   gameDisplayName,
   type PerfSample,
-  type PerfSession,
   type PerfSummary,
 } from "../../lib/perf";
+import { loadSamples, peekSamples, type PerfSessionMeta } from "../../lib/perfSamples";
 import { TimeSeriesChart, type RefLine } from "./TimeSeriesChart";
 import { DualAxisChart } from "./DualAxisChart";
 
@@ -478,9 +478,50 @@ function fmtElapsed(ms: number): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
-export function PerfReport({ session }: { session: PerfSession }) {
+/** Stable empty series, so "not loaded yet" never churns the chart memos. */
+const NO_SAMPLES: PerfSample[] = [];
+
+/**
+ * The session's sample array, pulled from its own file on demand (see
+ * `lib/perfSamples`). Resolves synchronously from the LRU cache when the
+ * session was just recorded or prefetched after hydration — which is the normal
+ * path for the auto-surfaced report and the default (newest) selection, so the
+ * charts still paint with data on the very first frame.
+ *
+ * A row that still carries inline `samples` (a v1 row whose migration write
+ * failed) is read directly, with no IO.
+ */
+function useSessionSamples(session: PerfSessionMeta): PerfSample[] {
+  const { id, samples: inline } = session;
+  const [samples, setSamples] = useState<PerfSample[]>(
+    () => inline ?? peekSamples(id) ?? NO_SAMPLES,
+  );
+  useEffect(() => {
+    if (inline) {
+      setSamples(inline);
+      return;
+    }
+    const cached = peekSamples(id);
+    if (cached) {
+      setSamples(cached);
+      return;
+    }
+    // Selecting another session mid-load must not paint the old one's data.
+    let alive = true;
+    void loadSamples(id).then((loaded) => {
+      if (alive) setSamples(loaded);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [id, inline]);
+  return samples;
+}
+
+export function PerfReport({ session }: { session: PerfSessionMeta }) {
   const tf = useTf();
-  const { summary, samples } = session;
+  const { summary } = session;
+  const samples = useSessionSamples(session);
   const syncKey = useId();
   const wrapRef = useRef<HTMLDivElement>(null);
 

@@ -102,6 +102,13 @@ fn show_main<R: Runtime>(app: &AppHandle<R>) {
         if reload {
             let _ = window.eval("window.location.reload()");
         }
+        // Re-open the frontend's polling gate and restore sensord's fast cadence
+        // the instant the window comes back, instead of leaving the user looking
+        // at frozen numbers until the ui-vis thread's next 2 s tick. Belt and
+        // braces with the `app://focus` edge and the thread's own self-heal:
+        // a gate that gets stuck CLOSED is indistinguishable from the
+        // "monitor disappears" bug, so every restore path clears it.
+        crate::ui_visibility::set_main_hidden(false);
     }
 }
 

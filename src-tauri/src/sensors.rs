@@ -17,8 +17,9 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -96,6 +97,7 @@ struct SidecarReadings {
     gpu_power: Option<f32>,
     cpu_temp: Option<f32>,
     gpu_temp: Option<f32>,
+    received_at: Option<Instant>,
 }
 
 /// Shared, thread-safe store for the most recent sidecar readings.
@@ -130,6 +132,66 @@ static SIDECAR_ALIVE: AtomicBool = AtomicBool::new(false);
 /// running image locks its own file, so an update that replaces the program
 /// files must stop the sidecar first or it half-fails. See `updater::teardown`.
 static SIDECAR_PID: AtomicU32 = AtomicU32::new(0);
+static REOPEN_STATE: Lazy<Mutex<(u64, Instant)>> = Lazy::new(|| Mutex::new((0, Instant::now())));
+
+/// Sidecar poll cadence while anything actually consumes its readings.
+const SIDECAR_INTERVAL_ACTIVE_MS: u32 = 1400;
+/// Slow cadence used when nothing does: the main window is in the tray, no game
+/// session is being recorded, and no fan runs off our curve/manual control.
+/// sensord's LibreHardwareMonitor sweep is the single most expensive thing in
+/// the idle process (measured 3.1% of a core at 1400 ms), and nobody is looking.
+const SIDECAR_INTERVAL_IDLE_MS: u32 = 3000;
+/// Last interval we successfully pushed to the sidecar. 0 = unknown (never sent,
+/// or the sidecar was replaced), which forces the next refresh to send.
+static SIDECAR_INTERVAL_MS: AtomicU32 = AtomicU32::new(0);
+
+/// Which cadence the sidecar should be running at right now.
+///
+/// Anything that CONSUMES sensor readings keeps the fast cadence:
+/// * the main window is on screen (the user is reading the numbers),
+/// * the perf recorder has a live game session (its ~5 Hz samples interpolate
+///   from these readings — slowing them down would flatten a real report),
+/// * a fan channel is in curve or manual mode, i.e. the fan engine is actively
+///   steering hardware off these temperatures. Halving its feedback rate is the
+///   one change here that could be *felt* (a slower ramp on a thermal spike),
+///   so we never do it while the engine drives anything.
+fn desired_sidecar_interval_ms() -> u32 {
+    if !crate::ui_visibility::main_hidden() {
+        return SIDECAR_INTERVAL_ACTIVE_MS;
+    }
+    if crate::perf_recorder::active_session_count() > 0 {
+        return SIDECAR_INTERVAL_ACTIVE_MS;
+    }
+    let driving_fans = crate::fan::config_snapshot()
+        .iter()
+        .any(|c| c.mode == "curve" || c.mode == "manual");
+    if driving_fans {
+        return SIDECAR_INTERVAL_ACTIVE_MS;
+    }
+    SIDECAR_INTERVAL_IDLE_MS
+}
+
+/// Re-evaluate the sidecar poll interval and push it only when it CHANGED.
+///
+/// Edge-triggered on purpose: the sidecar's stdin is a line protocol shared with
+/// the fan engine's `set`/`auto` commands, so spamming an `interval` line every
+/// tick would both waste the pipe and interleave with real actuation. Callers
+/// may therefore invoke this as often as they like (the visibility thread calls
+/// it every 2 s; the tray paths call it on the transition).
+///
+/// If the write fails (no sidecar yet / it just died) the cached value is left
+/// alone, so the next call retries instead of believing a command that never
+/// landed.
+pub fn refresh_sidecar_interval() {
+    let want = desired_sidecar_interval_ms();
+    if SIDECAR_INTERVAL_MS.load(Ordering::SeqCst) == want {
+        return;
+    }
+    if crate::fan::send_command(&format!("interval {want}")) {
+        SIDECAR_INTERVAL_MS.store(want, Ordering::SeqCst);
+        tracing::debug!("sensord poll interval -> {want} ms");
+    }
+}
 
 /// PID of the running sensord sidecar, if one is alive.
 pub fn sidecar_pid() -> Option<u32> {
@@ -191,7 +253,11 @@ pub fn ensure_sidecar() {
         return;
     }
 
+    // Pass our PID so sensord can exit even when its stdin pipe survives a
+    // CorePilot crash or is swallowed by the Windows console host.
     let child = Command::new(&sidecar)
+        .arg("--parent")
+        .arg(std::process::id().to_string())
         .stdout(Stdio::piped())
         // Piped (not null) so the fan engine can send `set`/`auto` commands
         // to the sidecar over stdin (see `crate::fan`).
@@ -214,6 +280,10 @@ pub fn ensure_sidecar() {
     // actuator). Taken before the child moves into the reader thread.
     if let Some(stdin) = child.stdin.take() {
         crate::fan::register_sidecar_stdin(stdin);
+        // A fresh sidecar starts at its own built-in cadence, so forget whatever
+        // we had pushed to the previous one and re-send unconditionally.
+        SIDECAR_INTERVAL_MS.store(0, Ordering::SeqCst);
+        refresh_sidecar_interval();
     }
 
     let Some(stdout) = child.stdout.take() else {
@@ -233,14 +303,74 @@ pub fn ensure_sidecar() {
         .name("sensord-reader".into())
         .spawn(move || {
             let reader = BufReader::new(stdout);
+            let pid = child.id();
+            let last_line = Arc::new(AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            ));
+            let watchdog_stamp = Arc::clone(&last_line);
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(5));
+                // Stop the moment this sidecar is no longer the live one. The
+                // reader reaps the child (`child.wait()`) when sensord dies on
+                // its own, which releases the PID back to Windows — but this
+                // thread would keep a stale `pid` with a frozen stamp and then
+                // fire a GUARANTEED kill ~30 s later on whatever recycled it
+                // (Windows reuses PIDs fast and this app churns processes).
+                // Also what stops one leaked 30 s thread per sidecar death.
+                if SIDECAR_PID.load(Ordering::SeqCst) != pid {
+                    break;
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if now.saturating_sub(watchdog_stamp.load(Ordering::SeqCst)) > 30 {
+                    // BufRead blocks while a hung sidecar emits no line, so the
+                    // reader cannot perform the timeout itself. Kill by PID; the
+                    // reader then observes EOF and the normal respawn path runs.
+                    // Via `process::kill` (not `taskkill /T /F`): it runs the
+                    // `guard_critical_pid` gate that refuses csrss/wininit/
+                    // services/lsass — terminating one of those bugchecks the
+                    // box with CRITICAL_PROCESS_DIED — and it takes down only
+                    // this PID, never a recycled owner's whole child tree.
+                    let _ = crate::process::kill(pid);
+                    break;
+                }
+            });
             for line in reader.lines() {
                 let Ok(line) = line else {
                     break; // read error / pipe closed.
                 };
-                if let Some(readings) = parse_sidecar_line(&line) {
-                    *SIDECAR.lock() = readings;
+                last_line.store(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    Ordering::SeqCst,
+                );
+                let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if let Some(reopens) = json.get("reopens").and_then(|v| v.as_u64()) {
+                    let mut state = REOPEN_STATE.lock();
+                    let now = Instant::now();
+                    if now.duration_since(state.1) >= Duration::from_secs(60) {
+                        *state = (reopens, now);
+                    } else if reopens > state.0 + 3 {
+                        tracing::warn!(reopens, "sensord chip reopens advanced by more than 3/min");
+                        state.0 = reopens;
+                    }
                 }
-                if let Some(cs) = parse_cpu_sensors(&line) {
+                if let Some(readings) = parse_sidecar_line(&json) {
+                    *SIDECAR.lock() = SidecarReadings {
+                        received_at: Some(Instant::now()),
+                        ..readings
+                    };
+                }
+                if let Some(cs) = parse_cpu_sensors(&json) {
                     *CPU_SENSORS.lock() = cs;
                 }
                 // The same line also carries fan / temp / control arrays for
@@ -257,6 +387,10 @@ pub fn ensure_sidecar() {
             crate::fan::clear();
             // stdout closed → sidecar exited. Reap it; ignore the result.
             let _ = child.wait();
+            // The interval we pushed died with this process; clear the cache so
+            // the replacement is configured instead of silently inheriting the
+            // sidecar's default cadence.
+            SIDECAR_INTERVAL_MS.store(0, Ordering::SeqCst);
             // Mark dead LAST so a concurrent `ensure_sidecar()` that wins the CAS
             // after this point spawns a genuinely fresh process.
             SIDECAR_PID.store(0, Ordering::SeqCst);
@@ -275,13 +409,7 @@ pub fn ensure_sidecar() {
 /// Expected shape (any field may be `null`):
 /// `{"cpuPower":<num|null>,"cpuTemp":<num|null>,"gpuPower":<num|null>,"gpuTemp":<num|null>}`
 /// Returns `None` if the line isn't valid JSON; unknown/missing fields become `None`.
-fn parse_sidecar_line(line: &str) -> Option<SidecarReadings> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let json: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-
+fn parse_sidecar_line(json: &serde_json::Value) -> Option<SidecarReadings> {
     // Accept JSON numbers; reject NaN/inf and non-finite via f64 -> f32.
     let field = |key: &str| -> Option<f32> {
         let v = json.get(key)?;
@@ -301,13 +429,13 @@ fn parse_sidecar_line(line: &str) -> Option<SidecarReadings> {
         gpu_power: field("gpuPower"),
         cpu_temp: field("cpuTemp"),
         gpu_temp: field("gpuTemp"),
+        received_at: None,
     })
 }
 
 /// Parse the `cpu` array (deep SMU/CPU sensors) from a sidecar JSON line.
 /// Returns `None` if the line isn't valid JSON or has no `cpu` array.
-fn parse_cpu_sensors(line: &str) -> Option<Vec<CpuSensor>> {
-    let json: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+fn parse_cpu_sensors(json: &serde_json::Value) -> Option<Vec<CpuSensor>> {
     let arr = json.get("cpu")?.as_array()?;
     let mut out = Vec::with_capacity(arr.len());
     for item in arr {
@@ -702,11 +830,15 @@ pub fn sample() -> SensorSample {
     // higher). On non-NVIDIA GPUs we fall back to the sidecar.
     {
         let readings = *SIDECAR.lock();
-        out.cpu_power = readings.cpu_power;
-        out.cpu_temp = readings.cpu_temp;
+        let fresh = readings
+            .received_at
+            .map(|t| t.elapsed() <= Duration::from_secs(10))
+            .unwrap_or(false);
+        out.cpu_power = fresh.then_some(readings.cpu_power).flatten();
+        out.cpu_temp = fresh.then_some(readings.cpu_temp).flatten();
         let (nvml_temp, nvml_power) = crate::gpu::gpu_temp_power();
-        out.gpu_temp = nvml_temp.or(readings.gpu_temp);
-        out.gpu_power = nvml_power.or(readings.gpu_power);
+        out.gpu_temp = nvml_temp.or_else(|| fresh.then_some(readings.gpu_temp).flatten());
+        out.gpu_power = nvml_power.or_else(|| fresh.then_some(readings.gpu_power).flatten());
     }
 
     out.cpu_sensors = cpu_sensors();

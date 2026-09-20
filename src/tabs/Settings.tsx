@@ -250,7 +250,9 @@ function NetworkCard() {
                   <span
                     className={cn(
                       "grid h-[18px] w-[18px] shrink-0 place-items-center rounded-md border transition-colors",
-                      isOn ? "border-accent bg-accent-bright text-white" : "border-line",
+                      // text-on-accent, not text-white: the tick sits on the accent
+                      // fill, which is neon yellow/green on the bright-accent themes.
+                      isOn ? "border-accent bg-accent-bright text-on-accent" : "border-line",
                     )}
                   >
                     {isOn && <Check size={12} strokeWidth={3} />}

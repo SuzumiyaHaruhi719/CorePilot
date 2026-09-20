@@ -1,13 +1,13 @@
 import { ChevronsUp, Copy, FolderOpen, Loader2, MonitorPlay, RotateCw, Search, X } from "lucide-react";
-import { useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useCallback, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useProcesses } from "../../hooks/useProcesses";
 import { useTf } from "../../lib/i18n";
 import { PRIORITY, api, type ProcInfo } from "../../lib/ipc";
 import { useOsdTargets } from "../../store/osd";
+import { useUi } from "../../store/ui";
 import { Button } from "../ui/Button";
 import { ContextMenu, type MenuState } from "../ui/ContextMenu";
 import { Modal } from "../ui/Modal";
-import type { SortKey } from "../cores/ProcessTable";
 import { DetailsTable } from "./DetailsTable";
 import { TmProcessTable } from "./TmProcessTable";
 
@@ -28,9 +28,18 @@ function isSystemProc(p: ProcInfo): boolean {
 export function ProcessView({ detailed }: ProcessViewProps) {
   const tf = useTf();
   const { processes, loading, error } = useProcesses();
-  const [sortKey, setSortKey] = useState<SortKey>("cpu");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
-  const [search, setSearch] = useState("");
+  // Filter + sort live in the UI store: this component is unmounted whenever the
+  // user visits another top-level tab (App.tsx remounts per tab), which used to
+  // wipe the search box and snap the table back to CPU-descending.
+  const sortKey = useUi((s) => s.procSortKey);
+  const sortDir = useUi((s) => s.procSortDir);
+  const search = useUi((s) => s.procSearch);
+  const setSearch = useUi((s) => s.setProcSearch);
+  // Stable forever (a zustand action identity never changes), which is exactly
+  // what TmProcessTable/DetailsTable's `memo`ized rows need: a handler rebuilt
+  // each render makes every row's comparator fail on every 1.5 s poll and
+  // silently cancels the memo.
+  const handleSort = useUi((s) => s.setProcSort);
   const [pendingKill, setPendingKill] = useState<ProcInfo | null>(null);
   const [killing, setKilling] = useState(false);
   const [status, setStatus] = useState("");
@@ -69,15 +78,15 @@ export function ProcessView({ detailed }: ProcessViewProps) {
     });
   }, [processes, search, sortKey, sortDir]);
 
-  function handleSort(key: SortKey) {
-    if (key === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    else {
-      setSortKey(key);
-      setSortDir(key === "name" ? "asc" : "desc");
-    }
-  }
-
-  function openRowMenu(e: ReactMouseEvent, proc: ProcInfo) {
+  // ── Stable row callbacks ────────────────────────────────────────────────
+  // TmProcessTable's rows are `memo`ized and receive these through `rowProps`.
+  // A handler re-created on every render invalidates `rowProps`, which makes
+  // every row's comparator fail on every 1.5 s poll and quietly cancels the
+  // memo. `handleSort` above is a store action (stable by construction); the
+  // context-menu builder closes over live state, so it gets a ref trampoline.
+  // Invariant: the ref is written during render but only ever READ from a
+  // user-event handler, which always runs after the commit that wrote it.
+  function openRowMenuImpl(e: ReactMouseEvent, proc: ProcInfo) {
     e.preventDefault();
     setMenu({
       x: e.clientX,
@@ -148,6 +157,16 @@ export function ProcessView({ detailed }: ProcessViewProps) {
       ],
     });
   }
+
+  // The menu builder closes over most of this component's state, so it can never
+  // be a stable `useCallback`. Hand the rows a constant trampoline and keep the
+  // live implementation in a ref instead.
+  const openRowMenuRef = useRef(openRowMenuImpl);
+  openRowMenuRef.current = openRowMenuImpl;
+  const openRowMenu = useCallback(
+    (e: ReactMouseEvent, proc: ProcInfo) => openRowMenuRef.current(e, proc),
+    [],
+  );
 
   async function confirmKill() {
     if (!pendingKill || killing) return;

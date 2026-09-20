@@ -25,15 +25,22 @@
 //! * `corepilot_overlay.dll` may be **mapped into a running game**. A mapped
 //!   image cannot be replaced, so it is ejected.
 //! * `sensord.exe` is a live child process, and a running image locks its own
-//!   file. It is told to hand the fans back to the BIOS (`autoall`) and killed.
+//!   file. It is told to hand the fans back to the BIOS (`autoall`), then its
+//!   stdin is CLOSED so it reaches that restore before it dies; only a sidecar
+//!   still alive after the grace window is terminated (see
+//!   [`shutdown_teardown`] for why the old sleep-then-kill lost the race).
 //!
 //! Nothing else needs teardown, and it is worth writing down why so nobody adds
 //! ceremony back: the `CorePilot-FPS` ETW session holds no file handle and the
 //! next launch force-stops any stale one anyway (`fps::stop_stale_session`); the
-//! taskbar monitor is a window on its own thread with no handle on our files;
-//! and `persist.rs` writes atomically on every `persist_set`, so there is never
-//! buffered user data to flush. User data in `%APPDATA%\com.corepilot.app` is
-//! never touched by any path in this module.
+//! taskbar monitor is a window on its own thread with no handle on our files
+//! (it does call [`shutdown_teardown`] on `WM_ENDSESSION` — that window is the
+//! only thing in this process the session manager delivers to, so it is how a
+//! Windows shutdown / logoff / fast-user-switch reaches the fan restore at
+//! all); and the store flush lives at real process exit (`RunEvent::Exit` in
+//! `lib.rs`), plus one extra flush in [`teardown`] before the file swap. User
+//! data in `%APPDATA%\com.corepilot.app` is never touched by any path in this
+//! module.
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -66,6 +73,12 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How long to wait for the sidecar to die before giving up and continuing.
 const SIDECAR_EXIT_WAIT: Duration = Duration::from_secs(3);
+
+/// How long to let the sidecar exit on its own after its stdin is closed, before
+/// falling back to `TerminateProcess`. Sized to cover sensord's worst realistic
+/// `Gate` hold — a full LibreHardwareMonitor close+reopen on the stale-bank path
+/// — without making a tray quit feel stuck.
+const SIDECAR_EOF_WAIT: Duration = Duration::from_secs(2);
 
 /// Shown whenever the in-app path can't finish, so there is always a way out.
 const RELEASES_URL: &str = "https://github.com/SuzumiyaHaruhi719/CorePilot/releases/latest";
@@ -272,27 +285,78 @@ fn blockers(flavor: Flavor) -> Vec<Blocker> {
 /// complete logs and yields, because a wedged teardown is worse than a slightly
 /// dirty one — the swap/installer reports the real failure if a file is still
 /// locked afterwards.
+static SHUTDOWN_TORN_DOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn shutdown_teardown() {
+    // Portable updates call teardown before app.exit(), which also emits RunEvent::Exit.
+    // The once guard prevents duplicate fan/sidecar/ETW/persistence operations.
+    use std::sync::atomic::Ordering;
+    if SHUTDOWN_TORN_DOWN.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    // Restore hardware before the sidecar dies — and make sure it actually gets
+    // to RUN that restore.
+    //
+    // The failure this prevents: `autoall` is only QUEUED on sensord's stdin.
+    // sensord can be holding its `Gate` far longer than a fixed short sleep —
+    // the stale-bank reopen path holds it across a whole LibreHardwareMonitor
+    // close+reopen (hundreds of ms to seconds) and then RE-PINS the fan at its
+    // last PWM. `TerminateProcess` runs none of sensord's four ResetTouched
+    // routes, so sleeping 200 ms and killing lost that race and left the
+    // Nuvoton pinned at the last software PWM (fans stuck at e.g. 25%) with
+    // CorePilot gone and the BIOS NOT back in control, until a cold boot.
+    // So: send `autoall`, then drop the ChildStdin (`fan::clear`) — closing the
+    // write end makes sensord's CommandLoop hit EOF and run ResetTouched under
+    // Gate on its way out — then give it a real budget to exit and only
+    // terminate a sidecar that is still alive afterwards.
+    let queued = crate::fan::send_command("autoall");
+    crate::fan::clear();
+    if let Some(pid) = crate::sensors::sidecar_pid() {
+        if queued {
+            let deadline = Instant::now() + SIDECAR_EOF_WAIT;
+            // Stop waiting once the reader thread has reaped it and released the
+            // PID (`sidecar_pid() != pid`): Windows recycles PIDs fast, so a bare
+            // `pid_alive` could otherwise describe an unrelated new process.
+            while Instant::now() < deadline
+                && crate::sensors::sidecar_pid() == Some(pid)
+                && crate::fps::pid_alive(pid)
+            {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+        if crate::sensors::sidecar_pid() == Some(pid) && crate::fps::pid_alive(pid) {
+            if let Err(e) = crate::process::kill(pid) {
+                tracing::warn!("shutdown: could not stop sensord (pid {pid}): {e}");
+            }
+        }
+    }
+    crate::overlay_inject::write_disabled();
+    if let Err(e) = ferrisetw::trace::stop_trace_by_name(crate::fps::FPS_SESSION_NAME) {
+        tracing::debug!("shutdown: FPS trace already stopped or unavailable: {e:?}");
+    }
+    // NO `persist::flush()` here: this body is behind the once-guard, and the
+    // portable-update path runs it long before the process actually exits, which
+    // would make the flush at real exit a no-op and drop the last debounce window
+    // of store writes. The flush lives in `RunEvent::Exit` (lib.rs) instead, with
+    // an explicit pre-swap one in `teardown` below.
+}
+
 fn teardown() {
     if let Some(pid) = crate::overlay_inject::eject_resident() {
         tracing::info!("updater: ejected overlay DLL from pid {pid}");
     }
-
+    shutdown_teardown();
+    // Explicit, because `shutdown_teardown` no longer flushes (see above) and the
+    // update path may never reach `RunEvent::Exit` in a usable state.
+    crate::persist::flush();
+    // The updater has a longer budget than normal process exit because it is
+    // about to replace the sidecar image on disk.
     if let Some(pid) = crate::sensors::sidecar_pid() {
-        // Hand every driven fan back to the BIOS BEFORE killing the sidecar: it
-        // normally restores them on its own exit, but a terminated process never
-        // gets to run that, which would leave fans pinned at whatever duty the
-        // curve engine last wrote.
-        if crate::fan::send_command("autoall") {
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        if let Err(e) = crate::process::kill(pid) {
-            tracing::warn!("updater: could not stop sensord (pid {pid}): {e}");
-        }
         let deadline = Instant::now() + SIDECAR_EXIT_WAIT;
         while crate::fps::pid_alive(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
-        tracing::info!("updater: sensord stopped (pid {pid})");
     }
 }
 
@@ -312,7 +376,9 @@ fn extract_portable(bytes: &[u8], staging: &Path) -> Result<(), String> {
         .map_err(|e| format!("更新包无法打开: {e}"))?;
 
     for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).map_err(|e| format!("更新包读取失败: {e}"))?;
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("更新包读取失败: {e}"))?;
         if !entry.is_file() {
             continue;
         }
@@ -411,7 +477,12 @@ fn portable_install(app: &AppHandle, bytes: &[u8]) -> Result<(), String> {
         .arg("--await-predecessor")
         .arg(std::process::id().to_string())
         .spawn()
-        .map_err(|e| format!("新版本已就位,但启动失败: {e}(请手动运行 {})", new_exe.display()))?;
+        .map_err(|e| {
+            format!(
+                "新版本已就位,但启动失败: {e}(请手动运行 {})",
+                new_exe.display()
+            )
+        })?;
 
     emit_state(app, "ready", None);
     app.exit(0);
@@ -608,11 +679,10 @@ pub async fn update_install(app: AppHandle) -> Result<(), String> {
             // Runs on the blocking pool: extraction and the swap are synchronous
             // filesystem work, and this command is awaited from the UI.
             let app2 = app.clone();
-            let outcome = tauri::async_runtime::spawn_blocking(move || {
-                portable_install(&app2, &bytes)
-            })
-            .await
-            .map_err(|e| format!("更新任务失败: {e}"))?;
+            let outcome =
+                tauri::async_runtime::spawn_blocking(move || portable_install(&app2, &bytes))
+                    .await
+                    .map_err(|e| format!("更新任务失败: {e}"))?;
 
             if let Err(msg) = outcome {
                 emit_state(&app, "failed", Some(msg.clone()));
@@ -669,7 +739,10 @@ mod tests {
             assert_eq!(std::fs::read(dir.join(name)).unwrap(), b"new");
         }
         // The displaced build is still on disk until the next launch cleans it.
-        assert_eq!(std::fs::read(dir.join("corepilot.exe.old")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(dir.join("corepilot.exe.old")).unwrap(),
+            b"old"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -716,7 +789,11 @@ mod tests {
             use std::io::Write;
             // Nested paths and a traversal attempt: both must land as bare names
             // in the staging dir (or be dropped), never outside it.
-            for name in ["nested/corepilot.exe", "sensord.exe", "corepilot_overlay.dll"] {
+            for name in [
+                "nested/corepilot.exe",
+                "sensord.exe",
+                "corepilot_overlay.dll",
+            ] {
                 w.start_file(name, opts).unwrap();
                 w.write_all(b"payload").unwrap();
             }

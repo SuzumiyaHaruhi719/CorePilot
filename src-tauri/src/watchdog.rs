@@ -56,9 +56,11 @@ pub fn start(app: AppHandle) {
                 // Post a fresh heartbeat request. If the main thread is healthy it
                 // runs within ms (so the next check sees a fresh stamp); if wedged,
                 // the closure never runs and `age` keeps growing → we log.
-                let _ = app.run_on_main_thread(|| {
-                    LAST_BEAT_MS.store(now_ms(), Ordering::SeqCst);
-                });
+                if !crate::SHUTTING_DOWN.load(Ordering::SeqCst) {
+                    let _ = app.run_on_main_thread(|| {
+                        LAST_BEAT_MS.store(now_ms(), Ordering::SeqCst);
+                    });
+                }
             }
         });
 }

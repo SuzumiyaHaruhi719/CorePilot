@@ -48,3 +48,9 @@ branding/.*
 *.key
 latest.json
 release/
+
+# local scratch (symbol cache, build helper, build output)
+.tmp/
+.build_lowprio.bat
+src-tauri/binaries/*.old-*.exe
+.playwright-mcp/

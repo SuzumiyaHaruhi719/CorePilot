@@ -51,6 +51,12 @@ html {
   /* Accent + signals — neon violet primary, rose energy accent */
   --color-accent: oklch(62% 0.225 293);
   --color-accent-bright: oklch(73% 0.2 295);
+  /* Ink for anything drawn ON an accent fill — a check mark, a selection square,
+     a primary button's label. White reads fine on the violet/blue baselines, but
+     NOT on the bright-accent theme styles, which override this token to near
+     black further down (see the on-accent block after the theme presets). Every
+     mark that sits on accent must use this, never a hard-coded white. */
+  --color-on-accent: #fff;
   --color-rose: oklch(66% 0.225 12);
   --color-rose-bright: oklch(74% 0.2 14);
   --color-cyan: oklch(80% 0.13 218);
@@ -219,6 +225,27 @@ html {
   /* Drop the animated HUD backdrop entirely (a full-screen continuous repaint). */
   html[data-reduce-motion="true"] .hud-grid {
     display: none;
+  }
+
+  /* 没人在看 — the window is hidden in the tray, minimized, or fully covered by a
+     fullscreen game (see the visibility watcher in App.tsx). Chromium's own
+     occlusion throttling is disabled PROCESS-WIDE so the parked OSD overlay keeps
+     ticking, which means these infinite animations otherwise keep compositing
+     frames behind the game — the webview2 gpu-process cost users blamed on
+     CorePilot while gaming.
+
+     PAUSED, not neutered: unlike the reduce-motion block above (which snaps to
+     the end frame, because the user asked for no motion at all), this is a
+     temporary freeze the user never sees begin or end — it resumes exactly where
+     it stopped, so coming back looks identical to never having left.
+
+     Scoped to the three infinite utilities actually in use rather than `*`: a
+     blanket rule would also freeze a one-shot enter animation at frame 0 and
+     leave that content invisible when the user returns. */
+  html[data-ui-idle="true"] .animate-pulse,
+  html[data-ui-idle="true"] .animate-spin,
+  html[data-ui-idle="true"] .animate-spin-slow {
+    animation-play-state: paused !important;
   }
 
   /* Soft glow — defaults to the live accent so it recolors with the theme. */
@@ -673,6 +700,21 @@ html[data-theme-style="terminal"] .grad-accent,
 html[data-theme-style="cyberpunk"] .grad-accent {
   color: oklch(16% 0.02 100);
   text-shadow: none;
+}
+
+/* …and the same correction for every OTHER mark that sits on an accent fill
+   (selection ticks, checkbox squares) via the --color-on-accent token. The
+   .grad-accent rule above only covered buttons, so the check marks stayed white:
+   on cyberpunk (accent #fee801) a white tick on neon yellow is ~1.06:1 contrast
+   — the user genuinely could not tell a selected row from an unselected one.
+   Same near-black as .grad-accent so a button label and a tick agree.
+   Deliberately NOT registered with @property: the accent itself tweens over
+   360 ms, and a mark crossfading through mid-grey is less readable than a
+   single instant flip. Dark + light + the light theme styles keep #fff. */
+html[data-theme-style="graphite"],
+html[data-theme-style="terminal"],
+html[data-theme-style="cyberpunk"] {
+  --color-on-accent: oklch(16% 0.02 100);
 }
 
 /* ============================================================

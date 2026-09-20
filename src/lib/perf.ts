@@ -107,11 +107,17 @@ function avg(values: Array<number | null | undefined>): number | null {
 }
 function maxOf(values: Array<number | null | undefined>): number | null {
   const xs = values.filter(isNum);
-  return xs.length ? Math.max(...xs) : null;
+  if (!xs.length) return null;
+  let out = xs[0];
+  for (let i = 1; i < xs.length; i++) if (xs[i] > out) out = xs[i];
+  return out;
 }
 function minOf(values: Array<number | null | undefined>): number | null {
   const xs = values.filter(isNum);
-  return xs.length ? Math.min(...xs) : null;
+  if (!xs.length) return null;
+  let out = xs[0];
+  for (let i = 1; i < xs.length; i++) if (xs[i] < out) out = xs[i];
+  return out;
 }
 /** p-th percentile (0..100) of the values (ascending). */
 function percentile(values: Array<number | null | undefined>, p: number): number | null {

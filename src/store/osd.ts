@@ -93,10 +93,25 @@ export interface OsdConfig {
   /** In-game (injection) overlay master switch. Persisted so it survives tab
    *  switches; the attach/detach loop runs from the OSD config panel. */
   inject: boolean;
-  /** AUTO inject mode: backend keeps the overlay DLL resident in the foreground
-   *  game and shows the OSD only while that game is the active window (hidden on
-   *  alt-tab, ejected on exit). Mutually exclusive with `inject` — auto wins. */
-  autoInject: boolean;
+  /**
+   * @deprecated Dead field — kept OPTIONAL only so the persisted key and any
+   * remaining reader still type-check.
+   *
+   * It was meant to be a second injection mode (backend keeps the DLL resident
+   * and shows the OSD only while the game is the active window), but nothing
+   * ever called `api.overlaySetAuto`, so the value could never reach the
+   * backend. It had no UI either, which is worse than it sounds: the OSD tab
+   * showed `inject` as THE injection switch while a second, invisible,
+   * inert switch sat in the same config object — exactly the kind of
+   * "three unrelated switches" confusion this tab is being fixed for. There is
+   * one injection switch now (`inject`). Do not re-introduce a toggle for this
+   * field without wiring `overlay_set_auto` first: a toggle that writes a value
+   * nothing reads is a bug report waiting to happen.
+   *
+   * Deliberately NOT stripped in `migrate` and NOT a version bump — rewriting
+   * the persisted blob to delete one dead key is all risk and no gain.
+   */
+  autoInject?: boolean;
   /** Enabled metric keys (see OSD_METRICS), in display order. */
   metrics: string[];
 
@@ -195,7 +210,7 @@ export const useOsd = create<OsdStore>()(
       oledShift: false,
       desktopMode: false,
       inject: false,
-      autoInject: false,
+      // `autoInject` intentionally absent — see its (deprecated) doc comment.
       metrics: DEFAULT_METRICS,
       ...TASKBAR_DEFAULTS,
       ...TBMON_DEFAULTS,
@@ -340,4 +355,94 @@ export function resolveOsd(
   // desktop mode is on. This is what keeps the desktop OSD alive when you switch
   // to a blacklisted app; with desktop mode off, a blacklist genuinely hides it.
   return global.desktopMode ? effectiveConfig(global, match?.config) : null;
+}
+
+/** Why the window overlay is (not) on screen right now. One value per distinct
+ *  thing the user can DO about it. */
+export type OsdVisibilityKind =
+  /** Showing, because the foreground app counts as a game (detected or whitelisted). */
+  | "shown-game"
+  /** Showing, because desktop mode covers the current non-game foreground. */
+  | "shown-desktop"
+  /** Hidden: neither master switch can cover this foreground. */
+  | "hidden-master-off"
+  /** Hidden: the foreground exe is on the black list. */
+  | "hidden-blacklist"
+  /** Hidden: the foreground isn't a game and desktop mode is off. */
+  | "hidden-not-game";
+
+export interface OsdVisibility {
+  kind: OsdVisibilityKind;
+  /** True iff the overlay is actually painting right now. */
+  shown: boolean;
+  /** Foreground exe (lowercased) or null when unresolved, echoed for the message. */
+  exe: string | null;
+  /** True when the foreground counts as a game — detected OR whitelisted. */
+  treatedAsGame: boolean;
+  /** The config the overlay would render with, or null when hidden. Carried out
+   *  so a status line can name the position the CURRENT app actually gets — a
+   *  per-game override can move the plate to a different corner than the one the
+   *  editor is showing. */
+  config: OsdConfig | null;
+  /**
+   * True when the window overlay IS showing on a game but injection is off.
+   *
+   * A window overlay cannot draw over an EXCLUSIVE-fullscreen swapchain, and
+   * nothing the frontend can read distinguishes exclusive fullscreen from
+   * borderless. So this is a hint the UI may offer ("if this game is exclusive
+   * fullscreen, turn injection on"), never a claim that the OSD is hidden.
+   */
+  needsInjectHint: boolean;
+}
+
+/**
+ * Explain the CURRENT overlay decision in terms a status line can render.
+ *
+ * This exists because of the bug report that started all of this: "the OSD
+ * disappears after a while". The OSD tab had no way to say why — a user with
+ * the default store (`enabled` on, `desktopMode` off, `inject` off) sitting on
+ * the desktop sees nothing at all and every control on the tab looks correct.
+ *
+ * The shown/hidden verdict is delegated to `resolveOsd` rather than re-derived,
+ * so the status line and the overlay window can never disagree; only the
+ * *reason* is classified here.
+ */
+export function explainOsd(
+  global: OsdConfig,
+  targets: OsdTarget[],
+  exe: string | null,
+  isGame: boolean,
+): OsdVisibility {
+  const n = exe ? normName(exe) : "";
+  const match = n ? targets.find((t) => t.name === n) : undefined;
+  const whitelisted = match?.list === "white";
+  const blacked = match?.list === "black";
+  const treatedAsGame = whitelisted || (isGame && !blacked);
+  const base = { exe, treatedAsGame, needsInjectHint: false, config: null };
+
+  // The overlay WINDOW only exists while one of the two masters is on — every
+  // caller of `osd_set_visible` passes `enabled || desktopMode` (OsdConfig,
+  // useOsdHotkey, App). With both off nothing can paint, whitelist or not, so
+  // this gate has to come first or a whitelisted game would report "showing"
+  // over a window that was never created.
+  if (!global.enabled && !global.desktopMode) {
+    return { ...base, kind: "hidden-master-off", shown: false };
+  }
+
+  const resolved = resolveOsd(global, targets, exe, isGame);
+  if (resolved !== null) {
+    return {
+      ...base,
+      kind: treatedAsGame ? "shown-game" : "shown-desktop",
+      shown: true,
+      needsInjectHint: treatedAsGame && !global.inject,
+      config: resolved,
+    };
+  }
+  if (blacked) return { ...base, kind: "hidden-blacklist", shown: false };
+  // A game in front, yet hidden: the only way through the gate above is
+  // `enabled` off + `desktopMode` on, and desktop mode deliberately covers
+  // NON-game foregrounds only, so it cannot rescue this one.
+  if (isGame) return { ...base, kind: "hidden-master-off", shown: false };
+  return { ...base, kind: "hidden-not-game", shown: false };
 }

@@ -3,11 +3,13 @@ import { motion } from "motion/react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useMetricsHistory } from "../../hooks/useMetricsHistory";
 import { useSensors } from "../../hooks/useSensors";
+import { useSharedGpuOc } from "../../hooks/useSharedTelemetry";
 import { cn } from "../../lib/cn";
 import { accentHue } from "../../lib/colors";
 import { formatBytes } from "../../lib/format";
 import { useTf } from "../../lib/i18n";
-import { api, withTimeout, type CpuTopology, type GpuOcInfo, type Overview } from "../../lib/ipc";
+import { type CpuTopology, type Overview } from "../../lib/ipc";
+import { getOverviewOnce, getTopologyOnce } from "../../lib/memoOnce";
 import { useSettings, type PerfCard } from "../../store/settings";
 import { CoreGraphs } from "../charts/CoreGraphs";
 import { GpuDetail } from "./GpuDetail";
@@ -75,39 +77,23 @@ export function PerfView() {
   const { latest: sensors, gpuHist, diskHist, netUpHist, netDownHist, powerHist } = useSensors(60);
   const [topo, setTopo] = useState<CpuTopology | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
-  const [gpuOc, setGpuOc] = useState<GpuOcInfo | null>(null);
   const perfCards = useSettings((s) => s.perfCards);
   const togglePerfCard = useSettings((s) => s.togglePerfCard);
-  const pollMs = useSettings((s) => s.pollMs);
 
+  // Both are fixed hardware descriptions, memoized for the session: the 性能
+  // sub-tab is remounted every time the user switches sub-tab OR top-level tab,
+  // and each remount used to re-issue both IPCs for data that cannot change.
   useEffect(() => {
-    api.getTopology().then(setTopo).catch(() => undefined);
-    api.getOverview().then(setOverview).catch(() => undefined);
+    getTopologyOnce().then(setTopo).catch(() => undefined);
+    getOverviewOnce().then(setOverview).catch(() => undefined);
   }, []);
 
   // NVML GPU clocks/temperature for the GPU card (graphicsClock isn't in Sensors).
-  useEffect(() => {
-    let alive = true;
-    let inFlight = false;
-    const tick = async () => {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const info = await withTimeout(api.gpuOcInfo());
-        if (alive) setGpuOc(info);
-      } catch {
-        /* NVML may be unavailable — the card falls back to Sensors. */
-      } finally {
-        inFlight = false;
-      }
-    };
-    void tick();
-    const id = window.setInterval(() => void tick(), Math.max(pollMs, 1000));
-    return () => {
-      alive = false;
-      window.clearInterval(id);
-    };
-  }, [pollMs]);
+  // Shared with GpuDetail (rendered right below this) and the GPU tune page: each
+  // used to run its OWN interval against `gpu_oc_info`, which is ~20 NVML calls
+  // per read, so this card alone doubled the NVML load of the page it sits on.
+  // The shared poller also stops entirely while nobody can see the window.
+  const gpuOc = useSharedGpuOc();
 
   const cpuNow = latest?.cpuOverall ?? 0;
   const memUsed = latest?.memUsed ?? 0;

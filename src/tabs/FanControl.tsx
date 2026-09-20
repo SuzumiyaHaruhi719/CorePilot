@@ -16,6 +16,7 @@ import { hueColor, isLightTheme } from "../lib/colors";
 import { useT, useTf } from "../lib/i18n";
 import { hoverPop } from "../lib/motion";
 import { api, withTimeout, type FanCalibProgress, type FanCalibration, type FanChannel, type FanCurvePoint, type FanInfo, type FanMode, type FanTempSource, type PassiveAdjustment } from "../lib/ipc";
+import { useUiActive } from "../hooks/useUiActive";
 import { useFanAutotune } from "../store/fanAutotune";
 import { useSettings } from "../store/settings";
 import { defaultConfig, FAN_PRESETS, MIN_SAFE_DUTY, useFanProfiles, type FanConfig } from "../store/fanProfiles";
@@ -404,14 +405,27 @@ export function FanControl() {
   useEffect(() => {
     let alive = true;
     let inFlight = false;
+    let lastKey = "";
     const tick = async () => {
       // Backpressure: never queue a second fanInfo while one is outstanding.
       if (inFlight) return;
+      // Nobody can see the RPMs — the window is in the tray, minimized, or behind
+      // a fullscreen game. `fan_info` walks every sensord control on every call
+      // and a result re-renders this whole page; neither is worth doing for an
+      // audience of zero. The fan ENGINE is backend-side (fan::start_engine) and
+      // is untouched by this, so curves keep being driven while we are quiet.
+      if (!useUiActive.getState().active) return;
       inFlight = true;
       try {
         const i = await withTimeout(api.fanInfo());
         if (!alive) return;
-        setInfo(i);
+        // Equality skip: the fan page is a large tree and RPM readings repeat
+        // verbatim whenever the fans are steady, which is most of the time.
+        const key = JSON.stringify(i);
+        if (key !== lastKey) {
+          lastKey = key;
+          setInfo(i);
+        }
         // Remember any header currently spinning (PERSISTED via markSpun), so a
         // fan that idles back to 0 (BIOS fan-stop) or survives a relaunch stays
         // visible. Idempotent — only writes when a new id first spins.
@@ -425,9 +439,15 @@ export function FanControl() {
     };
     void tick();
     const id = setInterval(() => void tick(), Math.max(800, pollMs));
+    // Re-read the moment the user looks back, so the page never greets them with
+    // the RPMs from whenever they last minimized it.
+    const unGate = useUiActive.subscribe((s, prev) => {
+      if (s.active && !prev.active) void tick();
+    });
     return () => {
       alive = false;
       clearInterval(id);
+      unGate();
     };
   }, [pollMs]);
 

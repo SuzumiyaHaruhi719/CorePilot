@@ -1,9 +1,9 @@
 import { CircleMinus, Copy, Cpu, ListTree, Plus, Search, SlidersHorizontal, X, Zap } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from "react";
 import { CoreGrid } from "../components/cores/CoreGrid";
 import { GroupRail } from "../components/cores/GroupRail";
-import { ProcessTable, type SortKey } from "../components/cores/ProcessTable";
+import { ProcessTable } from "../components/cores/ProcessTable";
 import { Button } from "../components/ui/Button";
 import { ColorPicker, type ColorAnchor } from "../components/ui/ColorPicker";
 import { ContextMenu, type MenuState } from "../components/ui/ContextMenu";
@@ -15,6 +15,7 @@ import { useTf } from "../lib/i18n";
 import { maskFromIds, popcount } from "../lib/cpu";
 import { maskToCpuList } from "../lib/format";
 import { api, type CpuTopology, type ProcInfo } from "../lib/ipc";
+import { getTopologyOnce } from "../lib/memoOnce";
 import { groupForProcess, maskToBigInt, useGroups, type GroupRule } from "../store/groups";
 import { useSettings } from "../store/settings";
 import { useUi } from "../store/ui";
@@ -74,9 +75,13 @@ export function CoreAssignment() {
   const optimizeOnStartup = useUi((s) => s.optimizeOnStartup);
   const setOptimizeOnStartup = useUi((s) => s.setOptimizeOnStartup);
 
-  const [search, setSearch] = useState("");
-  const [sortKey, setSortKey] = useState<SortKey>("cpu");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  // Filter + sort live in the UI store: App.tsx remounts this tab from scratch
+  // every time the user comes back to it, which used to clear the search box and
+  // snap the table back to CPU-descending mid-triage.
+  const search = useUi((s) => s.coreSearch);
+  const setSearch = useUi((s) => s.setCoreSearch);
+  const sortKey = useUi((s) => s.coreSortKey);
+  const sortDir = useUi((s) => s.coreSortDir);
   const [selectedPids, setSelectedPids] = useState<Set<number>>(new Set());
   const [coreModalOpen, setCoreModalOpen] = useState(false);
   const [editMask, setEditMask] = useState<bigint>(0n);
@@ -90,8 +95,11 @@ export function CoreAssignment() {
   const addBtnRef = useRef<HTMLDivElement>(null);
   const colorBtnRef = useRef<HTMLButtonElement>(null);
 
+  // Memoized for the session: topology cannot change while the process lives,
+  // but this tab is remounted on every visit, so it used to re-issue the IPC
+  // (and flash an empty core grid) each time.
   useEffect(() => {
-    api.getTopology().then(setTopo).catch(() => undefined);
+    getTopologyOnce().then(setTopo).catch(() => undefined);
   }, []);
 
   // Clear the multi-select (and close the color popover) when switching views.
@@ -188,32 +196,38 @@ export function CoreAssignment() {
     return sorted;
   }, [processes, search, sortKey, sortDir, selectedGroup, fullMask, groups]);
 
-  function handleSort(key: SortKey) {
-    if (key === sortKey) {
-      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    } else {
-      setSortKey(key);
-      setSortDir(key === "name" || key === "group" ? "asc" : "desc");
-    }
-  }
+  // ── Stable row callbacks ────────────────────────────────────────────────
+  // ProcessTable's rows are `memo`ized; a callback prop that is re-created on
+  // every render makes the comparator fail for EVERY row on EVERY 1.5 s poll,
+  // which silently undoes the memo. The values these handlers need change on
+  // every poll (`visible`) so they are read through a ref instead of a
+  // dependency array. Invariant: nothing reads these refs during render —
+  // only user-event handlers, which always run after the commit that wrote
+  // them, so there is no torn-read window. `handleSort` needs no ref at all:
+  // it is a zustand action, whose identity is stable for the app's lifetime.
+  const visibleRef = useRef<ProcInfo[]>([]);
+  visibleRef.current = visible;
 
-  function toggleSelect(pid: number) {
+  const handleSort = useUi((s) => s.setCoreSort);
+
+  const toggleSelect = useCallback((pid: number) => {
     setSelectedPids((prev) => {
       const next = new Set(prev);
       if (next.has(pid)) next.delete(pid);
       else next.add(pid);
       return next;
     });
-  }
+  }, []);
 
-  function toggleAll() {
+  const toggleAll = useCallback(() => {
+    const rows = visibleRef.current;
     setSelectedPids((prev) => {
-      const allOn = visible.length > 0 && visible.every((p) => prev.has(p.pid));
-      return allOn ? new Set() : new Set(visible.map((p) => p.pid));
+      const allOn = rows.length > 0 && rows.every((p) => prev.has(p.pid));
+      return allOn ? new Set() : new Set(rows.map((p) => p.pid));
     });
-  }
+  }, []);
 
-  function openRowMenu(e: ReactMouseEvent, proc: ProcInfo) {
+  function openRowMenuImpl(e: ReactMouseEvent, proc: ProcInfo) {
     e.preventDefault();
     // Offline placeholder: not running, so only membership actions apply.
     if (proc.offline) {
@@ -306,6 +320,17 @@ export function CoreAssignment() {
     items.push({ label: "复制 PID", icon: Copy, onClick: () => void navigator.clipboard.writeText(String(proc.pid)) });
     setMenu({ x: e.clientX, y: e.clientY, items });
   }
+
+  // The context-menu builder closes over half this component's state, so it can
+  // never be a stable `useCallback`. Hand the rows a constant trampoline and
+  // keep the real implementation in a ref instead — same "written in render,
+  // only ever read from a user-event handler" invariant as the refs above.
+  const openRowMenuRef = useRef(openRowMenuImpl);
+  openRowMenuRef.current = openRowMenuImpl;
+  const openRowMenu = useCallback(
+    (e: ReactMouseEvent, proc: ProcInfo) => openRowMenuRef.current(e, proc),
+    [],
+  );
 
   // Mirror ProcessView.confirmKill: end the task once the user confirms.
   async function confirmKill() {

@@ -1,10 +1,11 @@
 import { AnimatePresence, motion } from "motion/react";
 import { Ban, CircleCheck, Gamepad2, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { cn } from "../../lib/cn";
+import { cn, FOCUS_RING } from "../../lib/cn";
 import { hueColor } from "../../lib/colors";
 import { hoverPop } from "../../lib/motion";
-import { gameDisplayName, type PerfSession } from "../../lib/perf";
+import { gameDisplayName } from "../../lib/perf";
+import type { PerfSessionMeta } from "../../lib/perfSamples";
 import { usePerfHistory } from "../../store/perfHistory";
 import { useRecordTargets, type RecordListKind } from "../../store/recordTargets";
 import { Button } from "../ui/Button";
@@ -48,7 +49,7 @@ function Badge({ label, value, hue }: { label: string; value: string; hue: numbe
 }
 
 interface SessionCardProps {
-  session: PerfSession;
+  session: PerfSessionMeta;
   active: boolean;
   /** Which record list this exe is on (white/black), or null. */
   listKind: RecordListKind | null;
@@ -61,90 +62,106 @@ interface SessionCardProps {
 function SessionCard({ session, active, listKind, onSelect, onDelete, onWhite, onBlack }: SessionCardProps) {
   const { summary } = session;
   return (
-    <motion.button
+    // The shell is a plain <div>, not the clickable element: the card carries
+    // three quick actions of its own, and nesting them inside a <button> (as
+    // <span role="button" tabIndex={-1}>) is invalid interactive content that
+    // Tab can never reach — the white/black-list toggles and the delete were
+    // mouse-only. Body + actions are siblings now, so each is focusable and
+    // no click needs stopPropagation.
+    <motion.div
       layout
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.96 }}
       whileHover={{ y: -2 }}
       transition={hoverPop}
-      onClick={onSelect}
       className={cn(
-        "no-drag group relative w-full overflow-hidden rounded-xl border px-3 py-2.5 text-left transition-colors",
+        "no-drag group relative w-full overflow-hidden rounded-xl border transition-colors",
         active ? "border-accent/50 bg-accent/10 glow-sm" : "border-line bg-surface2/50 hover:bg-surface3",
       )}
     >
-      <div className="flex items-start gap-2.5">
-        <span
-          className={cn(
-            "mt-0.5 grid h-8 w-8 shrink-0 place-items-center overflow-hidden rounded-lg",
-            active ? "bg-accent/20 text-accent-bright" : "bg-surface3 text-dim",
-          )}
-        >
-          {session.path ? <ProcIcon exePath={session.path} size={18} /> : <Gamepad2 size={16} />}
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="truncate pr-16 text-[12.5px] font-medium text-ink" title={gameDisplayName(session.exe)}>
-            {gameDisplayName(session.exe)}
-          </div>
-          <div className="nums mt-0.5 text-[10.5px] text-dim">
-            {fmtCardDate(session.startedAt)} · {fmtDuration(session.durationSec)}
-          </div>
-          <div className="mt-1.5 flex flex-wrap gap-1">
-            <Badge label="平均" value={summary.avgFps != null ? `${Math.round(summary.avgFps)}` : DASH} hue={158} />
-            <Badge label="1% Low" value={summary.low1 != null ? `${Math.round(summary.low1)}` : DASH} hue={85} />
+      {/* Card body = "open this session's report". The focus ring is inset: the
+          body fills the shell, and the shell clips overflow, so a ring drawn
+          outside the border box would be invisible. */}
+      <button
+        type="button"
+        onClick={onSelect}
+        aria-pressed={active}
+        className={cn("block w-full rounded-xl px-3 py-2.5 text-left", FOCUS_RING, "focus-visible:ring-inset")}
+      >
+        <div className="flex items-start gap-2.5">
+          <span
+            className={cn(
+              "mt-0.5 grid h-8 w-8 shrink-0 place-items-center overflow-hidden rounded-lg",
+              active ? "bg-accent/20 text-accent-bright" : "bg-surface3 text-dim",
+            )}
+          >
+            {session.path ? <ProcIcon exePath={session.path} size={18} /> : <Gamepad2 size={16} />}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="truncate pr-16 text-[12.5px] font-medium text-ink" title={gameDisplayName(session.exe)}>
+              {gameDisplayName(session.exe)}
+            </div>
+            <div className="nums mt-0.5 text-[10.5px] text-dim">
+              {fmtCardDate(session.startedAt)} · {fmtDuration(session.durationSec)}
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              <Badge label="平均" value={summary.avgFps != null ? `${Math.round(summary.avgFps)}` : DASH} hue={158} />
+              <Badge label="1% Low" value={summary.low1 != null ? `${Math.round(summary.low1)}` : DASH} hue={85} />
+            </div>
           </div>
         </div>
-      </div>
+      </button>
       {/* Quick record white/black-list toggles (always visible; highlighted when
-          active) + a hover-reveal delete. */}
-      <div className="absolute right-2 top-2 flex items-center gap-1">
-        <span
-          role="button"
-          tabIndex={-1}
+          active) + a hover-reveal delete. The row sits on top of the body
+          button, so it stays pointer-events-none and only the buttons themselves
+          take clicks — otherwise the 4px gaps between them would become dead
+          zones that no longer select the card. */}
+      <div className="pointer-events-none absolute right-2 top-2 flex items-center gap-1">
+        <button
+          type="button"
           aria-label="加入白名单（强制录制）"
+          aria-pressed={listKind === "white"}
           title="白名单 · 强制录制此程序"
-          onClick={(e) => {
-            e.stopPropagation();
-            onWhite();
-          }}
+          onClick={onWhite}
           className={cn(
-            "grid h-5 w-5 cursor-pointer place-items-center rounded-md transition-colors",
+            "pointer-events-auto grid h-5 w-5 cursor-pointer place-items-center rounded-md transition-colors",
+            FOCUS_RING,
             listKind === "white" ? "bg-ok/20 text-ok" : "text-dim hover:bg-surface3 hover:text-ok",
           )}
         >
           <CircleCheck size={12} />
-        </span>
-        <span
-          role="button"
-          tabIndex={-1}
+        </button>
+        <button
+          type="button"
           aria-label="加入黑名单（不录制）"
+          aria-pressed={listKind === "black"}
           title="黑名单 · 不录制此程序"
-          onClick={(e) => {
-            e.stopPropagation();
-            onBlack();
-          }}
+          onClick={onBlack}
           className={cn(
-            "grid h-5 w-5 cursor-pointer place-items-center rounded-md transition-colors",
+            "pointer-events-auto grid h-5 w-5 cursor-pointer place-items-center rounded-md transition-colors",
+            FOCUS_RING,
             listKind === "black" ? "bg-danger/20 text-danger" : "text-dim hover:bg-surface3 hover:text-danger",
           )}
         >
           <Ban size={12} />
-        </span>
-        <span
-          role="button"
-          tabIndex={-1}
+        </button>
+        <button
+          type="button"
           aria-label="删除报告"
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete();
-          }}
-          className="grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white group-hover:opacity-100"
+          onClick={onDelete}
+          // opacity-0 until the card is hovered; the focus-visible /
+          // group-focus-within pair is what keeps it from being an invisible
+          // stop in the Tab order once it is keyboard-reachable.
+          className={cn(
+            "pointer-events-auto grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100",
+            FOCUS_RING,
+          )}
         >
           <X size={12} />
-        </span>
+        </button>
       </div>
-    </motion.button>
+    </motion.div>
   );
 }
 

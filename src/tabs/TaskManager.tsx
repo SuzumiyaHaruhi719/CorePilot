@@ -1,14 +1,12 @@
 import { ListTree } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useState } from "react";
 import { PerfView } from "../components/taskmgr/PerfView";
 import { ProcessView } from "../components/taskmgr/ProcessView";
 import { ServicesView } from "../components/taskmgr/ServicesView";
 import { StartupView } from "../components/taskmgr/StartupView";
 import { SecondaryTabs } from "../components/ui/SecondaryTabs";
 import { TabHeader } from "../components/ui/TabHeader";
-
-type Sec = "perf" | "procs" | "details" | "startup" | "services";
+import { useUi, type TaskmgrSec as Sec } from "../store/ui";
 
 const SECS: { id: Sec; label: string }[] = [
   { id: "perf", label: "性能" },
@@ -19,7 +17,11 @@ const SECS: { id: Sec; label: string }[] = [
 ];
 
 export function TaskManager() {
-  const [sec, setSec] = useState<Sec>("perf");
+  // Held in the UI store, not local state: switching to another top-level tab
+  // unmounts this whole component (App.tsx keys its AnimatePresence on `tab`),
+  // and coming back used to dump the user on 性能 again no matter where they were.
+  const sec = useUi((s) => s.taskmgrSec);
+  const setSec = useUi((s) => s.setTaskmgrSec);
 
   return (
     <>

@@ -199,9 +199,16 @@ export function Optimize() {
       } catch {
         failedSteps.push(tf("刷新 DNS", "DNS flush"));
       }
+      // Unlike the other steps, the power plan is a PERSISTENT system-wide
+      // Windows setting that outlives the click and never reverts on its own.
+      // It therefore has to be named in the CTA copy AND in the result line —
+      // when it wasn't, the button silently rewrote the user's power plan and
+      // the only hint was the Segmented control above jumping to 高性能.
+      let planSwitched = false;
       try {
         await api.setPowerPlan("high");
         setPlan("high");
+        planSwitched = true;
       } catch {
         failedSteps.push(tf("电源计划", "power plan"));
       }
@@ -211,8 +218,16 @@ export function Optimize() {
         failedSteps.length > 0
           ? tf(`（${failedSteps.join("、")}失败）`, ` (failed: ${failedSteps.join(", ")})`)
           : "";
+      // Only claim the plan switch when it actually applied — a failure is
+      // already named in `note`, and reporting both would contradict itself.
+      const planNote = planSwitched
+        ? tf(" · 电源计划已切换为高性能", " · power plan set to High Performance")
+        : "";
       setHeroResult({
-        text: tf(`释放 ${formatBytes(freed)} 内存 · 清理 ${files} 个临时文件`, `Freed ${formatBytes(freed)} memory · cleaned ${files} temp files`) + note,
+        text:
+          tf(`释放 ${formatBytes(freed)} 内存 · 清理 ${files} 个临时文件`, `Freed ${formatBytes(freed)} memory · cleaned ${files} temp files`) +
+          planNote +
+          note,
         ok: failedSteps.length === 0,
       });
     } catch (error: unknown) {
@@ -326,7 +341,17 @@ export function Optimize() {
           </span>
           <div className="flex-1">
             <div className="display text-[15px] font-bold uppercase tracking-[0.06em]">一键优化</div>
-            <div className="text-[12px] text-muted">释放内存 + 清理缓存 + 清理临时文件 + 刷新 DNS</div>
+            {/* Every step this button performs is listed here, the power plan
+                included — it is the one step that persists after the click, so
+                omitting it made 一键优化 change a Windows setting the user never
+                asked for. Uses tf() rather than a dict key because the string
+                changed and the walker's EN table is keyed by the old wording. */}
+            <div className="text-[12px] text-muted">
+              {tf(
+                "释放内存 + 清理缓存 + 清理临时文件 + 刷新 DNS + 高性能电源计划",
+                "Free memory + clear cache + clean temp + flush DNS + High Performance power plan",
+              )}
+            </div>
             <AnimatePresence>
               {heroResult && (
                 <motion.div

@@ -127,17 +127,30 @@ pub async fn get_overview(app: tauri::AppHandle) -> Overview {
         .clone()
 }
 
-/// O(1) read of the background sampler's latest process snapshot. The expensive
+/// Read of the background sampler's latest process snapshot. The expensive
 /// refresh (system-wide process refresh + Toolhelp thread scan + GPU columns from
-/// the telemetry snapshot) runs once per cadence in `crate::sampler`, NEVER on
-/// this request path — so this can never block, hold `state.sys`, or pile up on a
-/// lock (the recurring freeze class). `app` lazily starts the sampler.
+/// the telemetry snapshot) runs in `crate::sampler`, NEVER on this request path —
+/// so this never holds `state.sys` or piles up on a lock (the recurring freeze
+/// class). `app` lazily starts the sampler.
+///
+/// On the blocking pool rather than an async-runtime worker: enumeration is
+/// on-demand now, so a COLD call (nobody has asked in >2 s — every
+/// `useAffinityEnforcer` sweep, every "pick a running process" dialog) waits for
+/// the refresh it just triggered. That wait is short but real, and parking a
+/// shared async worker on it is the same starvation bug in a different pool.
+///
+/// Returns `Err` when the refresh could not be delivered in time — see
+/// `sampler::proc_snapshot`. The frontend skips the round rather than acting on
+/// a stale roster by PID.
 #[tauri::command]
-pub async fn list_processes(app: tauri::AppHandle) -> Arc<Vec<ProcInfo>> {
+pub async fn list_processes(app: tauri::AppHandle) -> Result<Arc<Vec<ProcInfo>>, String> {
     // Return the shared snapshot `Arc` directly — serde serializes `Arc<T>`
     // byte-identically to `T`, so the IPC wire format and the frontend are
     // unchanged, and we skip a deep clone of the (large) process vector.
-    crate::sampler::proc_snapshot(&app)
+    run_blocking_err("list_processes", move || {
+        crate::sampler::proc_snapshot(&app)
+    })
+    .await
 }
 
 /// O(1) read of the sampler's latest CPU/memory metrics (no `state.sys` lock here).
@@ -295,7 +308,9 @@ pub async fn restart_task(pid: u32) -> CoreResult<()> {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        let dir = std::path::Path::new(&path).parent().map(|p| p.to_path_buf());
+        let dir = std::path::Path::new(&path)
+            .parent()
+            .map(|p| p.to_path_buf());
         let mut cmd = std::process::Command::new(&path);
         if let Some(dir) = dir {
             cmd.current_dir(dir);

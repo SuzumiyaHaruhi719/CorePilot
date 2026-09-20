@@ -1,10 +1,13 @@
 import {
   AlertTriangle,
   ChevronRight,
+  Eye,
+  EyeOff,
   FolderOpen,
   Gamepad2,
   ListPlus,
   Loader2,
+  Monitor,
   MonitorPlay,
   Palette,
   Plus,
@@ -15,39 +18,69 @@ import {
   Trash2,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { Modal } from "../components/ui/Modal";
 import { Segmented } from "../components/ui/Segmented";
 import { Slider } from "../components/ui/Slider";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
+import { useSharedGpuOc, useSharedMetrics, useSharedSensors } from "../hooks/useSharedTelemetry";
+import { useUiActive } from "../hooks/useUiActive";
 import { cn } from "../lib/cn";
 import { useTf } from "../lib/i18n";
-import { api, type GameEntry, type OverlayStatus, type ProcInfo } from "../lib/ipc";
+import {
+  api,
+  type ForegroundInfo,
+  type GameEntry,
+  type OsdFpsStats,
+  type OverlayStatus,
+  type ProcInfo,
+} from "../lib/ipc";
 import {
   OSD_CATEGORIES,
   OSD_METRICS,
-  fetchOsdData,
   freePosStyle,
   type OsdCategory,
   type OsdData,
   type OsdMetricDef,
 } from "../lib/osd";
+import { useSettings } from "../store/settings";
 import {
   TASKBAR_DEFAULTS,
   TBMON_DEFAULTS,
   effectiveConfig,
+  explainOsd,
   useOsd,
   useOsdTargets,
   useOverlayStatus,
   type OsdAppearance,
   type OsdConfig as OsdCfg,
+  type OsdVisibility,
   type TbBarPosition,
 } from "../store/osd";
 import { OsdPlate } from "../osd/OsdPlate";
 
-const EMPTY: OsdData = { metrics: null, sensors: null, gpu: null, fps: null };
+/**
+ * Keyboard-focus ring for this tab's raw `<button>`s. The UI-kit controls
+ * (Toggle / Segmented / Slider) carry their own; these hand-rolled buttons —
+ * the metric tiles, category tabs and list rows — had none, so tabbing through
+ * the content picker left no visible focus anywhere. Same token as the table
+ * headers so the whole app rings identically.
+ */
+const FOCUS_RING = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60";
+
+/** Corner labels for the status line ("位置 左上"). Kept bilingual here rather
+ *  than reusing the Segmented options, which are Chinese-only by design. */
+const POSITION_LABEL: Record<OsdCfg["position"], [zh: string, en: string]> = {
+  tl: ["左上", "top-left"],
+  tc: ["上中", "top-center"],
+  tr: ["右上", "top-right"],
+  bl: ["左下", "bottom-left"],
+  bc: ["下中", "bottom-center"],
+  br: ["右下", "bottom-right"],
+  free: ["自由摆放", "free placement"],
+};
 
 function cfgOf(s: OsdCfg): OsdCfg {
   return {
@@ -62,7 +95,6 @@ function cfgOf(s: OsdCfg): OsdCfg {
     oledShift: s.oledShift,
     desktopMode: s.desktopMode,
     inject: s.inject,
-    autoInject: s.autoInject,
     metrics: s.metrics,
     tbColorsEnabled: s.tbColorsEnabled,
     tbBg: s.tbBg,
@@ -93,7 +125,6 @@ export function OsdConfig() {
   const osd = useOsd();
   const { targets, addTarget, removeTarget, setTargetList, updateTargetConfig } = useOsdTargets();
   const [cat, setCat] = useState<OsdCategory>("cpu");
-  const [data, setData] = useState<OsdData>(EMPTY);
   const [selected, setSelected] = useState<string | null>(null);
   const [addName, setAddName] = useState("");
   // "Pick from running processes" picker state.
@@ -118,35 +149,114 @@ export function OsdConfig() {
   );
 
   // Global default as a plain config object (used for preview + as the base the
-  // per-game override merges onto).
-  const globalCfg = cfgOf(osd);
+  // per-game override merges onto). Memoized so the identity only moves when the
+  // store does — the memoized editor subtrees below take it (via previewCfg) as
+  // a prop, and a fresh object every telemetry tick would defeat them.
+  const globalCfg = useMemo(() => cfgOf(osd), [osd]);
 
   // The config currently being previewed/edited: the selected game's effective
   // config when one is selected, else the global default.
-  const previewCfg = selectedTarget
-    ? effectiveConfig(globalCfg, selectedTarget.config)
-    : globalCfg;
+  const previewCfg = useMemo(
+    () => (selectedTarget ? effectiveConfig(globalCfg, selectedTarget.config) : globalCfg),
+    [globalCfg, selectedTarget],
+  );
 
-  // Live preview poll (only while this tab is mounted).
   const needGpu = previewCfg.metrics.some((k) => k.startsWith("gpu."));
   const needFps = previewCfg.metrics.includes("fps");
+
+  // Preview telemetry rides the SHARED pollers (one interval app-wide, skipped
+  // while nobody can see the window) instead of this tab's old private 1 Hz
+  // loop, which fired 2–4 extra IPCs a second on top of whatever StatusBar and
+  // the history recorder were already asking for.
+  //
+  // `useSharedGpuOc` is subscribed unconditionally because hooks can't be
+  // conditional; the value is gated on `needGpu` below so an all-CPU layout
+  // still previews without GPU numbers. The subscription itself is cheap: the
+  // NVML poller pauses outright while the UI is inactive, and the default
+  // metric set contains gpu.* anyway.
+  const sharedMetrics = useSharedMetrics();
+  const sharedSensors = useSharedSensors();
+  const sharedGpu = useSharedGpuOc();
+
+  // Foreground app + frame pacing. These two have no shared poller (the FPS
+  // stats are only interesting on this tab and the overlay window), so they keep
+  // one local interval — aligned to `pollMs` and gated on `useUiActive` so it
+  // goes quiet the moment the window is covered by the game being measured.
+  const pollMs = useSettings((s) => s.pollMs);
+  const uiActive = useUiActive((s) => s.active);
+  const [fg, setFg] = useState<ForegroundInfo | null>(null);
+  const [fps, setFps] = useState<OsdFpsStats | null>(null);
   useEffect(() => {
+    if (!uiActive) return;
     let alive = true;
+    let inFlight = false;
     const tick = async () => {
+      // Backpressure: `foreground_info` can take seconds when its library-root
+      // cache expires (it shells out to reg.exe). Never queue a second one.
+      if (inFlight) return;
+      inFlight = true;
       try {
-        const d = await fetchOsdData(needGpu, needFps);
-        if (alive) setData(d);
-      } catch {
-        /* transient sampler hiccup — keep the last value */
+        const [info, stats] = await Promise.all([
+          api.foregroundInfo().catch(() => null),
+          needFps ? api.osdFpsStats().catch(() => null) : Promise.resolve(null),
+        ]);
+        if (!alive) return;
+        // Two rules here, both learned the hard way:
+        //  - A failed read (null) KEEPS the last good value. Letting a transient
+        //    backend hiccup reset this to null would flip the status line back
+        //    to "detecting the foreground window…", i.e. report a glitch as
+        //    "nothing running yet" — the same misrepresentation the injection
+        //    status line already guards against.
+        //  - An identical reading is dropped instead of re-set. The foreground
+        //    barely ever changes while the user sits on this tab, and a fresh
+        //    object every tick would re-render the whole editor tree for nothing.
+        setFg((prev) => {
+          if (!info) return prev;
+          return prev && prev.exe === info.exe && prev.pid === info.pid && prev.isGame === info.isGame
+            ? prev
+            : info;
+        });
+        setFps((prev) => {
+          // Not asking for FPS at all → clear it, so the plate stops showing a
+          // frozen number after the user unticks the metric.
+          if (!needFps) return null;
+          if (!stats) return prev;
+          return prev &&
+            prev.fps === stats.fps &&
+            prev.frametimeMs === stats.frametimeMs &&
+            prev.low1 === stats.low1 &&
+            prev.low01 === stats.low01
+            ? prev
+            : stats;
+        });
+      } finally {
+        inFlight = false;
       }
     };
     void tick();
-    const id = window.setInterval(() => void tick(), 1000);
+    const id = window.setInterval(() => void tick(), Math.max(1000, pollMs));
     return () => {
       alive = false;
       window.clearInterval(id);
     };
-  }, [needGpu, needFps]);
+  }, [needFps, pollMs, uiActive]);
+
+  const data = useMemo<OsdData>(
+    () => ({
+      metrics: sharedMetrics,
+      sensors: sharedSensors,
+      gpu: needGpu ? sharedGpu : null,
+      fps: needFps ? fps : null,
+    }),
+    [sharedMetrics, sharedSensors, sharedGpu, fps, needGpu, needFps],
+  );
+
+  // Why the overlay is (or isn't) on screen right now — derived from the SAME
+  // resolver the overlay window uses, so this line can't contradict it.
+  const visibility = useMemo(
+    () => explainOsd(globalCfg, targets, fg?.exe ?? null, fg?.isGame ?? false),
+    [globalCfg, targets, fg],
+  );
 
   // NOTE: the standing osd:cfg / osd:targets mirroring now lives in <App> (always
   // mounted, 16 ms-coalesced) so the global hotkey reaches the overlay from any
@@ -166,12 +276,17 @@ export function OsdConfig() {
   }
 
   // Appearance/metric editors operate on either the global default or the
-  // selected game's override.
+  // selected game's override. Stable identity (it only depends on WHICH target
+  // is selected) so `memo(OsdAppearanceControls)` isn't invalidated every tick.
   const editingOverride = selectedTarget !== null;
-  function applyPatch(patch: Partial<OsdCfg>) {
-    if (selectedTarget) updateTargetConfig(selectedTarget.name, patch);
-    else osd.update(patch);
-  }
+  const selectedName = selectedTarget?.name ?? null;
+  const applyPatch = useCallback(
+    (patch: Partial<OsdCfg>) => {
+      if (selectedName) updateTargetConfig(selectedName, patch);
+      else useOsd.getState().update(patch);
+    },
+    [selectedName, updateTargetConfig],
+  );
 
   // Preview = a short, to-scale-ish mini-monitor at the real display aspect ratio
   // (window.screen, 16:9 fallback). The plate is scaled toward its real footprint
@@ -337,52 +452,101 @@ export function OsdConfig() {
         subtitle="可定制的低占用游戏叠加层 — 适用于无边框 / 窗口化游戏，所有更改即时生效"
       />
       <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
-        {/* Enable + preview */}
+        {/* 显示方式 · MODE — the three overlay layers as ONE decision.
+            They used to be three switches in two different cards (window
+            overlay + desktop mode here, injection in its own panel below) with
+            no statement of how they relate, so "which one do I need?" had no
+            answer on screen. Grouped here with a 适用于 line each, then the live
+            verdict underneath. */}
         <div className="hud-frame glass hairline rounded-2xl p-4">
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2">
-                <div className="text-[14px] font-semibold text-ink">窗口式叠加（桌面检测）</div>
-              </div>
-              <div className="text-[12px] text-dim">检测到游戏自动在前台显示叠加，切到后台自动隐藏；无边框 / 窗口化适用，不注入、最安全</div>
-            </div>
-            <Toggle checked={osd.enabled} onChange={setEnabled} />
+          <div className="mb-3 flex items-center gap-2">
+            <MonitorPlay size={14} className="shrink-0 text-accent-bright" />
+            <span className="hud-label text-[10.5px] text-dim">
+              {tf("显示方式 · MODE", "MODE")}
+            </span>
+            <span className="h-px flex-1 bg-line/50" />
           </div>
-          {overlayErr && (
-            <div className="mb-3 flex items-center gap-1.5 text-[11.5px] text-danger">
-              <AlertTriangle size={12} /> {overlayErr}
-            </div>
-          )}
+          <div className="mb-3 text-[11.5px] leading-relaxed text-dim">
+            {tf(
+              "三种方式互不冲突，可同时开启：窗口叠加负责无边框 / 窗口化游戏，桌面模式负责非游戏时段，注入负责独占全屏。",
+              "The three layers don't conflict and can all be on: the window overlay covers borderless / windowed games, desktop mode covers non-game time, injection covers exclusive fullscreen.",
+            )}
+          </div>
 
-          <div className="mb-3 flex items-center justify-between border-t border-line/60 pt-3">
-            <div>
-              <div className="text-[13.5px] font-medium text-ink">桌面模式</div>
-              <div className="text-[12px] text-dim">
-                非游戏时也在桌面显示（仅 CPU / GPU / 内存 / 硬盘 / 网络，不含 FPS）
-              </div>
-            </div>
-            <Toggle
-              checked={osd.desktopMode}
-              onChange={(v) => {
-                osd.update({ desktopMode: v });
-                setOverlayErr(null);
-                // Desktop mode needs the overlay window too — show it now (or hide
-                // if both this and the in-game master are off). Surface an error on
-                // failure but keep the user's choice (don't auto-disable).
-                api.osdSetVisible(v || osd.enabled).catch(() => {
-                  setOverlayErr(tf("叠加层窗口打开失败", "Failed to open the overlay window"));
-                });
-              }}
-            />
+          {/* Own wrapper so `first:` actually matches the first ModeRow — the
+              card header and the intro paragraph are siblings too. */}
+          <div>
+          <ModeRow
+            icon={MonitorPlay}
+            title={tf("窗口叠加", "Window overlay")}
+            desc={tf(
+              "检测到游戏自动在前台显示，切到后台自动隐藏；不注入、最安全。",
+              "Appears automatically when a game is in the foreground and hides when it isn't. No injection — the safest path.",
+            )}
+            applies={tf(
+              "适用于：无边框 / 窗口化游戏",
+              "Best for: borderless / windowed games",
+            )}
+            checked={osd.enabled}
+            onChange={setEnabled}
+          />
+          <ModeRow
+            icon={Monitor}
+            title={tf("桌面模式", "Desktop mode")}
+            desc={tf(
+              "非游戏时也常驻显示（仅 CPU / GPU / 内存 / 硬盘 / 网络，无 FPS）。",
+              "Keeps the overlay up outside games (CPU / GPU / memory / disk / network only — no FPS).",
+            )}
+            applies={tf("适用于：桌面、办公、看监控数字", "Best for: desktop, work, watching the numbers")}
+            checked={osd.desktopMode}
+            onChange={(v) => {
+              osd.update({ desktopMode: v });
+              setOverlayErr(null);
+              // Desktop mode needs the overlay window too — show it now (or hide
+              // if both this and the in-game master are off). Surface an error on
+              // failure but keep the user's choice (don't auto-disable).
+              api.osdSetVisible(v || osd.enabled).catch(() => {
+                setOverlayErr(tf("叠加层窗口打开失败", "Failed to open the overlay window"));
+              });
+            }}
+          />
+          <ModeRow
+            icon={Syringe}
+            title={tf("游戏内叠加（注入）", "In-game overlay (injection)")}
+            desc={tf(
+              "绘制在游戏画面内，独占全屏也能显示；检测到反作弊会自动避让。",
+              "Drawn inside the game's own frame, so it survives exclusive fullscreen. Backs off automatically when anti-cheat is present.",
+            )}
+            applies={tf("适用于：独占全屏游戏", "Best for: exclusive-fullscreen games")}
+            checked={osd.inject}
+            onChange={(v) => osd.update({ inject: v })}
+          />
           </div>
+
+          {/* The overlay-window error outranks the status line: if the window
+              itself failed to open, nothing below it is meaningful. */}
+          {overlayErr ? (
+            <div className="mt-3 flex items-center gap-1.5 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2.5 text-[12px] text-danger">
+              <AlertTriangle size={13} className="shrink-0" /> {overlayErr}
+            </div>
+          ) : (
+            <OverlayStatusLine
+              vis={visibility}
+              detecting={fg === null}
+              // The position the CURRENT foreground app gets, which a per-game
+              // override can move away from the global default shown above.
+              position={visibility.config?.position ?? globalCfg.position}
+              desktopMode={osd.desktopMode}
+            />
+          )}
 
           {/* Live preview = a short, centered mini-monitor at the display aspect
               ratio (fixed height so it always fits the panel above the fold). */}
-          <div className="mb-2 flex items-center justify-center gap-2">
+          <div className="mb-2 mt-4 flex items-center justify-center gap-2">
             <span className="h-px w-8 bg-line/60" />
             <span className="hud-label flex items-center gap-1.5 text-[10px] text-dim">
               <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ok" />
-              实时预览 · LIVE PREVIEW
+              {tf("实时预览 · LIVE PREVIEW", "LIVE PREVIEW")}
             </span>
             <span className="h-px w-8 bg-line/60" />
           </div>
@@ -464,11 +628,13 @@ export function OsdConfig() {
               )}
             </div>
             <span className="pointer-events-none absolute right-2 top-2 rounded bg-black/40 px-1.5 py-0.5 text-[10px] text-white/60">
-              {editingOverride ? tf(`预览 · ${selectedTarget?.name}`, `Preview · ${selectedTarget?.name}`) : "预览 · 默认"}
+              {editingOverride
+                ? tf(`预览 · ${selectedTarget?.name}`, `Preview · ${selectedTarget?.name}`)
+                : tf("预览 · 默认", "Preview · default")}
             </span>
             {previewCfg.position === "free" && (
               <span className="pointer-events-none absolute left-2 top-2 rounded bg-accent/25 px-1.5 py-0.5 text-[10px] text-white/85">
-                拖动叠加层自由摆放
+                {tf("拖动叠加层自由摆放", "Drag the plate to place it freely")}
               </span>
             )}
           </div>
@@ -543,19 +709,28 @@ export function OsdConfig() {
             <button
               onClick={submitAdd}
               disabled={!addName.trim()}
-              className="no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+              className={cn(
+                "no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40",
+                FOCUS_RING,
+              )}
             >
               <Plus size={13} /> 添加
             </button>
             <button
               onClick={() => void openProcessPicker()}
-              className="no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+              className={cn(
+                "no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink",
+                FOCUS_RING,
+              )}
             >
               <ListPlus size={13} /> 从运行中的进程选择
             </button>
             <button
               onClick={() => void pickFromFile()}
-              className="no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+              className={cn(
+                "no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink",
+                FOCUS_RING,
+              )}
             >
               <FolderOpen size={13} /> 从文件选择
             </button>
@@ -581,7 +756,10 @@ export function OsdConfig() {
                   >
                     <button
                       onClick={() => setSelected(isSel ? null : t.name)}
-                      className="flex flex-1 cursor-pointer items-center gap-2 text-left"
+                      className={cn(
+                        "flex flex-1 cursor-pointer items-center gap-2 rounded-md text-left",
+                        FOCUS_RING,
+                      )}
                     >
                       <MonitorPlay
                         size={13}
@@ -610,7 +788,10 @@ export function OsdConfig() {
                         removeTarget(t.name);
                         if (isSel) setSelected(null);
                       }}
-                      className="grid h-7 w-7 shrink-0 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-danger/15 hover:text-danger"
+                      className={cn(
+                        "grid h-7 w-7 shrink-0 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-danger/15 hover:text-danger",
+                        FOCUS_RING,
+                      )}
                       title="移除"
                       aria-label={tf(`移除 ${t.name}`, `Remove ${t.name}`)}
                     >
@@ -632,7 +813,10 @@ export function OsdConfig() {
                 <button
                   onClick={() => updateTargetConfig(selectedTarget.name, undefined)}
                   disabled={selectedTarget.config === undefined}
-                  className="no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
+                  className={cn(
+                    "no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45",
+                    FOCUS_RING,
+                  )}
                 >
                   <RotateCcw size={12} /> 用默认
                 </button>
@@ -673,9 +857,12 @@ export function OsdConfig() {
             <button
               onClick={() => applyPatch({ metrics: [] })}
               disabled={previewCfg.metrics.length === 0}
-              className="no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+              className={cn(
+                "no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40",
+                FOCUS_RING,
+              )}
             >
-              <RotateCcw size={12} /> 全部清空
+              <RotateCcw size={12} /> {tf("全部清空", "Clear all")}
             </button>
           </div>
           <div className="mb-3 flex flex-wrap gap-1.5">
@@ -685,6 +872,7 @@ export function OsdConfig() {
                 onClick={() => setCat(c.id)}
                 className={cn(
                   "no-drag cursor-pointer rounded-lg px-3 py-1.5 text-[12.5px] font-medium transition-colors",
+                  FOCUS_RING,
                   cat === c.id ? "bg-accent/15 text-accent-bright glow-sm" : "text-dim hover:bg-surface3 hover:text-ink",
                 )}
               >
@@ -710,6 +898,7 @@ export function OsdConfig() {
                     onClick={() => toggleMetric(m.key)}
                     className={cn(
                       "no-drag flex items-center gap-2.5 rounded-lg border px-3 py-2 text-left text-[12.5px] transition-colors",
+                      FOCUS_RING,
                       !m.supported
                         ? "cursor-not-allowed border-line/60 text-dim opacity-55"
                         : on
@@ -769,7 +958,10 @@ export function OsdConfig() {
                   <button
                     key={p.name.toLowerCase()}
                     onClick={() => pickProcess(p.name)}
-                    className="no-drag flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-[12.5px] text-muted transition-colors hover:bg-accent/10 hover:text-ink"
+                    className={cn(
+                      "no-drag flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-[12.5px] text-muted transition-colors hover:bg-accent/10 hover:text-ink",
+                      FOCUS_RING,
+                    )}
                   >
                     <MonitorPlay size={13} className="shrink-0 text-dim" />
                     <span className="flex-1 truncate">{p.name}</span>
@@ -793,6 +985,140 @@ export function OsdConfig() {
 }
 
 
+interface ModeRowProps {
+  icon: typeof MonitorPlay;
+  title: string;
+  desc: string;
+  /** One-line "适用于 …" — the thing that tells the user WHICH mode they need. */
+  applies: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}
+
+/** One row of the 显示方式 · MODE block. Deliberately uniform across the three
+ *  layers so they read as alternatives to weigh, not as unrelated features. */
+function ModeRow({ icon: Icon, title, desc, applies, checked, onChange }: ModeRowProps) {
+  return (
+    <div className="flex items-start justify-between gap-3 border-t border-line/60 py-2.5 first:border-t-0 first:pt-0">
+      <div className="flex min-w-0 items-start gap-2">
+        <Icon
+          size={14}
+          className={cn("mt-0.5 shrink-0 transition-colors", checked ? "text-accent-bright" : "text-dim")}
+        />
+        <div className="min-w-0">
+          <div className="text-[13.5px] font-medium text-ink">{title}</div>
+          <div className="text-[12px] leading-relaxed text-dim">{desc}</div>
+          <div className="mt-0.5 text-[11px] leading-relaxed text-dim/80">{applies}</div>
+        </div>
+      </div>
+      <div className="no-drag shrink-0 pt-0.5">
+        <Toggle checked={checked} onChange={onChange} />
+      </div>
+    </div>
+  );
+}
+
+interface OverlayStatusLineProps {
+  vis: OsdVisibility;
+  /** True until the first `foreground_info` read lands. */
+  detecting: boolean;
+  position: OsdCfg["position"];
+  desktopMode: boolean;
+}
+
+/**
+ * The live "is the overlay on screen, and why" line.
+ *
+ * This is the answer to the report that drove this whole pass: "the OSD
+ * disappears after a while". With the default store (`enabled` on, everything
+ * else off) an overlay that is simply waiting for a game looks identical to a
+ * broken one, and nothing on this tab said which it was — the injection status
+ * line below only renders once injection is on, which is exactly the switch
+ * such a user has NOT touched.
+ */
+function OverlayStatusLine({ vis, detecting, position, desktopMode }: OverlayStatusLineProps) {
+  const tf = useTf();
+  if (detecting) {
+    return (
+      <div className="mt-3 rounded-lg border border-line bg-surface2 px-3 py-2.5 text-[12px] text-dim">
+        {tf("正在检测前台窗口…", "Detecting the foreground window…")}
+      </div>
+    );
+  }
+  // `exe` is null when the foreground window can't be resolved (a shell surface,
+  // an elevated window we can't open). Name it rather than printing "null".
+  const exe = vis.exe ?? tf("前台窗口", "the foreground window");
+  const pos = tf(...POSITION_LABEL[position]);
+
+  let text: string;
+  switch (vis.kind) {
+    case "shown-game":
+      text = tf(
+        `显示中 · 前台 ${exe} 已识别为游戏 · 位置 ${pos}`,
+        `Showing · ${exe} detected as a game · ${pos}`,
+      );
+      break;
+    case "shown-desktop":
+      text = tf(`显示中 · 桌面模式 · 位置 ${pos}`, `Showing · desktop mode · ${pos}`);
+      break;
+    case "hidden-blacklist":
+      text = tf(
+        `已隐藏 · ${exe} 在黑名单（改为「强制显示」或开启「桌面模式」即可显示）`,
+        `Hidden · ${exe} is blacklisted (switch it to "always show", or turn on desktop mode)`,
+      );
+      break;
+    case "hidden-master-off":
+      // Two ways to land here, and the fix differs: with desktop mode ON the
+      // user reasonably expects it to cover a game too — say that it doesn't.
+      text = desktopMode
+        ? tf(
+            "已隐藏 · 「窗口叠加」未开启（桌面模式只覆盖非游戏前台）",
+            'Hidden · the window overlay is off (desktop mode only covers NON-game windows)',
+          )
+        : tf(
+            "已隐藏 · 「窗口叠加」与「桌面模式」都未开启",
+            "Hidden · both the window overlay and desktop mode are off",
+          );
+      break;
+    default:
+      text = tf(
+        `已隐藏 · 前台 ${exe} 未识别为游戏（开启「桌面模式」，或把它加入下方名单并设为「强制显示」）`,
+        `Hidden · ${exe} isn't detected as a game (turn on desktop mode, or add it below and set "always show")`,
+      );
+  }
+
+  const tone = vis.shown
+    ? "border-ok/40 bg-ok/10 text-ok"
+    : vis.kind === "hidden-master-off"
+      ? // The user switched it off themselves — state it, don't alarm.
+        "border-line bg-surface2 text-muted"
+      : "border-warn/40 bg-warn/10 text-warn";
+
+  return (
+    <div className="mt-3">
+      <div className={cn("flex items-center gap-2 rounded-lg border px-3 py-2.5 text-[12.5px]", tone)}>
+        {vis.shown ? (
+          <Eye size={14} className="shrink-0" />
+        ) : (
+          <EyeOff size={14} className="shrink-0" />
+        )}
+        <span className="flex-1">{text}</span>
+      </div>
+      {vis.needsInjectHint && (
+        <div className="mt-1.5 flex items-start gap-1.5 px-1 text-[11px] leading-relaxed text-dim">
+          <Syringe size={12} className="mt-0.5 shrink-0" />
+          {/* We cannot tell exclusive fullscreen from borderless here (no frontend
+              signal exposes it), so this stays a hint — never a claim. */}
+          {tf(
+            "若该游戏是独占全屏（而非无边框窗口），窗口叠加会被游戏画面盖住 — 请同时开启上面的「注入」。",
+            "If this game runs in exclusive fullscreen (not borderless), the window overlay is painted over — turn injection on as well.",
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
  * "游戏内叠加（注入）" — the MSI-Afterburner-style in-frame overlay that draws
  * inside the game's own back buffer (so it works in true exclusive fullscreen,
@@ -801,38 +1127,47 @@ export function OsdConfig() {
  * to inject and transparently falls back to the window overlay — this section's
  * status line explains exactly what happened, so a user never gets silently
  * nothing (or, worse, a ban).
+ *
+ * The on/off switch now lives in the 显示方式 · MODE block above, with the other
+ * two layers; this panel is the DETAIL for that one layer (the anti-cheat
+ * guarantee + the live per-game status), so the user makes one decision in one
+ * place instead of finding a third toggle two cards down.
  */
 function InjectionOverlaySection() {
-  // The attach/detach loop now runs app-wide in `useOverlayInjection` (<App>), so
+  const tf = useTf();
+  // The attach/detach loop runs app-wide in `useOverlayInjection` (<App>), so
   // injection works on any tab / while gaming in the background — not only while
-  // this tab is open. This panel is just the persisted toggle + the live status
-  // that driver publishes to `useOverlayStatus`.
+  // this tab is open. This panel just renders the status that driver publishes
+  // to `useOverlayStatus`.
   const enabled = useOsd((s) => s.inject);
-  const updateOsd = useOsd((s) => s.update);
   const status = useOverlayStatus((s) => s.status);
 
   return (
     <div className="glass hairline rounded-2xl p-4">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Syringe size={15} className="text-accent-bright" />
-          <div>
-            <div className="text-[13.5px] font-semibold text-ink">游戏内叠加（注入）</div>
-            <div className="text-[12px] text-dim">
-              注入式叠加，绘制在游戏画面内 — 支持独占全屏；自动检测反作弊并避让
-            </div>
-          </div>
-        </div>
-        <Toggle checked={enabled} onChange={(v) => updateOsd({ inject: v })} />
+      <div className="mb-3 flex items-center gap-2">
+        <Syringe size={15} className="shrink-0 text-accent-bright" />
+        <span className="hud-label text-[10.5px] text-dim">
+          {tf("注入详情 · INJECTION", "INJECTION")}
+        </span>
+        <span
+          className={cn(
+            "rounded px-1.5 py-0.5 text-[10px]",
+            enabled ? "bg-accent/15 text-accent-bright" : "bg-surface3 text-dim",
+          )}
+        >
+          {enabled ? tf("已开启", "On") : tf("已关闭", "Off")}
+        </span>
+        <span className="h-px flex-1 bg-line/50" />
       </div>
 
       {/* Anti-cheat safety note — always visible so the guarantee is explicit. */}
       <div className="mb-3 flex items-start gap-2 rounded-lg border border-line/60 bg-surface2/50 px-3 py-2">
         <ShieldCheck size={14} className="mt-0.5 shrink-0 text-ok" />
         <span className="text-[11.5px] leading-relaxed text-dim">
-          检测到 EasyAntiCheat / BattlEye / Vanguard 等反作弊时
-          <span className="text-muted">绝不注入</span>
-          ，自动改用窗口叠加，避免误判封号。
+          {tf(
+            "检测到 EasyAntiCheat / BattlEye / Vanguard 等反作弊时绝不注入，自动改用窗口叠加，避免误判封号。",
+            "Never injects when EasyAntiCheat / BattlEye / Vanguard are detected — it falls back to the window overlay so you can't be flagged.",
+          )}
         </span>
       </div>
 
@@ -847,23 +1182,37 @@ interface InjectionStatusLineProps {
   status: OverlayStatus | null;
 }
 
+/**
+ * OVL-1 adds bilingual `reasonZh` / `reasonEn` alongside the existing (Chinese)
+ * `reason`. Read them structurally so this file compiles both before and after
+ * that lands, and fall back to `reason` either way.
+ */
+type LocalisedStatus = OverlayStatus & { reasonZh?: string; reasonEn?: string };
+
 /** The live status pill: colour + icon follow the resolved overlay mode so the
  *  user instantly sees "injected", "fell back to window (anti-cheat)", etc. */
 function InjectionStatusLine({ enabled, status }: InjectionStatusLineProps) {
+  const tf = useTf();
+  const en = useSettings((s) => s.language) === "en";
   if (!enabled) {
     return (
       <div className="rounded-lg border border-dashed border-line/70 px-3 py-2.5 text-center text-[12px] text-dim">
-        开启后将自动叠加到前台游戏
+        {tf(
+          "在上方「显示方式」中开启「注入」后，会自动叠加到前台游戏",
+          'Turn on "In-game overlay (injection)" under MODE above to attach to the foreground game',
+        )}
       </div>
     );
   }
   if (!status) {
     return (
       <div className="rounded-lg border border-line bg-surface2 px-3 py-2.5 text-[12px] text-dim">
-        正在检测前台游戏…
+        {tf("正在检测前台游戏…", "Detecting the foreground game…")}
       </div>
     );
   }
+  const loc = status as LocalisedStatus;
+  const reason = (en ? loc.reasonEn : loc.reasonZh) ?? status.reason;
   // Map mode → accent colour. Inject = success; window fallback = warning amber;
   // none = neutral.
   const tone =
@@ -881,7 +1230,7 @@ function InjectionStatusLine({ enabled, status }: InjectionStatusLineProps) {
       ) : (
         <Gamepad2 size={14} className="shrink-0" />
       )}
-      <span className="flex-1">{status.reason}</span>
+      <span className="flex-1">{reason}</span>
       {status.target.pid !== 0 && (
         <span className="shrink-0 rounded bg-surface3 px-1.5 py-0.5 text-[10.5px] text-muted opacity-80">
           PID {status.target.pid}
@@ -898,42 +1247,52 @@ interface OsdAppearanceControlsProps {
 
 /** The shared style / position / scale / opacity / rounded controls, driven by a
  *  config value + a patch callback so the same UI edits either the global default
- *  or a selected game's per-game override. */
-function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
+ *  or a selected game's per-game override.
+ *
+ *  Memoized: the parent re-renders on every telemetry tick to move the preview
+ *  plate, and `cfg` / `onChange` are both identity-stable there, so this whole
+ *  slider tree can sit that out. */
+const OsdAppearanceControls = memo(function OsdAppearanceControls({
+  cfg,
+  onChange,
+}: OsdAppearanceControlsProps) {
+  const tf = useTf();
   return (
     <div className="glass hairline rounded-2xl p-4">
       <div className="mb-3 flex items-center gap-2">
         <Palette size={14} className="text-accent-bright" />
-        <span className="hud-label text-[10.5px] text-dim">样式 · 位置 · STYLE</span>
+        <span className="hud-label text-[10.5px] text-dim">
+          {tf("样式 · 位置 · STYLE", "STYLE")}
+        </span>
         <span className="h-px flex-1 bg-line/50" />
       </div>
       <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
-      <Row label="布局样式">
+      <Row label={tf("布局样式", "Layout")}>
         <Segmented
           id="osd-style"
           value={cfg.style}
           onChange={(v) => onChange({ style: v as OsdCfg["style"] })}
           options={[
-            { value: "horizontal", label: "横向" },
-            { value: "vertical", label: "竖排" },
+            { value: "horizontal", label: tf("横向", "Row") },
+            { value: "vertical", label: tf("竖排", "Column") },
           ]}
         />
       </Row>
       <div className="sm:col-span-2">
-        <Row label="屏幕位置">
+        <Row label={tf("屏幕位置", "Screen position")}>
           <Segmented
             id="osd-pos"
             value={cfg.position}
             onChange={(v) => onChange({ position: v as OsdCfg["position"] })}
             wrap
             options={[
-              { value: "tl", label: "左上" },
-              { value: "tc", label: "上中" },
-              { value: "tr", label: "右上" },
-              { value: "bl", label: "左下" },
-              { value: "bc", label: "下中" },
-              { value: "br", label: "右下" },
-              { value: "free", label: "自由" },
+              { value: "tl", label: tf("左上", "Top left") },
+              { value: "tc", label: tf("上中", "Top") },
+              { value: "tr", label: tf("右上", "Top right") },
+              { value: "bl", label: tf("左下", "Bottom left") },
+              { value: "bc", label: tf("下中", "Bottom") },
+              { value: "br", label: tf("右下", "Bottom right") },
+              { value: "free", label: tf("自由", "Free") },
             ]}
           />
         </Row>
@@ -942,7 +1301,7 @@ function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
         <>
           <div className="sm:col-span-1">
             <Slider
-              label="水平位置 X"
+              label={tf("水平位置 X", "Horizontal X")}
               value={Math.round((cfg.freeX ?? 0) * 100)}
               min={0}
               max={100}
@@ -953,7 +1312,7 @@ function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
           </div>
           <div className="sm:col-span-1">
             <Slider
-              label="垂直位置 Y"
+              label={tf("垂直位置 Y", "Vertical Y")}
               value={Math.round((cfg.freeY ?? 0) * 100)}
               min={0}
               max={100}
@@ -966,7 +1325,7 @@ function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
       )}
       <div className="sm:col-span-1">
         <Slider
-          label="字体大小"
+          label={tf("字体大小", "Font size")}
           value={Math.round(cfg.scale * 100)}
           min={80}
           max={200}
@@ -977,7 +1336,7 @@ function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
       </div>
       <div className="sm:col-span-1">
         <Slider
-          label="背景不透明度"
+          label={tf("背景不透明度", "Plate opacity")}
           value={Math.round(cfg.opacity * 100)}
           min={0}
           max={90}
@@ -986,16 +1345,16 @@ function OsdAppearanceControls({ cfg, onChange }: OsdAppearanceControlsProps) {
           onChange={(v) => onChange({ opacity: v / 100 })}
         />
       </div>
-      <Row label="圆角背板">
+      <Row label={tf("圆角背板", "Rounded plate")}>
         <Toggle checked={cfg.rounded} onChange={(v) => onChange({ rounded: v })} />
       </Row>
-      <Row label="OLED 防烧屏">
+      <Row label={tf("OLED 防烧屏", "OLED anti burn-in")}>
         <Toggle checked={cfg.oledShift} onChange={(v) => onChange({ oledShift: v })} />
       </Row>
       </div>
     </div>
   );
-}
+});
 
 /** The metric keys the native taskbar plate (taskbar_mon.rs) can render, in a
  *  sensible default offer order. The picker below offers ONLY these — writing the
@@ -1037,7 +1396,7 @@ const TB_METRIC_GROUPS = OSD_CATEGORIES.map((c) => ({
  * Double-Click action, Monitor selector, Click-Through (always on for this
  * click-through window), and the Font picker (uses the inherited OSD font).
  */
-function TaskbarMonitorPanel() {
+const TaskbarMonitorPanel = memo(function TaskbarMonitorPanel() {
   const tf = useTf();
   const update = useOsd((s) => s.update);
   // Read the GLOBAL store (not the passed per-game previewCfg) so the editor
@@ -1052,22 +1411,33 @@ function TaskbarMonitorPanel() {
   // The independent tbMetrics editor: toggle add/remove preserves the picker's
   // offer order; reorder nudges a selected key up/down within tbMetrics. All
   // write `tbMetrics` on the GLOBAL store (never the OSD `metrics`).
-  function toggleTbMetric(key: string) {
-    const cur = cfg.tbMetrics ?? TBMON_DEFAULTS.tbMetrics;
-    const next = cur.includes(key)
-      ? cur.filter((k) => k !== key)
-      : // Insert in the canonical offer order so adding keeps pairs tidy.
-        TB_METRIC_DEFS.map((m) => m.key).filter((k) => cur.includes(k) || k === key);
-    update({ tbMetrics: [...next] });
-  }
-  function moveTbMetric(key: string, dir: -1 | 1) {
-    const cur = [...(cfg.tbMetrics ?? TBMON_DEFAULTS.tbMetrics)];
-    const i = cur.indexOf(key);
-    const j = i + dir;
-    if (i < 0 || j < 0 || j >= cur.length) return;
-    [cur[i], cur[j]] = [cur[j], cur[i]];
-    update({ tbMetrics: cur });
-  }
+  //
+  // Stable identities (they read the live list off the store, not off a render
+  // closure) so `memo(TaskbarMetricsPicker)` — the biggest subtree on this tab —
+  // only re-renders when its own `metrics` prop actually moves.
+  const toggleTbMetric = useCallback(
+    (key: string) => {
+      const cur = useOsd.getState().tbMetrics ?? TBMON_DEFAULTS.tbMetrics;
+      const next = cur.includes(key)
+        ? cur.filter((k) => k !== key)
+        : // Insert in the canonical offer order so adding keeps pairs tidy.
+          TB_METRIC_DEFS.map((m) => m.key).filter((k) => cur.includes(k) || k === key);
+      update({ tbMetrics: [...next] });
+    },
+    [update],
+  );
+  const moveTbMetric = useCallback(
+    (key: string, dir: -1 | 1) => {
+      const cur = [...(useOsd.getState().tbMetrics ?? TBMON_DEFAULTS.tbMetrics)];
+      const i = cur.indexOf(key);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= cur.length) return;
+      [cur[i], cur[j]] = [cur[j], cur[i]];
+      update({ tbMetrics: cur });
+    },
+    [update],
+  );
+  const clearTbMetrics = useCallback(() => update({ tbMetrics: [] }), [update]);
 
   return (
     <div className="glass hairline rounded-2xl p-4">
@@ -1077,7 +1447,10 @@ function TaskbarMonitorPanel() {
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}
-          className="no-drag flex flex-1 cursor-pointer items-center gap-2 text-left"
+          className={cn(
+            "no-drag flex flex-1 cursor-pointer items-center gap-2 rounded-md text-left",
+            FOCUS_RING,
+          )}
           aria-expanded={open}
         >
           <ChevronRight
@@ -1142,7 +1515,9 @@ function TaskbarMonitorPanel() {
 
           {/* 2. Custom Layout panel */}
           <div className="mb-3 mt-4 flex items-center gap-2 border-t border-line/60 pt-3">
-            <span className="hud-label text-[10.5px] text-dim">自定义布局 · CUSTOM LAYOUT</span>
+            <span className="hud-label text-[10.5px] text-dim">
+              {tf("自定义布局 · CUSTOM LAYOUT", "CUSTOM LAYOUT")}
+            </span>
             <span className="h-px flex-1 bg-line/50" />
           </div>
           <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
@@ -1182,13 +1557,13 @@ function TaskbarMonitorPanel() {
             metrics={metrics}
             onToggle={toggleTbMetric}
             onMove={moveTbMetric}
-            onClear={() => update({ tbMetrics: [] })}
+            onClear={clearTbMetrics}
           />
 
           {/* 4. Colors panel */}
           <div className="mb-3 mt-4 flex items-center gap-2 border-t border-line/60 pt-3">
             <Palette size={14} className="text-accent-bright" />
-            <span className="hud-label text-[10.5px] text-dim">配色 · COLORS</span>
+            <span className="hud-label text-[10.5px] text-dim">{tf("配色 · COLORS", "COLORS")}</span>
             <span className="h-px flex-1 bg-line/50" />
           </div>
           <div className="mb-3 flex items-center justify-between gap-3">
@@ -1198,54 +1573,57 @@ function TaskbarMonitorPanel() {
           <div className="mb-3 flex items-start gap-2 rounded-lg border border-line/60 bg-surface2/50 px-3 py-2">
             <AlertTriangle size={13} className="mt-0.5 shrink-0 text-warn" />
             <span className="text-[11.5px] leading-relaxed text-dim">
-              将背景色设为接近系统任务栏颜色 / Set BG close to system taskbar color
+              {tf(
+                "将背景色设为接近系统任务栏的颜色，边缘才不会露出色块。",
+                "Set the background close to your system taskbar color so the plate's edges don't show.",
+              )}
             </span>
           </div>
           <div className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
             <ColorRow
-              label="背景色 Background"
+              label={tf("背景色", "Background")}
               value={cfg.tbBg ?? TASKBAR_DEFAULTS.tbBg}
               onChange={(v) => update({ tbBg: v })}
             />
             <ColorRow
-              label="标签 Label"
+              label={tf("标签", "Label")}
               value={cfg.tbLabel ?? TASKBAR_DEFAULTS.tbLabel}
               onChange={(v) => update({ tbLabel: v })}
             />
             <ColorRow
-              label="数值 Value"
+              label={tf("数值", "Value")}
               value={cfg.tbSafe ?? TASKBAR_DEFAULTS.tbSafe}
               onChange={(v) => update({ tbSafe: v })}
             />
             <ColorRow
-              label="警告 Warn"
+              label={tf("警告", "Warn")}
               value={cfg.tbWarn ?? TASKBAR_DEFAULTS.tbWarn}
               onChange={(v) => update({ tbWarn: v })}
             />
             <ColorRow
-              label="危险 Crit"
+              label={tf("危险", "Crit")}
               value={cfg.tbCrit ?? TASKBAR_DEFAULTS.tbCrit}
               onChange={(v) => update({ tbCrit: v })}
             />
           </div>
           <div className="mt-4 grid gap-x-6 gap-y-3 sm:grid-cols-2">
             <NumRow
-              label="占用警告 (%)"
+              label={tf("占用警告 (%)", "Load warn (%)")}
               value={cfg.tbWarnLoad ?? TASKBAR_DEFAULTS.tbWarnLoad}
               onChange={(v) => update({ tbWarnLoad: v })}
             />
             <NumRow
-              label="占用危险 (%)"
+              label={tf("占用危险 (%)", "Load crit (%)")}
               value={cfg.tbCritLoad ?? TASKBAR_DEFAULTS.tbCritLoad}
               onChange={(v) => update({ tbCritLoad: v })}
             />
             <NumRow
-              label="温度警告 (°C)"
+              label={tf("温度警告 (°C)", "Temp warn (°C)")}
               value={cfg.tbWarnTemp ?? TASKBAR_DEFAULTS.tbWarnTemp}
               onChange={(v) => update({ tbWarnTemp: v })}
             />
             <NumRow
-              label="温度危险 (°C)"
+              label={tf("温度危险 (°C)", "Temp crit (°C)")}
               value={cfg.tbCritTemp ?? TASKBAR_DEFAULTS.tbCritTemp}
               onChange={(v) => update({ tbCritTemp: v })}
             />
@@ -1254,7 +1632,7 @@ function TaskbarMonitorPanel() {
       )}
     </div>
   );
-}
+});
 
 interface TaskbarMetricsPickerProps {
   /** The taskbar monitor's OWN selected metric keys, in display order. */
@@ -1274,7 +1652,12 @@ interface TaskbarMetricsPickerProps {
  * order" strip with up/down reorder so the user can arrange the pair order the
  * native plate renders. Only the taskbar-supported keys are offered.
  */
-function TaskbarMetricsPicker({ metrics, onToggle, onMove, onClear }: TaskbarMetricsPickerProps) {
+const TaskbarMetricsPicker = memo(function TaskbarMetricsPicker({
+  metrics,
+  onToggle,
+  onMove,
+  onClear,
+}: TaskbarMetricsPickerProps) {
   const tf = useTf();
   const selectedDefs = metrics
     .map((k) => TB_METRIC_DEFS.find((m) => m.key === k))
@@ -1295,7 +1678,10 @@ function TaskbarMetricsPicker({ metrics, onToggle, onMove, onClear }: TaskbarMet
         <button
           onClick={onClear}
           disabled={metrics.length === 0}
-          className="no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          className={cn(
+            "no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40",
+            FOCUS_RING,
+          )}
         >
           <RotateCcw size={12} /> {tf("全部清空", "Clear all")}
         </button>
@@ -1321,6 +1707,7 @@ function TaskbarMetricsPicker({ metrics, onToggle, onMove, onClear }: TaskbarMet
                     onClick={() => onToggle(m.key)}
                     className={cn(
                       "no-drag flex cursor-pointer items-center gap-2.5 rounded-lg border px-3 py-2 text-left text-[12.5px] transition-colors",
+                      FOCUS_RING,
                       on
                         ? "border-accent/40 bg-accent/10 text-ink"
                         : "border-line bg-surface2 text-muted hover:bg-surface3 hover:text-ink",
@@ -1367,7 +1754,10 @@ function TaskbarMetricsPicker({ metrics, onToggle, onMove, onClear }: TaskbarMet
                 <button
                   onClick={() => onMove(m.key, -1)}
                   disabled={i === 0}
-                  className="no-drag grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded text-dim transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
+                  className={cn(
+                    "no-drag grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded text-dim transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30",
+                    FOCUS_RING,
+                  )}
                   title={tf("上移", "Move up")}
                   aria-label={tf(`上移 ${m.label}`, `Move ${m.label} up`)}
                 >
@@ -1376,7 +1766,10 @@ function TaskbarMetricsPicker({ metrics, onToggle, onMove, onClear }: TaskbarMet
                 <button
                   onClick={() => onMove(m.key, 1)}
                   disabled={i === selectedDefs.length - 1}
-                  className="no-drag grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded text-dim transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
+                  className={cn(
+                    "no-drag grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded text-dim transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30",
+                    FOCUS_RING,
+                  )}
                   title={tf("下移", "Move down")}
                   aria-label={tf(`下移 ${m.label}`, `Move ${m.label} down`)}
                 >
@@ -1384,7 +1777,10 @@ function TaskbarMetricsPicker({ metrics, onToggle, onMove, onClear }: TaskbarMet
                 </button>
                 <button
                   onClick={() => onToggle(m.key)}
-                  className="no-drag grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded text-dim transition-colors hover:bg-danger/15 hover:text-danger"
+                  className={cn(
+                    "no-drag grid h-6 w-6 shrink-0 cursor-pointer place-items-center rounded text-dim transition-colors hover:bg-danger/15 hover:text-danger",
+                    FOCUS_RING,
+                  )}
                   title={tf("移除", "Remove")}
                   aria-label={tf(`移除 ${m.label}`, `Remove ${m.label}`)}
                 >
@@ -1397,7 +1793,7 @@ function TaskbarMetricsPicker({ metrics, onToggle, onMove, onClear }: TaskbarMet
       )}
     </div>
   );
-}
+});
 
 /** A label + hex text + native color swatch, kept in sync (the screenshot shows
  *  the same "#RRGGBB + swatch" pairing for each color slot). */

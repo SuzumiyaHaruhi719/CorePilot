@@ -4,13 +4,14 @@ use crate::error::{CoreError, CoreResult};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
-use sysinfo::{ProcessesToUpdate, System};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
 use windows::Win32::Security::{
     GetTokenInformation, LookupAccountSidW, TokenUser, PSID, SID_NAME_USE, TOKEN_QUERY, TOKEN_USER,
@@ -28,9 +29,10 @@ use windows::Win32::System::Performance::{
 };
 use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN;
 use windows::Win32::System::Threading::{
-    GetProcessAffinityMask, GetProcessHandleCount, GetProcessTimes, IsWow64Process2, OpenProcess,
-    OpenProcessToken, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_TERMINATE,
+    GetProcessAffinityMask, GetProcessHandleCount, IsWow64Process2, OpenProcess, OpenProcessToken,
+    QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_SYNCHRONIZE,
+    PROCESS_TERMINATE,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -121,8 +123,9 @@ const CRITICAL_PROCESS_NAMES: &[&str] = &[
 /// `OpenProcess`) so the process list can mark these rows non-settable without a
 /// syscall — keeping the "settable" flag in sync with [`guard_critical_pid`].
 pub fn is_critical_name(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    CRITICAL_PROCESS_NAMES.contains(&n.as_str())
+    CRITICAL_PROCESS_NAMES
+        .iter()
+        .any(|critical| name.eq_ignore_ascii_case(critical))
 }
 
 /// Resolve a PID's executable file name (e.g. `"lsass.exe"`), lowercased.
@@ -706,7 +709,17 @@ pub(crate) fn gpu_vram_map() -> HashMap<u32, u64> {
 /// Refresh and snapshot all processes. `logical` is the logical-CPU count
 /// used to normalize sysinfo's per-core CPU% into a Task-Manager-style total%.
 pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<ProcInfo> {
-    sys.refresh_processes(ProcessesToUpdate::All, true);
+    // The default refresh also asks Windows for per-process I/O counters, but
+    // this view never reads them; avoiding that syscall keeps the main sampler
+    // from paying for disk accounting on every visible process row.
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_cpu()
+            .with_memory()
+            .with_exe(UpdateKind::OnlyIfNotSet),
+    );
     // Per-process GPU utilization/attribution + dedicated VRAM come from the
     // background telemetry collector (ONE shared collect), not a per-call PDH
     // collect under the sys lock — that multi-second collect is what used to
@@ -732,9 +745,9 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
             // requires a kernel/MSR sensor driver. Weighted blend of this
             // process's normalized CPU% and GPU%.
             let power = (cpu * 0.6 + gpu_pct * 0.4).min(100.0);
-            // One OpenProcess per process for affinity + handles + cpu_time +
-            // cached user/platform.
-            let details = process_details(id);
+            // Reuse one limited-information handle per PID; only volatile affinity
+            // and handle count are queried on each refresh.
+            let details = process_details(id, process.accumulated_cpu_time());
             live_pids.insert(id);
             let exe = process.exe();
             // Full exe path (used for both the friendly description and the
@@ -746,10 +759,20 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
                     Some(p.to_string_lossy().to_string())
                 }
             });
-            let name = process.name().to_string_lossy().to_string();
+            let mut name = process.name().to_string_lossy().to_string();
+            let mut exe_path = exe_path;
+            // sysinfo intentionally does not re-query an existing PID's image on
+            // Windows. A recycled PID can therefore retain the dead process's
+            // name/path; the detail cache detects that case and supplies fresh values.
+            if let Some(path) = details.image_path.as_deref() {
+                exe_path = Some(path.to_owned());
+                name = path.rsplit(['\\', '/']).next().unwrap_or(path).to_owned();
+            }
+            let is_critical = is_critical_name(&name);
+            let settable = settable_for(id) && !is_critical;
             ProcInfo {
                 pid: id,
-                name: name.clone(),
+                name,
                 cpu,
                 mem: process.memory(),
                 threads: threads.get(&id).copied().unwrap_or(0),
@@ -769,7 +792,7 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
                 // (lsass/winlogon/services/…). Without the name check, SeDebug
                 // lets OpenProcess succeed on those, so they'd look assignable in
                 // the UI yet silently fail at the guard — confusing the user.
-                settable: settable_for(id) && !is_critical_name(&name),
+                settable,
                 parent_pid: process.parent().map(|p| p.as_u32()).unwrap_or(0),
                 exe_path,
             }
@@ -812,6 +835,8 @@ struct ProcDetails {
     user: Option<String>,
     /// "64位" / "32位"; `None` when undeterminable.
     platform: Option<String>,
+    /// Freshly queried image path when a PID cache entry was opened/reopened.
+    image_path: Option<String>,
 }
 
 impl Default for ProcDetails {
@@ -822,15 +847,38 @@ impl Default for ProcDetails {
             cpu_time: 0,
             user: None,
             platform: None,
+            image_path: None,
         }
     }
 }
 
-/// Cache for the *static* per-PID details (user, platform) keyed by pid:
-/// `(user, platform)`. These never change for the lifetime of a process, so we
-/// resolve them once (the SID lookup + WoW64 probe are comparatively expensive)
-/// and reuse them on every refresh. Pruned in [`list`] to the live PID set.
-static DETAIL_CACHE: Lazy<Mutex<HashMap<u32, (Option<String>, Option<String>)>>> =
+/// Cached query handle and static identity fields for a live PID. Keeping the
+/// handle avoids an OpenProcess/CloseHandle pair on every refresh; the liveness
+/// probe in [`process_details`] prevents a recycled PID from inheriting these
+/// fields from its predecessor.
+struct DetailCacheEntry {
+    // HANDLE is synchronized by DETAIL_CACHE; Windows marks its raw pointer as non-Send.
+    // Opened with SYNCHRONIZE so the wait probe can read its signaled state; the
+    // open handle also pins the kernel process object, so a recycled PID can never
+    // alias it — the probe reports the ORIGINAL process's exit, which is exactly the
+    // identity check we need (no separate creation-time comparison required).
+    handle: HANDLE,
+    user: Option<String>,
+    platform: Option<String>,
+}
+
+// The cache mutex is the sole access path, so moving this entry between threads is safe.
+unsafe impl Send for DetailCacheEntry {}
+
+impl Drop for DetailCacheEntry {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+static DETAIL_CACHE: Lazy<Mutex<HashMap<u32, DetailCacheEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Cache of pid → affinity-settable. Stable for a process's lifetime, so we
@@ -871,8 +919,8 @@ fn description_for(path: Option<&Path>) -> Option<String> {
     if path.as_os_str().is_empty() {
         return None;
     }
-    let key = path.to_string_lossy().to_string();
-    if let Some(cached) = DESC_CACHE.lock().get(&key) {
+    let key: Cow<str> = path.to_string_lossy();
+    if let Some(cached) = DESC_CACHE.lock().get(key.as_ref()) {
         return cached.clone();
     }
     let desc = exe_description(path);
@@ -883,7 +931,7 @@ fn description_for(path: Option<&Path>) -> Option<String> {
         if cache.len() >= 4096 {
             cache.clear();
         }
-        cache.insert(key, desc.clone());
+        cache.insert(key.into_owned(), desc.clone());
     }
     desc
 }
@@ -962,14 +1010,6 @@ fn exe_description(path: &Path) -> Option<String> {
             Some(text)
         }
     }
-}
-
-/// Combine a kernel+user [`FILETIME`] pair into total CPU seconds. Each FILETIME
-/// is a 64-bit count of 100-ns ticks split across high/low words; summed and
-/// divided by 10_000_000 to yield whole seconds.
-fn cpu_seconds(kernel: FILETIME, user: FILETIME) -> u64 {
-    let to_ticks = |ft: FILETIME| ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
-    (to_ticks(kernel) + to_ticks(user)) / 10_000_000
 }
 
 /// Resolve the owning account name for an open process handle via its token
@@ -1073,71 +1113,123 @@ fn resolve_platform(handle: HANDLE) -> Option<String> {
     }
 }
 
-/// Open a process once and gather affinity + handle count + CPU time, plus the
-/// statically-cached owner and architecture. Returns all-default values when the
-/// process can't be opened (protected/system). Never panics; no `unwrap` on FFI.
-fn process_details(pid: u32) -> ProcDetails {
+/// Open a process once, capturing stable identity fields.
+fn open_detail_entry(pid: u32) -> Option<(DetailCacheEntry, Option<String>)> {
     unsafe {
-        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false.into(), pid) else {
-            return ProcDetails::default();
+        // SYNCHRONIZE is mandatory, not decorative: without it WaitForSingleObject
+        // on this handle returns WAIT_FAILED (access denied), the liveness probe in
+        // `process_details` judges EVERY cached entry stale, and the handle cache
+        // inverts into a full OpenProcess/token-lookup/CloseHandle storm per process
+        // per refresh — inside the `state.sys` lock. That is the 未响应 freeze class
+        // this cache exists to avoid.
+        let handle = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false.into(),
+            pid,
+        )
+        .ok()?;
+        let path = query_image_path(handle);
+        let entry = DetailCacheEntry {
+            handle,
+            user: resolve_user(handle),
+            platform: resolve_platform(handle),
         };
+        Some((entry, path))
+    }
+}
 
-        // Affinity (cheap; recomputed each refresh as it can change).
-        let mut proc_mask: usize = 0;
-        let mut sys_mask: usize = 0;
+fn query_image_path(handle: HANDLE) -> Option<String> {
+    unsafe {
+        let mut buf = vec![0u16; 32_768];
+        let mut len = buf.len() as u32;
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .ok()?;
+        (len > 0).then(|| String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+/// Read volatile details from the cached handle. CPU time comes from sysinfo's
+/// already-collected sample, avoiding a second GetProcessTimes syscall.
+fn process_details(pid: u32, accumulated_cpu_ms: u64) -> ProcDetails {
+    let mut image_path = None;
+    let handle = {
+        let mut cache = DETAIL_CACHE.lock();
+        let stale = cache
+            .get(&pid)
+            .is_some_and(|entry| unsafe { WaitForSingleObject(entry.handle, 0) != WAIT_TIMEOUT });
+        if stale {
+            // Drop closes the old handle; recycled PIDs can also change their
+            // settable status, so invalidate that independent cache too.
+            cache.remove(&pid);
+            SETTABLE_CACHE.lock().remove(&pid);
+        }
+        if !cache.contains_key(&pid) {
+            if let Some((entry, path)) = open_detail_entry(pid) {
+                image_path = path;
+                cache.insert(pid, entry);
+            }
+        }
+        cache.get(&pid).map(|entry| entry.handle)
+    };
+    let Some(handle) = handle else {
+        return ProcDetails {
+            cpu_time: accumulated_cpu_ms / 1000,
+            image_path,
+            ..Default::default()
+        };
+    };
+    unsafe {
+        let mut proc_mask = 0usize;
+        let mut sys_mask = 0usize;
         let affinity = if GetProcessAffinityMask(handle, &mut proc_mask, &mut sys_mask).is_ok() {
             proc_mask as u64
         } else {
             0
         };
-
-        // Open handle count.
-        let mut count: u32 = 0;
+        let mut count = 0u32;
         let handles = if GetProcessHandleCount(handle, &mut count).is_ok() {
             count
         } else {
             0
         };
-
-        // Total CPU time (kernel + user) in seconds.
-        let mut creation = FILETIME::default();
-        let mut exit = FILETIME::default();
-        let mut kernel = FILETIME::default();
-        let mut user_time = FILETIME::default();
-        let cpu_time = if GetProcessTimes(
-            handle,
-            &mut creation,
-            &mut exit,
-            &mut kernel,
-            &mut user_time,
-        )
-        .is_ok()
-        {
-            cpu_seconds(kernel, user_time)
-        } else {
-            0
-        };
-
-        // Static fields (owner + architecture): resolve once per PID, then cache.
-        let (user, platform) = {
-            let mut cache = DETAIL_CACHE.lock();
-            if let Some(cached) = cache.get(&pid) {
-                cached.clone()
-            } else {
-                let resolved = (resolve_user(handle), resolve_platform(handle));
-                cache.insert(pid, resolved.clone());
-                resolved
-            }
-        };
-
-        let _ = CloseHandle(handle);
-
+        let cache = DETAIL_CACHE.lock();
+        let (user, platform) = cache
+            .get(&pid)
+            .map(|entry| (entry.user.clone(), entry.platform.clone()))
+            .unwrap_or_default();
         ProcDetails {
             affinity,
             handles,
-            cpu_time,
+            cpu_time: accumulated_cpu_ms / 1000,
             user,
             platform,
+            image_path,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression guard: the cached handle must carry SYNCHRONIZE. Opened without
+    /// it, `WaitForSingleObject` returns WAIT_FAILED instead of WAIT_TIMEOUT, so
+    /// `process_details` treats every live process as a recycled PID and reopens
+    /// (+ token/SID lookup) every handle on every refresh under the `state.sys`
+    /// lock — turning the handle cache into the freeze it was meant to prevent.
+    #[test]
+    fn cached_handle_can_be_waited_on() {
+        let (entry, _path) =
+            open_detail_entry(std::process::id()).expect("own process must be openable");
+        // Our own process is alive, so the probe must time out (= not stale).
+        assert_eq!(
+            unsafe { WaitForSingleObject(entry.handle, 0) },
+            WAIT_TIMEOUT
+        );
     }
 }

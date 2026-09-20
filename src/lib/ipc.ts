@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { PerfSample } from "./perf";
+import type { PerfSample, PerfSummary } from "./perf";
 
 /** Reject a promise if it hasn't settled within `ms`, so a hung backend invoke
  *  can never permanently latch a poller's in-flight guard (which would make a
@@ -754,6 +754,9 @@ export const api = {
   gpuOcInfo: () => invoke<GpuOcInfo>("gpu_oc_info"),
   gpuOcApply: (settings: GpuOcSettings) => invoke<void>("gpu_oc_apply", { settings }),
   gpuOcReset: () => invoke<void>("gpu_oc_reset"),
+  /** "Did the machine just die with the overclock armed?" — gates ONLY the
+   *  automatic startup re-apply; the manual apply path never calls this. */
+  gpuOcStartupCheck: () => invoke<GpuOcStartupCheck>("gpu_oc_startup_check"),
   /** Live motherboard fan headers + temperature sources. */
   fanInfo: () => invoke<FanInfo>("fan_info"),
   /** Push the per-fan configuration (mode/curve) to the backend fan engine. */
@@ -783,6 +786,11 @@ export const api = {
   osdSetVisible: (visible: boolean) => invoke<void>("osd_set_visible", { visible }),
   osdSetBounds: (x: number, y: number, w: number, h: number) =>
     invoke<void>("osd_set_bounds", { x, y, w, h }),
+  /** 1 Hz liveness beat from the OSD page. The Rust-side GDI/keep-alive guard
+   *  reloads — then rebuilds — an overlay window whose page stops beating for
+   *  180 s: wry installs no WebView2 ProcessFailed handler, so a crashed OSD
+   *  renderer otherwise leaves a live transparent window showing nothing. */
+  osdHeartbeat: () => invoke<void>("osd_heartbeat"),
   /**
    * Push the taskbar-monitor config to the NATIVE Win32/GDI taskbar window
    * (which runs on its own thread and reads the in-process sampler directly —
@@ -866,6 +874,32 @@ export const api = {
       black: cfg.black,
       osdWhite: cfg.osdWhite,
     }),
+  /**
+   * Perf-session sample files: the ~1200-point sample array of one recorded
+   * session, stored as `app_data_dir()/perf-sessions/<id>.json` instead of
+   * inline in the shared store (where it was 22 MB of a 24 MB file that every
+   * unrelated `persist_set` rewrote). `id` is a `crypto.randomUUID()`; the
+   * backend rejects anything that isn't `^[0-9a-f-]{36}$` before touching disk.
+   * See `src/lib/perfSamples.ts` for the cache in front of these.
+   */
+  perfSessionSave: (id: string, json: string) =>
+    invoke<void>("perf_session_save", { id, json }),
+  /** Raw JSON of one session's samples; null when the file is gone/unreadable. */
+  perfSessionLoad: (id: string) => invoke<string | null>("perf_session_load", { id }),
+  /** Drop one session's sample file. Missing file is success (idempotent). */
+  perfSessionDelete: (id: string) => invoke<void>("perf_session_delete", { id }),
+  /** Drop every sample file (history "清空"). */
+  perfSessionDeleteAll: () => invoke<void>("perf_session_delete_all"),
+  /** Ids of every sample file on disk, for the post-hydration orphan sweep. */
+  perfSessionIds: () => invoke<string[]>("perf_session_ids"),
+  /** Native "the user cannot see the main window" gate (backend `ui_visibility`).
+   *  True when the main window is minimised, hidden to the tray, or fully covered
+   *  by a window filling the SAME monitor it lives on. Deliberately NOT a focus
+   *  check: CorePilot on a second monitor while a game owns the first must keep
+   *  updating. Cheap — a sync command doing one atomic load.
+   *  Callers MUST fail open (treat a rejection as `false`): a gate stuck closed is
+   *  the "monitor disappears" bug, a gate stuck open only costs CPU. */
+  uiOccluded: () => invoke<boolean>("ui_occluded"),
   setCloseToTray: (enabled: boolean) => invoke<void>("set_close_to_tray", { enabled }),
   /** Apply/clear the Windows 11 acrylic window backdrop on the main window. */
   setAcrylic: (enabled: boolean) => invoke<void>("set_acrylic", { enabled }),
@@ -908,19 +942,29 @@ export const api = {
 
 /**
  * Payload of the backend `perf://session` event (emitted when a recorded game
- * exits). Mirrors the Rust `SessionPayload` (camelCase). `samples` are the full
- * (pre-downsample) `PerfSample` series; the frontend summarizes + downsamples
- * them when building the persisted `PerfSession`.
+ * exits). Mirrors the Rust `SessionPayload` (camelCase). Rust summarizes and
+ * downsamples before emitting, so the renderer receives only report-sized data.
  */
+/** Result of the startup crash guard (src-tauri/src/gpu_guard.rs). `reason` is a
+ *  stable machine tag, not user-visible text: see src/store/gpuOcGuard.ts. */
+export interface GpuOcStartupCheck {
+  blocked: boolean;
+  reason: string;
+  detail: string;
+}
+
 export interface PerfSessionEvent {
-  exe: string;
-  /** Full exe path (report path display + history-card icon), or null. */
-  path: string | null;
-  startedAt: number;
-  endedAt: number;
-  durationSec: number;
-  cpuName: string | null;
-  gpuName: string | null;
+  meta: {
+    exe: string;
+    /** Full exe path (report path display + history-card icon), or null. */
+    path: string | null;
+    startedAt: number;
+    endedAt: number;
+    durationSec: number;
+    cpuName: string | null;
+    gpuName: string | null;
+  };
+  summary: PerfSummary;
   samples: PerfSample[];
 }
 
@@ -1026,8 +1070,16 @@ export type OverlayMode = "inject" | "window" | "none";
 export interface OverlayStatus {
   target: OverlayTarget;
   mode: OverlayMode;
-  /** Localised explanation, e.g. "✅ 可注入（DX12）". */
+  /** Localised explanation, e.g. "✅ 可注入（DX12）". Chinese — kept under the
+   *  original name so every existing caller keeps working. */
   reason: string;
+  /** The same explanation, Chinese. Pair with `reasonEn` for the language switch:
+   *  the OSD tab's status line is the first place a user looks when the overlay
+   *  is not showing, so it has to speak their language rather than fall back to
+   *  a Chinese sentence in English mode. */
+  reasonZh: string;
+  /** The same explanation in English. */
+  reasonEn: string;
   /** Whether the injected overlay is currently attached to this exact PID. */
   attached: boolean;
 }

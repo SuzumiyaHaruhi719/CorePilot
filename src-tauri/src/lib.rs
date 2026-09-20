@@ -9,6 +9,7 @@ pub mod fan_autotune;
 pub mod fps;
 pub mod game_library;
 pub mod gpu;
+pub mod gpu_guard;
 pub mod gpu_load;
 pub mod inject;
 pub mod load_gen;
@@ -33,12 +34,17 @@ pub mod telemetry;
 pub mod topology;
 pub mod tray;
 pub mod tweaks;
+pub mod ui_visibility;
 pub mod updater;
 pub mod watchdog;
 pub mod winsvc;
 
 use state::AppState;
-use tauri::Manager;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use tauri::{Emitter, Manager};
+
+pub static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
 /// Chromium / WebView2 command-line flags applied to every CorePilot webview.
 ///
@@ -73,6 +79,23 @@ use tauri::Manager;
 /// became a hard mismatch and the OSD window vanished. Any new switch must be
 /// added to BOTH places or neither.
 pub const WEBVIEW_ARGS: &str = "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --no-proxy-server --disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling";
+
+#[cfg(test)]
+mod config_tests {
+    use super::WEBVIEW_ARGS;
+
+    #[test]
+    fn webview_args_match_tauri_conf() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("valid tauri config");
+        assert_eq!(
+            config["app"]["windows"][0]["additionalBrowserArgs"]
+                .as_str()
+                .expect("additionalBrowserArgs is a string"),
+            WEBVIEW_ARGS
+        );
+    }
+}
 
 /// CRITICAL-PATH INVARIANT (see docs/superpowers/specs/2026-06-21-critical-path-isolation-design.md):
 /// Tauri v2 runs the event loop AND routes every window's IPC on the MAIN thread.
@@ -160,7 +183,7 @@ pub fn run() {
     // recorder stops sampling exactly when it matters.
     std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", WEBVIEW_ARGS);
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // MUST be the first plugin. A second launch hands its argv to THIS running
         // instance — we focus the existing main window — and then exits, instead of
         // spawning a parallel instance. Parallel instances are what produced the
@@ -172,6 +195,11 @@ pub fn run() {
                 let _ = w.unminimize();
                 let _ = w.show();
                 let _ = w.set_focus();
+                // Re-open the frontend's polling gate: a second launch is an
+                // explicit "show me the app", and this path bypasses `show_main`.
+                ui_visibility::set_main_hidden(false);
+            } else {
+                app.exit(0);
             }
         }))
         .plugin(tauri_plugin_opener::init())
@@ -255,12 +283,46 @@ pub fn run() {
             // sidecar's fan controls every ~2s. Safe no-op on locked boards.
             fan::start_engine();
 
+            // Publish the main window's HWND and start the native visibility
+            // watcher. WEBVIEW_ARGS deliberately disables Chromium's occlusion
+            // throttling (the OSD/recorder freeze class), so NOTHING stops the
+            // main page's timers while it sits in the tray or behind a game —
+            // this is what lets the frontend gate its own polling instead.
+            // We never hide/suspend a webview to achieve that.
+            if let Some(main) = app.get_webview_window("main") {
+                ui_visibility::set_main_hwnd(main.hwnd().map(|h| h.0 as isize).unwrap_or(0));
+            }
+            ui_visibility::start();
+
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Focus is the one transition the user *feels*: alt-tab back and the
+            // numbers must be live on the next frame, not up to 2 s later when
+            // the ui-vis thread ticks. So mirror it straight to the frontend
+            // (and to the occlusion flag) as an edge.
+            //
+            // NOTE: only the main window, and only a state update + an emit —
+            // never a call into the OSD window from here (rule 2). Losing focus
+            // is deliberately NOT a gate: CorePilot on a second monitor while a
+            // game owns the first must keep updating, which only the native
+            // monitor-equality test in `ui_visibility` can decide.
+            if let tauri::WindowEvent::Focused(focused) = event {
+                if window.label() == "main" {
+                    ui_visibility::note_focus(*focused);
+                    let _ = window.app_handle().emit_to("main", "app://focus", *focused);
+                }
+                return;
+            }
             // "Close to tray": hide the main window instead of exiting, so the
             // affinity enforcer, GPU auto-OC and OSD keep running in the
             // background. Honoured only when the user has the setting enabled.
+            if let tauri::WindowEvent::Destroyed = event {
+                if window.label() == "main" && !SHUTTING_DOWN.load(Ordering::SeqCst) {
+                    window.app_handle().exit(0);
+                }
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // The OSD overlay must NEVER be user-closable: when WebView2's
                 // intermittent ex-style reset let it surface as a focusable
@@ -280,6 +342,12 @@ pub fn run() {
                     // renderer can be discarded → blank on restore, so show_main
                     // reloads it past a threshold.
                     window.state::<tray::TrayPrefs>().mark_hidden();
+                    // Close the frontend's polling gate and drop sensord to its
+                    // idle cadence on the transition, not up to 2 s later. This
+                    // is the ONLY window we ever hide — the OSD keep-alive
+                    // window stays shown so the shared WebView2 renderer's task
+                    // loop never freezes (the overlay/recorder death class).
+                    ui_visibility::set_main_hidden(true);
                 }
             }
         })
@@ -322,6 +390,7 @@ pub fn run() {
             gpu::gpu_oc_info,
             gpu::gpu_oc_apply,
             gpu::gpu_oc_reset,
+            gpu_guard::gpu_oc_startup_check,
             fan::fan_info,
             fan::fan_set_config,
             fan::fan_calibrate,
@@ -336,6 +405,7 @@ pub fn run() {
             osd::osd_set_visible,
             osd::osd_set_bounds,
             osd::osd_target_monitor,
+            osd::osd_heartbeat,
             taskbar_mon::tbmon_config,
             fps::osd_fps,
             fps::osd_fps_stats,
@@ -352,7 +422,13 @@ pub fn run() {
             persist::persist_get,
             persist::persist_set,
             persist::persist_delete,
+            persist::perf_session_save,
+            persist::perf_session_load,
+            persist::perf_session_delete,
+            persist::perf_session_delete_all,
+            persist::perf_session_ids,
             tray::set_close_to_tray,
+            ui_visibility::ui_occluded,
             commands::set_acrylic,
             commands::set_window_opacity,
             commands::get_autostart,
@@ -365,7 +441,31 @@ pub fn run() {
             commands::smu_apply_limit,
             commands::smu_set_scalar,
             commands::smu_force_stock,
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        ]);
+    let app = builder
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|app, event| match event {
+        tauri::RunEvent::ExitRequested { code, .. } => {
+            SHUTTING_DOWN.store(true, Ordering::SeqCst);
+            EXIT_CODE.store(code.unwrap_or(0), Ordering::SeqCst);
+        }
+        tauri::RunEvent::Exit => {
+            SHUTTING_DOWN.store(true, Ordering::SeqCst);
+            let code = EXIT_CODE.load(Ordering::SeqCst);
+            if code == tauri::RESTART_EXIT_CODE {
+                return;
+            }
+            updater::shutdown_teardown();
+            // Flush HERE, not inside `shutdown_teardown`: that body is behind a
+            // once-guard, so on the portable-update path (which tears down before
+            // the file swap) a flush inside it is already spent by the time the
+            // process really exits — and `std::process::exit` below would drop the
+            // last debounce window of store writes.
+            persist::flush();
+            app.cleanup_before_exit();
+            std::process::exit(code);
+        }
+        _ => {}
+    });
 }

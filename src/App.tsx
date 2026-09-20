@@ -1,6 +1,6 @@
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { useEffect, useRef, useState, type ReactElement } from "react";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { NavRail } from "./components/shell/NavRail";
 import { StatusBar } from "./components/shell/StatusBar";
 import { TitleBar } from "./components/shell/TitleBar";
@@ -12,7 +12,8 @@ import { useOsdHotkey } from "./hooks/useOsdHotkey";
 import { usePerfRecorder } from "./hooks/usePerfRecorder";
 import { useDiskScanEvents } from "./hooks/useDiskScanEvents";
 import { useOverlayInjection } from "./hooks/useOverlayInjection";
-import { useLiveHistoryRecorder } from "./hooks/useSharedTelemetry";
+import { onMetricsTick, useLiveHistoryRecorder } from "./hooks/useSharedTelemetry";
+import { useUiActive } from "./hooks/useUiActive";
 import { useUpdateCheck } from "./hooks/useUpdateCheck";
 import { UpdatePrompt } from "./components/update/UpdatePrompt";
 import { useGlobalI18n } from "./lib/i18n";
@@ -29,6 +30,7 @@ import { TaskManager } from "./tabs/TaskManager";
 import { AmdTuning } from "./tabs/AmdTuning";
 import { Tuning } from "./tabs/Tuning";
 import { useGpuProfiles } from "./store/gpuProfiles";
+import { useGpuOcGuard, type GpuOcBlock } from "./store/gpuOcGuard";
 import { useFanProfiles } from "./store/fanProfiles";
 import {
   TASKBAR_DEFAULTS,
@@ -40,6 +42,53 @@ import {
 /** Last pointer-down position, used as the origin for the theme-switch circular
  *  reveal so the new theme appears to wipe out from where the user clicked. */
 const switchOrigin = { x: NaN, y: NaN };
+
+/**
+ * "Can the user actually see this window right now?" — one atomic load in the
+ * backend, covering hidden-to-tray / minimized / fully covered by a fullscreen
+ * app.
+ *
+ * Backed by `ui_visibility::ui_occluded` (a single relaxed atomic load, so it is
+ * safe as a sync command on the main thread).
+ *
+ * Read through an optional view of `api` on purpose, because BOTH failure
+ * directions have to land on "not occluded": a build whose ipc.ts lacks the
+ * wrapper, an older backend without the command, or a throwing invoke must all
+ * leave the UI fully live. Defaulting the other way would freeze the whole app
+ * on stale numbers with nothing left running that could un-freeze it.
+ */
+type OcclusionApi = { uiOccluded?: () => Promise<boolean> };
+async function readOccluded(): Promise<boolean> {
+  try {
+    return (await (api as OcclusionApi).uiOccluded?.()) ?? false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * "Did the machine just die with the overclock armed?" — backed by
+ * `gpu_oc_startup_check` (src-tauri/src/gpu_guard.rs), which reads the Windows
+ * System log for an unclean shutdown at this boot or an nvlddmkm fault just
+ * before it.
+ *
+ * Read through an optional view of `api` for the same reason `readOccluded`
+ * above does, but the safe default is the OPPOSITE one: a missing wrapper, an
+ * older backend, or a throwing invoke must all resolve to "not blocked". A
+ * false block would silently disable a feature the user switched on; a false
+ * pass only leaves the behaviour we already shipped.
+ */
+type GpuGuardApi = {
+  gpuOcStartupCheck?: () => Promise<{ blocked: boolean; reason: string; detail: string }>;
+};
+async function readGpuOcStartupBlock(): Promise<GpuOcBlock | null> {
+  try {
+    const r = await (api as GpuGuardApi).gpuOcStartupCheck?.();
+    return r?.blocked ? { reason: r.reason, detail: r.detail } : null;
+  } catch {
+    return null;
+  }
+}
 
 const TABS: Record<TabId, () => ReactElement> = {
   cores: CoreAssignment,
@@ -75,18 +124,122 @@ function App() {
   useUpdateCheck();
   useGlobalI18n();
 
+  const uiActive = useUiActive((s) => s.active);
+
   useEffect(() => {
     api.getOverview().then(setOverview).catch(() => undefined);
   }, []);
 
+  // ── "Is anyone actually looking at this window?" ──────────────────────────
+  // WEBVIEW_ARGS turns OFF Chromium's background/occlusion throttling for the
+  // WHOLE process, because the parked OSD overlay must keep ticking (a throttled
+  // OSD page is the "监控不见了" class of bug). The price is that THIS window's
+  // timers also keep firing at full rate while it sits in the tray behind a
+  // fullscreen game — which is how the frontend's 1.5 s `list_processes` poll
+  // kept the backend sampler pinned at ~16% of a core with nobody watching.
+  //
+  // So we gate in JS state only. We must NEVER hide()/SetIsVisible(false) the
+  // webview to get throttling back: a hidden WebView2's task loop FREEZES, which
+  // silently killed the OSD poll and the perf recorder.
+  useEffect(() => {
+    const setActive = useUiActive.getState().setActive;
+    let alive = true;
+    let probing = false;
+
+    // Polled on EVERY metrics tick, including while we already believe we are
+    // inactive. That is deliberate and it is what makes BOTH directions
+    // observable: on a multi-monitor desk, a game covering CorePilot on the
+    // other screen fires no window event at all, and neither does uncovering it.
+    const probe = async () => {
+      if (probing) return;
+      probing = true;
+      try {
+        const occluded = await readOccluded();
+        if (alive) setActive(!occluded);
+      } finally {
+        probing = false;
+      }
+    };
+    void probe();
+    const unTick = onMetricsTick(() => void probe());
+
+    // Focus is an unambiguous "the user is here" — un-gate instantly instead of
+    // making them stare at frozen numbers until the next poll resolves.
+    //
+    // `app://focus` carries the focused flag and fires on BOTH edges. Only the
+    // rising edge means anything: losing focus does NOT mean we are invisible
+    // (the user may have clicked a window on another monitor while watching this
+    // one), so the occlusion poll stays the sole authority for gating OFF. The
+    // backend's note_focus() makes the same choice, so the two agree.
+    const wake = () => setActive(true);
+    window.addEventListener("focus", wake);
+    let disposed = false;
+    let unFocus: (() => void) | undefined;
+    void listen<boolean>("app://focus", (e) => {
+      if (e.payload) wake();
+    }).then((f) => {
+      if (disposed) f();
+      else unFocus = f;
+    });
+
+    return () => {
+      alive = false;
+      disposed = true;
+      unTick();
+      unFocus?.();
+      window.removeEventListener("focus", wake);
+      // Never leave the app latched off when this watcher goes away (StrictMode
+      // double-invoke, hot reload): without a watcher, nothing could re-arm it.
+      setActive(true);
+    };
+  }, []);
+
+  // Freeze/thaw running animations with the visibility gate. The CSS rules keyed
+  // on `data-ui-idle` (index.css) stop the continuous utility animations; this
+  // catches everything already in flight, including animations on elements that
+  // do not carry those classes.
+  //
+  // Only ever pause what is RUNNING and resume what is PAUSED: a blanket
+  // `play()` would rewind-and-replay any finished fill-forwards animation, and a
+  // blanket `pause()` would strand a one-shot enter animation at frame 0
+  // (invisible content). Attribute first on the way back, so nothing resumes
+  // against a layout the CSS is still about to change.
+  useEffect(() => {
+    const root = document.documentElement;
+    if (uiActive) {
+      delete root.dataset.uiIdle;
+      for (const a of document.getAnimations()) if (a.playState === "paused") a.play();
+      return;
+    }
+    root.dataset.uiIdle = "true";
+    for (const a of document.getAnimations()) if (a.playState === "running") a.pause();
+  }, [uiActive]);
+
   // Auto-apply the active GPU overclock profile on launch, if enabled. Storage
   // is async (tauri-plugin-store), so wait for hydration before reading state.
+  //
+  // Gated by the crash guard: re-arming an overclock into a machine that just
+  // died from one is a loop the user cannot break from inside the app, because
+  // the re-apply lands seconds after launch — before they can reach the toggle.
+  // Two of this machine's four hard resets in 14 days followed a startup
+  // auto-apply. `applyOnStartup` itself is deliberately left alone; the skip is
+  // for THIS session only and the GPU page offers a one-click deliberate apply.
   useEffect(() => {
-    const applyActive = () => {
+    let alive = true;
+    const applyActive = async () => {
       const { applyOnStartup, activeId, profiles, setStartupError } = useGpuProfiles.getState();
       if (!applyOnStartup || !activeId) return;
       const active = profiles.find((p) => p.id === activeId);
       if (!active) return;
+      const block = await readGpuOcStartupBlock();
+      // The effect can be torn down mid-await (StrictMode double-invoke, fast
+      // close-to-tray); applying hardware limits after that would be a write
+      // nobody is watching for.
+      if (!alive) return;
+      if (block) {
+        useGpuOcGuard.getState().setBlock(block);
+        return;
+      }
       // Surface a startup-apply failure on the GPU page instead of silently
       // leaving the user believing their overclock was applied at boot.
       api.gpuOcApply(active.settings).catch((e: unknown) => {
@@ -94,11 +247,15 @@ function App() {
         setStartupError(`「${active.name}」: ${msg}`);
       });
     };
-    if (useGpuProfiles.persist.hasHydrated()) {
-      applyActive();
-      return;
-    }
-    return useGpuProfiles.persist.onFinishHydration(applyActive);
+    const start = () => void applyActive();
+    const un = useGpuProfiles.persist.hasHydrated()
+      ? undefined
+      : useGpuProfiles.persist.onFinishHydration(start);
+    if (useGpuProfiles.persist.hasHydrated()) start();
+    return () => {
+      alive = false;
+      un?.();
+    };
   }, []);
 
   // Apply saved fan configs on launch when "apply on startup" is enabled, so

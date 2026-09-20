@@ -668,7 +668,12 @@ impl ScanHandle {
         for i in (1..nodes.len()).rev() {
             let (l, a, c, p) = {
                 let n = &nodes[i];
-                (n.logical_size, n.alloc_size, n.file_count, n.parent as usize)
+                (
+                    n.logical_size,
+                    n.alloc_size,
+                    n.file_count,
+                    n.parent as usize,
+                )
             };
             if let Some(par) = nodes.get_mut(p) {
                 par.logical_size = par.logical_size.saturating_add(l);
@@ -819,8 +824,7 @@ impl WalkerSemaphore {
                 return Some(WalkerPermit { sem: self });
             }
             // Wake periodically to re-check the cancel flag even with no release.
-            self.cv
-                .wait_for(&mut avail, Duration::from_millis(50));
+            self.cv.wait_for(&mut avail, Duration::from_millis(50));
         }
     }
 }
@@ -850,10 +854,10 @@ mod win {
     };
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW,
-        FindNextFileW, GetDiskFreeSpaceExW, GetDiskFreeSpaceW, GetDriveTypeW, GetFileInformationByHandle,
-        GetLogicalDrives, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
-        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN,
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
+        FindNextFileW, GetDiskFreeSpaceExW, GetDiskFreeSpaceW, GetDriveTypeW,
+        GetFileInformationByHandle, GetLogicalDrives, GetVolumeInformationW,
+        GetVolumeNameForVolumeMountPointW, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, FIND_FIRST_EX_LARGE_FETCH, OPEN_EXISTING,
         WIN32_FIND_DATAW,
@@ -896,7 +900,7 @@ mod win {
     /// or an empty removable bay).
     fn volume_guid_path(root_w: &[u16]) -> Option<String> {
         let mut buf = [0u16; 64]; // "\\?\Volume{GUID}\" is 49 wide chars + NUL.
-        // SAFETY: `root_w` is NUL-terminated; `buf` is sized for the documented output.
+                                  // SAFETY: `root_w` is NUL-terminated; `buf` is sized for the documented output.
         let ok = unsafe { GetVolumeNameForVolumeMountPointW(PCWSTR(root_w.as_ptr()), &mut buf) };
         if ok.is_ok() {
             let s = from_wide_nul(&buf);
@@ -958,7 +962,7 @@ mod win {
     fn cluster_size(root_w: &[u16]) -> u64 {
         let mut spc = 0u32; // sectors per cluster
         let mut bps = 0u32; // bytes per sector
-        // SAFETY: out-params point at live u32s; `root_w` is NUL-terminated.
+                            // SAFETY: out-params point at live u32s; `root_w` is NUL-terminated.
         let ok = unsafe {
             GetDiskFreeSpaceW(
                 PCWSTR(root_w.as_ptr()),
@@ -1247,8 +1251,7 @@ mod win {
                     flags |= FLAG_SYSTEM;
                 }
 
-                let logical =
-                    ((data.nFileSizeHigh as u64) << 32) | (data.nFileSizeLow as u64);
+                let logical = ((data.nFileSizeHigh as u64) << 32) | (data.nFileSizeLow as u64);
 
                 // Child's extended-length wide path (for dirs we push back; for
                 // hardlinked files we open it for dedup).
@@ -1284,8 +1287,7 @@ mod win {
                         if info.nNumberOfLinks > 1 {
                             let key = (
                                 info.dwVolumeSerialNumber,
-                                ((info.nFileIndexHigh as u64) << 32)
-                                    | (info.nFileIndexLow as u64),
+                                ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64),
                             );
                             let mut a = arena.lock();
                             if !a.seen_links.insert(key) {
@@ -1392,9 +1394,8 @@ mod win {
                     if streak as u32 >= DISCONNECT_ERROR_STREAK
                         && !handle.cancel.load(Ordering::Relaxed)
                     {
-                        *handle.error.lock() = Some(
-                            "drive disconnected (sustained I/O errors)".to_string(),
-                        );
+                        *handle.error.lock() =
+                            Some("drive disconnected (sustained I/O errors)".to_string());
                         handle.disconnected.store(true, Ordering::Relaxed);
                         // Flip cancel so all this scan's workers drain promptly.
                         handle.cancel.store(true, Ordering::Relaxed);
@@ -1448,12 +1449,18 @@ mod win {
                     }
                 }
                 if agg_files > 0 {
-                    ScanHandle::push_aggregated(&mut a, handle, task.node, agg_files, agg_logical, agg_alloc);
+                    ScanHandle::push_aggregated(
+                        &mut a,
+                        handle,
+                        task.node,
+                        agg_files,
+                        agg_logical,
+                        agg_alloc,
+                    );
                 }
 
                 // Directories: real nodes, queued for descent (unless capped).
-                let capped =
-                    handle.node_count.load(Ordering::Relaxed) >= NODE_CAP;
+                let capped = handle.node_count.load(Ordering::Relaxed) >= NODE_CAP;
                 for c in dirs {
                     let child = ScanHandle::push_child_dir(&mut a, handle, task.node, &c);
                     if let Some(child_id) = child {
@@ -1853,8 +1860,7 @@ mod win {
                     .name(format!("corepilot-scan-{}-pub", handle.scan_id))
                     .spawn_scoped(s, move || loop {
                         std::thread::sleep(PUBLISH_THROTTLE);
-                        let finished = handle.cancel.load(Ordering::Relaxed)
-                            || queue.lock().done;
+                        let finished = handle.cancel.load(Ordering::Relaxed) || queue.lock().done;
                         // Publish (even on the final iteration) so the last
                         // mid-scan view reflects the latest growth; the post-scope
                         // publish below produces the authoritative final tree.
@@ -1956,7 +1962,9 @@ mod win {
 /// the Disk Analyzer and scans the system drive). No effect for normal launches.
 #[tauri::command]
 pub fn startup_directive() -> Option<String> {
-    std::env::var("COREPILOT_STARTUP").ok().filter(|s| !s.is_empty())
+    std::env::var("COREPILOT_STARTUP")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// Enumerate fixed + removable volumes for the disk-picker landing (Zone A).
@@ -2192,8 +2200,7 @@ mod tests {
     /// truncation contract.
     #[test]
     fn slice_collapses_below_min_bytes_and_marks_parent_has_more() {
-        let names: Vec<Box<str>> =
-            vec!["C:\\".into(), "Big".into(), "t1".into(), "t2".into()];
+        let names: Vec<Box<str>> = vec!["C:\\".into(), "Big".into(), "t1".into(), "t2".into()];
         let nodes = vec![
             dir(0, 0, 1, SENTINEL, 1010), // 0 root → child Big
             dir(0, 1, 2, SENTINEL, 1000), // 1 Big  → children t1,t2
@@ -2206,10 +2213,17 @@ mod tests {
         let view = tree.slice("scan", 1, 0, 16, 100, 100);
         let got: Vec<&str> = view.nodes.iter().map(|n| n.name.as_str()).collect();
 
-        assert_eq!(got, vec!["C:\\", "Big"], "below-floor leaves fold away; got {got:?}");
+        assert_eq!(
+            got,
+            vec!["C:\\", "Big"],
+            "below-floor leaves fold away; got {got:?}"
+        );
         assert!(view.truncated, "a collapsed child sets truncated");
         // Big is NOT the focus root, so has_more is true ONLY because its children
         // collapsed under the floor — that marking is what's under test.
-        assert!(view.nodes[1].has_more, "Big stays drillable after its leaves fold");
+        assert!(
+            view.nodes[1].has_more,
+            "Big stays drillable after its leaves fold"
+        );
     }
 }
