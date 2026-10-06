@@ -2,8 +2,8 @@ import { AnimatePresence, motion } from "motion/react";
 import { Ban, CircleCheck, Gamepad2, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cn, FOCUS_RING } from "../../lib/cn";
-import { hueColor } from "../../lib/colors";
-import { hoverPop } from "../../lib/motion";
+import { easeOut } from "../../lib/motion";
+import { useTf } from "../../lib/i18n";
 import { gameDisplayName } from "../../lib/perf";
 import type { PerfSessionMeta } from "../../lib/perfSamples";
 import { usePerfHistory } from "../../store/perfHistory";
@@ -33,21 +33,6 @@ function fmtCardDate(ms: number): string {
   });
 }
 
-function Badge({ label, value, hue }: { label: string; value: string; hue: number }) {
-  return (
-    <span
-      className="nums inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] font-medium"
-      style={{
-        background: `color-mix(in oklch, ${hueColor(hue, 82, 0.13)} 14%, transparent)`,
-        color: hueColor(hue, 82, 0.13),
-      }}
-    >
-      <span className="text-dim">{label}</span>
-      {value}
-    </span>
-  );
-}
-
 interface SessionCardProps {
   session: PerfSessionMeta;
   active: boolean;
@@ -69,15 +54,14 @@ function SessionCard({ session, active, listKind, onSelect, onDelete, onWhite, o
     // mouse-only. Body + actions are siblings now, so each is focusable and
     // no click needs stopPropagation.
     <motion.div
-      layout
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.96 }}
-      whileHover={{ y: -2 }}
-      transition={hoverPop}
+      layout="position"
+      initial={{ opacity: 0, height: 0 }}
+      animate={{ opacity: 1, height: "auto" }}
+      exit={{ opacity: 0, height: 0 }}
+      transition={{ duration: 0.2, ease: easeOut }}
       className={cn(
-        "no-drag group relative w-full overflow-hidden rounded-xl border transition-colors",
-        active ? "border-accent/50 bg-accent/10 glow-sm" : "border-line bg-surface2/50 hover:bg-surface3",
+        "no-drag group relative w-full overflow-hidden rounded-lg transition-colors duration-150",
+        active ? "bg-surface2" : "hover:bg-surface2/50",
       )}
     >
       {/* Card body = "open this session's report". The focus ring is inset: the
@@ -87,27 +71,28 @@ function SessionCard({ session, active, listKind, onSelect, onDelete, onWhite, o
         type="button"
         onClick={onSelect}
         aria-pressed={active}
-        className={cn("block w-full rounded-xl px-3 py-2.5 text-left", FOCUS_RING, "focus-visible:ring-inset")}
+        className={cn("block w-full rounded-lg px-2.5 py-2 text-left", FOCUS_RING, "focus-visible:ring-inset")}
       >
         <div className="flex items-start gap-2.5">
-          <span
-            className={cn(
-              "mt-0.5 grid h-8 w-8 shrink-0 place-items-center overflow-hidden rounded-lg",
-              active ? "bg-accent/20 text-accent-bright" : "bg-surface3 text-dim",
-            )}
-          >
+          <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center overflow-hidden rounded-md bg-surface3 text-dim">
             {session.path ? <ProcIcon exePath={session.path} size={18} /> : <Gamepad2 size={16} />}
           </span>
           <div className="min-w-0 flex-1">
-            <div className="truncate pr-16 text-[12.5px] font-medium text-ink" title={gameDisplayName(session.exe)}>
+            <div className="truncate pr-16 text-[13px] font-medium text-ink" title={gameDisplayName(session.exe)}>
               {gameDisplayName(session.exe)}
             </div>
-            <div className="nums mt-0.5 text-[10.5px] text-dim">
+            <div className="nums mt-0.5 text-[11.5px] text-dim">
               {fmtCardDate(session.startedAt)} · {fmtDuration(session.durationSec)}
             </div>
-            <div className="mt-1.5 flex flex-wrap gap-1">
-              <Badge label="平均" value={summary.avgFps != null ? `${Math.round(summary.avgFps)}` : DASH} hue={158} />
-              <Badge label="1% Low" value={summary.low1 != null ? `${Math.round(summary.low1)}` : DASH} hue={85} />
+            <div className="nums mt-1 flex items-baseline gap-3 text-[12px]">
+              <span>
+                <span className={active ? "text-ink" : "text-muted"}>{summary.avgFps != null ? Math.round(summary.avgFps) : DASH}</span>
+                <span className="ml-1 text-[11px] text-dim">FPS</span>
+              </span>
+              <span>
+                <span className="text-muted">{summary.low1 != null ? Math.round(summary.low1) : DASH}</span>
+                <span className="ml-1 text-[11px] text-dim">1% Low</span>
+              </span>
             </div>
           </div>
         </div>
@@ -125,12 +110,12 @@ function SessionCard({ session, active, listKind, onSelect, onDelete, onWhite, o
           title="白名单 · 强制录制此程序"
           onClick={onWhite}
           className={cn(
-            "pointer-events-auto grid h-5 w-5 cursor-pointer place-items-center rounded-md transition-colors",
+            "pointer-events-auto grid h-6 w-6 cursor-pointer place-items-center rounded-md transition-colors",
             FOCUS_RING,
-            listKind === "white" ? "bg-ok/20 text-ok" : "text-dim hover:bg-surface3 hover:text-ok",
+            listKind === "white" ? "bg-ok/14 text-ok" : "text-dim opacity-0 hover:bg-surface3 hover:text-ok focus-visible:opacity-100 group-hover:opacity-100",
           )}
         >
-          <CircleCheck size={12} />
+          <CircleCheck size={13} />
         </button>
         <button
           type="button"
@@ -139,12 +124,12 @@ function SessionCard({ session, active, listKind, onSelect, onDelete, onWhite, o
           title="黑名单 · 不录制此程序"
           onClick={onBlack}
           className={cn(
-            "pointer-events-auto grid h-5 w-5 cursor-pointer place-items-center rounded-md transition-colors",
+            "pointer-events-auto grid h-6 w-6 cursor-pointer place-items-center rounded-md transition-colors",
             FOCUS_RING,
-            listKind === "black" ? "bg-danger/20 text-danger" : "text-dim hover:bg-surface3 hover:text-danger",
+            listKind === "black" ? "bg-danger/14 text-danger" : "text-dim opacity-0 hover:bg-surface3 hover:text-danger focus-visible:opacity-100 group-hover:opacity-100",
           )}
         >
-          <Ban size={12} />
+          <Ban size={13} />
         </button>
         <button
           type="button"
@@ -154,11 +139,11 @@ function SessionCard({ session, active, listKind, onSelect, onDelete, onWhite, o
           // group-focus-within pair is what keeps it from being an invisible
           // stop in the Tab order once it is keyboard-reachable.
           className={cn(
-            "pointer-events-auto grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100",
+            "pointer-events-auto grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition-[opacity,color,background-color] duration-150 hover:bg-danger/12 hover:text-danger focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100",
             FOCUS_RING,
           )}
         >
-          <X size={12} />
+          <X size={13} />
         </button>
       </div>
     </motion.div>
@@ -166,6 +151,7 @@ function SessionCard({ session, active, listKind, onSelect, onDelete, onWhite, o
 }
 
 export function PerfHistory() {
+  const tf = useTf();
   const sessions = usePerfHistory((s) => s.sessions);
   const removeSession = usePerfHistory((s) => s.removeSession);
   const clear = usePerfHistory((s) => s.clear);
@@ -215,20 +201,13 @@ export function PerfHistory() {
   if (sessions.length === 0) {
     return (
       <div className="grid flex-1 place-items-center px-6 pb-10">
-        <motion.div
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-          className="hud-frame glass hairline flex max-w-md flex-col items-center gap-3 rounded-2xl p-8 text-center"
-        >
-          <span className="grid h-12 w-12 place-items-center rounded-xl bg-accent/15 text-accent glow-sm">
-            <Gamepad2 size={22} />
-          </span>
-          <div className="hud-label text-[12px] text-ink">暂无性能报告</div>
-          <p className="text-[12px] leading-relaxed text-dim">
+        <div className="flex max-w-sm flex-col items-center text-center">
+          <Gamepad2 size={22} className="text-dim" />
+          <div className="mt-3 text-[14px] font-semibold text-ink">暂无性能报告</div>
+          <p className="mt-1.5 text-[12.5px] leading-relaxed text-muted">
             启动并退出游戏后，CorePilot 会自动记录本次会话并在此生成性能报告。
           </p>
-        </motion.div>
+        </div>
       </div>
     );
   }
@@ -239,18 +218,16 @@ export function PerfHistory() {
     : null;
 
   return (
-    <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-hidden p-4 lg:grid-cols-[280px_minmax(0,1fr)]">
+    <div className="grid min-h-0 flex-1 grid-cols-1 gap-5 overflow-hidden px-6 pb-6 lg:grid-cols-[264px_minmax(0,1fr)]">
       {/* Master: session list */}
-      <div className="flex min-h-0 flex-col gap-3">
-        <div className="flex items-center justify-between">
-          <span className="hud-label flex items-center gap-1.5 text-[10px] text-muted">
-            报告 <span className="nums text-dim">{sessions.length}</span>
-          </span>
-          <Button variant="subtle" onClick={() => setConfirmClear(true)} className="px-2 py-1">
+      <div className="flex min-h-0 flex-col gap-2">
+        <div className="flex items-center justify-between px-2.5">
+          <span className="text-[11.5px] text-dim">{tf(`${sessions.length} 份报告`, `${sessions.length} reports`)}</span>
+          <Button variant="subtle" size="sm" onClick={() => setConfirmClear(true)} className="hover:text-danger">
             <Trash2 size={13} /> 清空历史
           </Button>
         </div>
-        <div className="min-h-0 flex-1 space-y-2 overflow-auto pr-1">
+        <div className="min-h-0 flex-1 space-y-0.5 overflow-auto">
           <AnimatePresence initial={false}>
             {sessions.map((session) => {
               const name = session.exe.trim().toLowerCase();

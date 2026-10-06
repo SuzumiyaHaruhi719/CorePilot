@@ -1,9 +1,12 @@
 import { motion } from "motion/react";
-import { Activity, ChevronDown, Cpu, Database, Gauge, Leaf, MonitorPlay, Timer, Zap } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { ChevronDown } from "lucide-react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { formatBytes } from "../../lib/format";
-import { hueColor } from "../../lib/colors";
-import { useTf } from "../../lib/i18n";
+import { accentHue, hueColor } from "../../lib/colors";
+import { cn } from "../../lib/cn";
+import { useT, useTf } from "../../lib/i18n";
+import { easeOut } from "../../lib/motion";
+import { Cluster, ClusterCell, Readout } from "../ui/Readout";
 import {
   CO2_KG_PER_KWH,
   gameDisplayName,
@@ -70,106 +73,46 @@ function fmtCo2(kg: number | null | undefined): { value: string; unit: string } 
   return { value: kg.toFixed(3), unit: "kg" };
 }
 
-// ── Summary stat grid ───────────────────────────────────────────────────────
+// ── Summary ──────────────────────────────────────────────────────────────────
 
-interface StatDef {
+/** Metric families share one hue across charts, tooltip dots and legends
+ *  (DESIGN.md → data series). -1 = the theme accent (CPU is the primary metric). */
+const HUE = { fps: 158, cpu: -1, gpu: 184, mem: 215, power: 85, disk: 78, netDown: 152, netUp: 85 } as const;
+const hueOf = (h: number) => (h < 0 ? accentHue() : h);
+
+interface KV {
   label: string;
-  key: keyof PerfSummary;
+  value: number | null | undefined;
   digits: number;
   unit?: string;
-  hue: number;
+  /** Temperatures: warn/danger tint past these marks. */
+  hot?: [number, number];
 }
 
-/** Summary grid layout — order, units, decimals, and accent hue per stat. */
-const STATS: StatDef[] = [
-  { label: "平均 FPS", key: "avgFps", digits: 0, hue: 158 },
-  { label: "最低 FPS", key: "minFps", digits: 0, hue: 22 },
-  { label: "最高 FPS", key: "maxFps", digits: 0, hue: 200 },
-  { label: "1% Low", key: "low1", digits: 0, hue: 85 },
-  { label: "0.1% Low", key: "low01", digits: 0, hue: 60 },
-  { label: "平均帧时间", key: "avgFrametimeMs", digits: 1, unit: "ms", hue: 224 },
-  { label: "平均 CPU 占用", key: "avgCpuLoad", digits: 0, unit: "%", hue: 200 },
-  { label: "平均 CPU 温度", key: "avgCpuTemp", digits: 0, unit: "°C", hue: 280 },
-  { label: "最高 CPU 温度", key: "maxCpuTemp", digits: 0, unit: "°C", hue: 22 },
-  { label: "平均 CPU 功耗", key: "avgCpuPower", digits: 0, unit: "W", hue: 75 },
-  { label: "平均 GPU 占用", key: "avgGpuLoad", digits: 0, unit: "%", hue: 158 },
-  { label: "平均 GPU 温度", key: "avgGpuTemp", digits: 0, unit: "°C", hue: 184 },
-  { label: "最高 GPU 温度", key: "maxGpuTemp", digits: 0, unit: "°C", hue: 22 },
-  { label: "平均 GPU 功耗", key: "avgGpuPower", digits: 0, unit: "W", hue: 75 },
-  { label: "平均 GPU 频率", key: "avgGpuClock", digits: 0, unit: "MHz", hue: 262 },
-  { label: "平均显存占用", key: "avgVramLoad", digits: 0, unit: "%", hue: 300 },
-  { label: "平均内存占用", key: "avgMemLoad", digits: 0, unit: "%", hue: 330 },
-];
-
-function StatCell({ stat, value }: { stat: StatDef; value: number | null }) {
-  const empty = !isNum(value);
+/** One domain column of the summary: CPU / GPU / 系统 key-value rows. */
+function KVColumn({ title, hue, rows }: { title: string; hue: number; rows: KV[] }) {
+  const t = useT();
   return (
-    <div className="rounded-xl border border-line bg-surface2/40 px-3 py-2.5 transition-colors hover:border-line-strong">
-      <div className="hud-label text-[9px] text-dim">{stat.label}</div>
-      <div className="nums mt-0.5 flex items-baseline gap-1">
-        <span
-          className="text-[20px] font-semibold leading-none"
-          style={{ color: empty ? "var(--color-dim)" : hueColor(stat.hue, 82, 0.13) }}
-        >
-          {num(value, stat.digits)}
-        </span>
-        {!empty && stat.unit && <span className="text-[10.5px] font-normal text-dim">{stat.unit}</span>}
+    <div className="min-w-0 border-l border-t border-line px-5 py-4">
+      <div className="mb-2 flex items-center gap-2 text-[12px] font-medium text-ink">
+        <span className="h-2 w-2 rounded-full" style={{ background: hueColor(hueOf(hue), 78, 0.14) }} />
+        {t(title)}
       </div>
-    </div>
-  );
-}
-
-function MetaItem({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
-  return (
-    <div className="flex min-w-0 items-center gap-2">
-      <span className="shrink-0 text-dim">{icon}</span>
-      <div className="min-w-0">
-        <div className="hud-label text-[9px] text-dim">{label}</div>
-        <div className="truncate text-[12px] font-medium text-ink" title={value}>
-          {value}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function HeadlineCard({
-  icon,
-  label,
-  value,
-  unit,
-  hue,
-  sub,
-}: {
-  icon: ReactNode;
-  label: string;
-  value: string;
-  unit: string;
-  hue: number;
-  sub?: string;
-}) {
-  const empty = value === DASH;
-  return (
-    <div className="hud-frame glass hairline flex items-center gap-3 rounded-2xl px-4 py-3">
-      <span
-        className="grid h-10 w-10 shrink-0 place-items-center rounded-xl"
-        style={{ background: `color-mix(in oklch, ${hueColor(hue, 82, 0.13)} 16%, transparent)`, color: hueColor(hue, 82, 0.13) }}
-      >
-        {icon}
-      </span>
-      <div className="min-w-0">
-        <div className="hud-label text-[9px] text-dim">{label}</div>
-        <div className="nums flex items-baseline gap-1">
-          <span
-            className="text-[22px] font-semibold leading-none"
-            style={{ color: empty ? "var(--color-dim)" : hueColor(hue, 84, 0.13) }}
-          >
-            {value}
-          </span>
-          {!empty && <span className="text-[12px] font-normal text-dim">{unit}</span>}
-        </div>
-        {sub && <div className="mt-0.5 text-[10px] text-dim">{sub}</div>}
-      </div>
+      <dl className="space-y-1.5">
+        {rows.map((r) => {
+          const v = r.value;
+          const tone = r.hot && isNum(v) ? (v >= r.hot[1] ? "text-danger" : v >= r.hot[0] ? "text-warn" : "text-ink") : "text-ink";
+          return (
+            <div key={r.label} className="flex items-baseline justify-between gap-3">
+              <dt className="truncate text-[12px] text-muted">{t(r.label)}</dt>
+              <dd className={cn("nums shrink-0 text-[14px]", isNum(v) ? tone : "text-dim")}>
+                {num(v, r.digits)}
+                {isNum(v) && r.unit && <span className="ml-0.5 text-[11px] text-dim">{r.unit}</span>}
+              </dd>
+            </div>
+          );
+        })}
+      </dl>
     </div>
   );
 }
@@ -179,7 +122,7 @@ function HeadlineCard({
 interface ChartDef {
   key: string;
   title: string;
-  icon: ReactNode;
+  /** Family hue; -1 = theme accent (see HUE). */
   hue: number;
   unit: string;
   digits: number;
@@ -198,24 +141,24 @@ const rate = (v: number): string => `${formatBytes(v, v < 1024 * 1024 ? 0 : 1)}/
 /** Master metric list — drives the charts AND the hover tooltip rows, so the two
  *  always stay in sync. Charts whose series is entirely null are skipped. */
 const CHARTS: ChartDef[] = [
-  { key: "fps", title: "FPS", icon: <Gauge size={15} />, hue: 158, unit: "", digits: 0, pick: (s) => s.fps, refs: { avg: "avgFps", min: "minFps", max: "maxFps" }, zeroFloor: true },
-  { key: "ft", title: "帧时间", icon: <Timer size={15} />, hue: 224, unit: " ms", digits: 1, pick: (s) => s.frametimeMs, refs: { avg: "avgFrametimeMs" } },
-  { key: "cpuLoad", title: "CPU 占用", icon: <Cpu size={15} />, hue: 200, unit: "%", digits: 0, pick: (s) => s.cpuLoad, refs: { avg: "avgCpuLoad" }, zeroFloor: true },
-  { key: "cpuTemp", title: "CPU 温度", icon: <Cpu size={15} />, hue: 280, unit: "°C", digits: 0, pick: (s) => s.cpuTemp, refs: { avg: "avgCpuTemp", max: "maxCpuTemp" } },
-  { key: "cpuPower", title: "CPU 功耗", icon: <Cpu size={15} />, hue: 75, unit: " W", digits: 0, pick: (s) => s.cpuPower, refs: { avg: "avgCpuPower", max: "maxCpuPower" }, zeroFloor: true },
-  { key: "cpuClock", title: "CPU 频率", icon: <Cpu size={15} />, hue: 262, unit: " MHz", digits: 0, pick: (s) => s.cpuClock, refs: { avg: "avgCpuClock" } },
-  { key: "gpuLoad", title: "GPU 占用", icon: <MonitorPlay size={15} />, hue: 158, unit: "%", digits: 0, pick: (s) => s.gpuLoad, refs: { avg: "avgGpuLoad" }, zeroFloor: true },
-  { key: "gpuTemp", title: "GPU 温度", icon: <MonitorPlay size={15} />, hue: 184, unit: "°C", digits: 0, pick: (s) => s.gpuTemp, refs: { avg: "avgGpuTemp", max: "maxGpuTemp" } },
-  { key: "gpuPower", title: "GPU 功耗", icon: <MonitorPlay size={15} />, hue: 75, unit: " W", digits: 0, pick: (s) => s.gpuPower, refs: { avg: "avgGpuPower", max: "maxGpuPower" }, zeroFloor: true },
-  { key: "totalPower", title: "总功耗 (CPU+GPU)", icon: <Zap size={15} />, hue: 50, unit: " W", digits: 0, pick: (s) => totalPower(s), zeroFloor: true },
-  { key: "gpuClock", title: "GPU 核心频率", icon: <MonitorPlay size={15} />, hue: 262, unit: " MHz", digits: 0, pick: (s) => s.gpuClock, refs: { avg: "avgGpuClock" } },
-  { key: "gpuMemClock", title: "显存频率", icon: <Database size={15} />, hue: 300, unit: " MHz", digits: 0, pick: (s) => s.gpuMemClock ?? null },
-  { key: "gpuMemCtrl", title: "显存控制器占用", icon: <Database size={15} />, hue: 300, unit: "%", digits: 0, pick: (s) => s.gpuMemCtrlLoad ?? null, zeroFloor: true },
-  { key: "vram", title: "显存占用", icon: <Database size={15} />, hue: 300, unit: "%", digits: 0, pick: (s) => s.vramLoad, refs: { avg: "avgVramLoad", max: "maxVramLoad" }, zeroFloor: true },
-  { key: "gpuFan", title: "GPU 风扇", icon: <Activity size={15} />, hue: 200, unit: "%", digits: 0, pick: (s) => s.gpuFan ?? null, zeroFloor: true },
-  { key: "mem", title: "内存占用", icon: <Database size={15} />, hue: 330, unit: "%", digits: 0, pick: (s) => s.memLoad, refs: { avg: "avgMemLoad" }, zeroFloor: true },
-  { key: "disk", title: "磁盘活动", icon: <Activity size={15} />, hue: 50, unit: "%", digits: 0, pick: (s) => s.diskLoad ?? null, zeroFloor: true },
-  { key: "diskRW", title: "磁盘读写", icon: <Activity size={15} />, hue: 50, unit: "", digits: 0, pick: (s) => maxNullable(s.diskRead, s.diskWrite), zeroFloor: true, fmt: rate },
+  { key: "fps", title: "FPS", hue: HUE.fps, unit: "", digits: 0, pick: (s) => s.fps, refs: { avg: "avgFps", min: "minFps", max: "maxFps" }, zeroFloor: true },
+  { key: "ft", title: "帧时间", hue: HUE.fps, unit: " ms", digits: 1, pick: (s) => s.frametimeMs, refs: { avg: "avgFrametimeMs" } },
+  { key: "cpuLoad", title: "CPU 占用", hue: HUE.cpu, unit: "%", digits: 0, pick: (s) => s.cpuLoad, refs: { avg: "avgCpuLoad" }, zeroFloor: true },
+  { key: "cpuTemp", title: "CPU 温度", hue: HUE.cpu, unit: "°C", digits: 0, pick: (s) => s.cpuTemp, refs: { avg: "avgCpuTemp", max: "maxCpuTemp" } },
+  { key: "cpuPower", title: "CPU 功耗", hue: HUE.power, unit: " W", digits: 0, pick: (s) => s.cpuPower, refs: { avg: "avgCpuPower", max: "maxCpuPower" }, zeroFloor: true },
+  { key: "cpuClock", title: "CPU 频率", hue: HUE.cpu, unit: " MHz", digits: 0, pick: (s) => s.cpuClock, refs: { avg: "avgCpuClock" } },
+  { key: "gpuLoad", title: "GPU 占用", hue: HUE.gpu, unit: "%", digits: 0, pick: (s) => s.gpuLoad, refs: { avg: "avgGpuLoad" }, zeroFloor: true },
+  { key: "gpuTemp", title: "GPU 温度", hue: HUE.gpu, unit: "°C", digits: 0, pick: (s) => s.gpuTemp, refs: { avg: "avgGpuTemp", max: "maxGpuTemp" } },
+  { key: "gpuPower", title: "GPU 功耗", hue: HUE.power, unit: " W", digits: 0, pick: (s) => s.gpuPower, refs: { avg: "avgGpuPower", max: "maxGpuPower" }, zeroFloor: true },
+  { key: "totalPower", title: "总功耗 (CPU+GPU)", hue: HUE.power, unit: " W", digits: 0, pick: (s) => totalPower(s), zeroFloor: true },
+  { key: "gpuClock", title: "GPU 核心频率", hue: HUE.gpu, unit: " MHz", digits: 0, pick: (s) => s.gpuClock, refs: { avg: "avgGpuClock" } },
+  { key: "gpuMemClock", title: "显存频率", hue: HUE.mem, unit: " MHz", digits: 0, pick: (s) => s.gpuMemClock ?? null },
+  { key: "gpuMemCtrl", title: "显存控制器占用", hue: HUE.mem, unit: "%", digits: 0, pick: (s) => s.gpuMemCtrlLoad ?? null, zeroFloor: true },
+  { key: "vram", title: "显存占用", hue: HUE.mem, unit: "%", digits: 0, pick: (s) => s.vramLoad, refs: { avg: "avgVramLoad", max: "maxVramLoad" }, zeroFloor: true },
+  { key: "gpuFan", title: "GPU 风扇", hue: HUE.gpu, unit: "%", digits: 0, pick: (s) => s.gpuFan ?? null, zeroFloor: true },
+  { key: "mem", title: "内存占用", hue: HUE.mem, unit: "%", digits: 0, pick: (s) => s.memLoad, refs: { avg: "avgMemLoad" }, zeroFloor: true },
+  { key: "disk", title: "磁盘活动", hue: HUE.disk, unit: "%", digits: 0, pick: (s) => s.diskLoad ?? null, zeroFloor: true },
+  { key: "diskRW", title: "磁盘读写", hue: HUE.disk, unit: "", digits: 0, pick: (s) => maxNullable(s.diskRead, s.diskWrite), zeroFloor: true, fmt: rate },
 ];
 
 /** Larger of two nullable values (for the combined disk R/W chart). */
@@ -254,17 +197,18 @@ interface ChartPanelProps {
 }
 
 function ChartPanel({ def, timesSec, values, refLines, syncKey, onHover }: ChartPanelProps) {
+  const t = useT();
   const fmt = def.fmt ?? ((v: number) => `${v.toFixed(def.digits)}${def.unit}`);
   return (
-    <div className="rounded-2xl border border-line bg-surface2/40 p-4 transition-colors hover:border-line-strong">
-      <div className="mb-2 flex items-center gap-2">
-        <span style={{ color: hueColor(def.hue, 80, 0.13) }}>{def.icon}</span>
-        <span className="hud-label text-[10px] text-muted">{def.title}</span>
+    <div className="glass rounded-xl px-4 pb-3 pt-3.5">
+      <div className="mb-1.5 flex items-center gap-2 text-[12.5px] font-medium text-ink">
+        <span className="h-2 w-2 rounded-full" style={{ background: hueColor(hueOf(def.hue), 78, 0.14) }} />
+        {t(def.title)}
       </div>
       <TimeSeriesChart
         timesSec={timesSec}
         values={values}
-        hue={def.hue}
+        hue={hueOf(def.hue)}
         format={fmt}
         refLines={refLines}
         zeroFloor={def.zeroFloor}
@@ -298,20 +242,9 @@ function seriesStats(values: Array<number | null>): {
   return { avg: sum / n, min: mn, max: mx };
 }
 
-/** One labelled readout in the featured chart's side panel. */
-function FeaturedStat({ label, value, hue }: { label: string; value: string; hue: number }) {
-  const empty = value === DASH;
-  return (
-    <div className="flex items-baseline justify-between gap-2 rounded-lg border border-line bg-surface2/40 px-2.5 py-1.5 lg:flex-col lg:items-start lg:gap-0.5">
-      <span className="hud-label text-[9px] text-dim">{label}</span>
-      <span
-        className="nums text-[15px] font-semibold leading-none"
-        style={{ color: empty ? "var(--color-dim)" : hueColor(hue, 82, 0.13) }}
-      >
-        {value}
-      </span>
-    </div>
-  );
+/** One labelled readout in the featured chart's side column. */
+function FeaturedStat({ label, value }: { label: string; value: string }) {
+  return <Readout label={label} value={value === DASH ? null : value} size="sm" className="lg:border-t lg:border-line lg:pt-2 lg:first:border-t-0 lg:first:pt-0" />;
 }
 
 interface FeaturedChartProps {
@@ -333,6 +266,8 @@ interface FeaturedChartProps {
  * side panel lists avg/max/min — plus 1% / 0.1% lows for FPS.
  */
 function FeaturedChart({ series, summary, timesSec, syncKey, onHover, hovered }: FeaturedChartProps) {
+  const t = useT();
+  const tf = useTf();
   // Only metrics that actually captured data are selectable.
   const selectable = useMemo(() => series.filter((s) => s.hasData), [series]);
   const [key, setKey] = useState<string>("fps");
@@ -370,18 +305,18 @@ function FeaturedChart({ series, summary, timesSec, syncKey, onHover, hovered }:
   const isFps = def.key === "fps";
 
   return (
-    <div ref={featRef} className="glass hairline relative rounded-2xl p-4">
+    <div ref={featRef} className="glass relative rounded-xl p-4">
       <div className="flex items-center justify-between gap-3">
         <div className="relative">
           <select
             value={def.key}
             onChange={(e) => setKey(e.target.value)}
-            style={{ colorScheme: "dark" }}
-            className="appearance-none rounded-lg border border-line bg-surface2 py-1.5 pl-3 pr-9 text-[13px] font-semibold text-ink outline-none transition-colors hover:border-line-strong focus:border-accent"
+            aria-label={tf("图表指标", "Chart metric")}
+            className="field no-drag h-8 cursor-pointer appearance-none pr-9 text-[13px] font-medium"
           >
             {selectable.map((s) => (
               <option key={s.def.key} value={s.def.key}>
-                {s.def.title}
+                {t(s.def.title)}
               </option>
             ))}
           </select>
@@ -390,12 +325,9 @@ function FeaturedChart({ series, summary, timesSec, syncKey, onHover, hovered }:
             className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-dim"
           />
         </div>
-        <div className="nums flex items-baseline gap-1.5">
-          <span className="hud-label text-[9px] text-dim">{live ? "当前" : "平均"}</span>
-          <span
-            className="text-[26px] font-semibold leading-none"
-            style={{ color: hueColor(def.hue, 84, 0.13) }}
-          >
+        <div className="nums flex items-baseline gap-2">
+          <span className="text-[12px] text-dim">{live ? t("当前") : t("平均")}</span>
+          <span className="text-[28px] font-light leading-none" style={{ color: hueColor(hueOf(def.hue), 80, 0.14) }}>
             {fmtOrDash(headlineVal)}
           </span>
         </div>
@@ -410,23 +342,23 @@ function FeaturedChart({ series, summary, timesSec, syncKey, onHover, hovered }:
           <TimeSeriesChart
             timesSec={timesSec}
             values={values}
-            hue={def.hue}
+            hue={hueOf(def.hue)}
             format={fmt}
             refLines={buildRefs(summary, def)}
             zeroFloor={def.zeroFloor}
-            height={280}
+            height={260}
             syncKey={syncKey}
             onHover={onHover}
           />
         </div>
-        <div className="flex flex-row flex-wrap gap-2 lg:flex-col">
-          <FeaturedStat label="平均" value={fmtOrDash(stats.avg)} hue={def.hue} />
-          <FeaturedStat label="最高" value={fmtOrDash(stats.max)} hue={22} />
-          <FeaturedStat label="最低" value={fmtOrDash(stats.min)} hue={200} />
+        <div className="flex flex-row flex-wrap gap-x-6 gap-y-3 lg:flex-col lg:gap-2 lg:border-l lg:border-line lg:pl-4">
+          <FeaturedStat label="平均" value={fmtOrDash(stats.avg)} />
+          <FeaturedStat label="最高" value={fmtOrDash(stats.max)} />
+          <FeaturedStat label="最低" value={fmtOrDash(stats.min)} />
           {isFps && (
             <>
-              <FeaturedStat label="1% Low" value={fmtOrDash(summary.low1)} hue={85} />
-              <FeaturedStat label="0.1% Low" value={fmtOrDash(summary.low01)} hue={60} />
+              <FeaturedStat label="1% Low" value={fmtOrDash(summary.low1)} />
+              <FeaturedStat label="0.1% Low" value={fmtOrDash(summary.low01)} />
             </>
           )}
         </div>
@@ -449,27 +381,27 @@ interface TooltipRow {
 }
 
 const TOOLTIP_ROWS: TooltipRow[] = [
-  { label: "FPS", hue: 158, fmt: (s) => (isNum(s.fps) ? s.fps.toFixed(0) : null) },
-  { label: "帧时间", hue: 224, fmt: (s) => (isNum(s.frametimeMs) ? `${s.frametimeMs.toFixed(1)} ms` : null) },
-  { label: "CPU 占用", hue: 200, fmt: (s) => (isNum(s.cpuLoad) ? `${s.cpuLoad.toFixed(0)}%` : null) },
-  { label: "CPU 温度", hue: 280, fmt: (s) => (isNum(s.cpuTemp) ? `${s.cpuTemp.toFixed(0)}°C` : null) },
-  { label: "CPU 功耗", hue: 75, fmt: (s) => (isNum(s.cpuPower) ? `${s.cpuPower.toFixed(0)} W` : null) },
-  { label: "CPU 频率", hue: 262, fmt: (s) => (isNum(s.cpuClock) ? `${Math.round(s.cpuClock)} MHz` : null) },
-  { label: "GPU 占用", hue: 158, fmt: (s) => (isNum(s.gpuLoad) ? `${s.gpuLoad.toFixed(0)}%` : null) },
-  { label: "GPU 温度", hue: 184, fmt: (s) => (isNum(s.gpuTemp) ? `${s.gpuTemp.toFixed(0)}°C` : null) },
-  { label: "GPU 功耗", hue: 75, fmt: (s) => (isNum(s.gpuPower) ? `${s.gpuPower.toFixed(0)} W` : null) },
-  { label: "总功耗", hue: 50, fmt: (s) => { const v = totalPower(s); return isNum(v) ? `${v.toFixed(0)} W` : null; } },
-  { label: "GPU 频率", hue: 262, fmt: (s) => (isNum(s.gpuClock) ? `${s.gpuClock} MHz` : null) },
-  { label: "显存频率", hue: 300, fmt: (s) => (isNum(s.gpuMemClock) ? `${s.gpuMemClock} MHz` : null) },
-  { label: "显存控制器", hue: 300, fmt: (s) => (isNum(s.gpuMemCtrlLoad) ? `${s.gpuMemCtrlLoad.toFixed(0)}%` : null) },
-  { label: "显存占用", hue: 300, fmt: (s) => (isNum(s.vramLoad) ? `${s.vramLoad.toFixed(0)}%` : null) },
-  { label: "GPU 风扇", hue: 200, fmt: (s) => (isNum(s.gpuFan) ? `${s.gpuFan.toFixed(0)}%` : null) },
-  { label: "内存占用", hue: 330, fmt: (s) => (isNum(s.memLoad) ? `${s.memLoad.toFixed(0)}%` : null) },
-  { label: "磁盘活动", hue: 50, fmt: (s) => (isNum(s.diskLoad) ? `${s.diskLoad.toFixed(0)}%` : null) },
-  { label: "磁盘读", hue: 50, fmt: (s) => (isNum(s.diskRead) ? rate(s.diskRead) : null) },
-  { label: "磁盘写", hue: 50, fmt: (s) => (isNum(s.diskWrite) ? rate(s.diskWrite) : null) },
-  { label: "下载", hue: 224, fmt: (s) => (isNum(s.netDown) ? rate(s.netDown) : null) },
-  { label: "上传", hue: 224, fmt: (s) => (isNum(s.netUp) ? rate(s.netUp) : null) },
+  { label: "FPS", hue: HUE.fps, fmt: (s) => (isNum(s.fps) ? s.fps.toFixed(0) : null) },
+  { label: "帧时间", hue: HUE.fps, fmt: (s) => (isNum(s.frametimeMs) ? `${s.frametimeMs.toFixed(1)} ms` : null) },
+  { label: "CPU 占用", hue: HUE.cpu, fmt: (s) => (isNum(s.cpuLoad) ? `${s.cpuLoad.toFixed(0)}%` : null) },
+  { label: "CPU 温度", hue: HUE.cpu, fmt: (s) => (isNum(s.cpuTemp) ? `${s.cpuTemp.toFixed(0)}°C` : null) },
+  { label: "CPU 功耗", hue: HUE.power, fmt: (s) => (isNum(s.cpuPower) ? `${s.cpuPower.toFixed(0)} W` : null) },
+  { label: "CPU 频率", hue: HUE.cpu, fmt: (s) => (isNum(s.cpuClock) ? `${Math.round(s.cpuClock)} MHz` : null) },
+  { label: "GPU 占用", hue: HUE.gpu, fmt: (s) => (isNum(s.gpuLoad) ? `${s.gpuLoad.toFixed(0)}%` : null) },
+  { label: "GPU 温度", hue: HUE.gpu, fmt: (s) => (isNum(s.gpuTemp) ? `${s.gpuTemp.toFixed(0)}°C` : null) },
+  { label: "GPU 功耗", hue: HUE.power, fmt: (s) => (isNum(s.gpuPower) ? `${s.gpuPower.toFixed(0)} W` : null) },
+  { label: "总功耗", hue: HUE.power, fmt: (s) => { const v = totalPower(s); return isNum(v) ? `${v.toFixed(0)} W` : null; } },
+  { label: "GPU 频率", hue: HUE.gpu, fmt: (s) => (isNum(s.gpuClock) ? `${s.gpuClock} MHz` : null) },
+  { label: "显存频率", hue: HUE.mem, fmt: (s) => (isNum(s.gpuMemClock) ? `${s.gpuMemClock} MHz` : null) },
+  { label: "显存控制器", hue: HUE.mem, fmt: (s) => (isNum(s.gpuMemCtrlLoad) ? `${s.gpuMemCtrlLoad.toFixed(0)}%` : null) },
+  { label: "显存占用", hue: HUE.mem, fmt: (s) => (isNum(s.vramLoad) ? `${s.vramLoad.toFixed(0)}%` : null) },
+  { label: "GPU 风扇", hue: HUE.gpu, fmt: (s) => (isNum(s.gpuFan) ? `${s.gpuFan.toFixed(0)}%` : null) },
+  { label: "内存占用", hue: HUE.mem, fmt: (s) => (isNum(s.memLoad) ? `${s.memLoad.toFixed(0)}%` : null) },
+  { label: "磁盘活动", hue: HUE.disk, fmt: (s) => (isNum(s.diskLoad) ? `${s.diskLoad.toFixed(0)}%` : null) },
+  { label: "磁盘读", hue: HUE.disk, fmt: (s) => (isNum(s.diskRead) ? rate(s.diskRead) : null) },
+  { label: "磁盘写", hue: HUE.disk, fmt: (s) => (isNum(s.diskWrite) ? rate(s.diskWrite) : null) },
+  { label: "下载", hue: HUE.netDown, fmt: (s) => (isNum(s.netDown) ? rate(s.netDown) : null) },
+  { label: "上传", hue: HUE.netUp, fmt: (s) => (isNum(s.netUp) ? rate(s.netUp) : null) },
 ];
 
 /** Localized elapsed time label "m:ss" for the tooltip header. */
@@ -566,82 +498,103 @@ export function PerfReport({ session }: { session: PerfSessionMeta }) {
   const energy = fmtEnergy(summary.energyWh);
   const co2 = fmtCo2(summary.co2Kg);
 
+  const hasFps = isNum(summary.avgFps);
+  const metaBits = [
+    session.cpuName,
+    session.gpuName,
+    session.refreshHz != null ? `${session.refreshHz} Hz` : null,
+    samples.length > 0 ? tf(`采样 ${(session.durationSec / samples.length).toFixed(1)} 秒`, `${(session.durationSec / samples.length).toFixed(1)} s sampling`) : null,
+  ].filter(Boolean);
+
   return (
     <motion.div
-      initial={{ opacity: 0, y: 8 }}
+      initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+      exit={{ opacity: 0, transition: { duration: 0.08 } }}
+      transition={{ duration: 0.2, ease: easeOut }}
       className="space-y-4"
     >
-      {/* Header */}
-      <div className="hud-frame glass hairline rounded-2xl p-4">
-        <div className="flex items-start gap-3.5">
-          <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl grad-accent glow text-white">
-            <Gauge size={22} />
-          </span>
-          <div className="min-w-0 flex-1">
-            <h2 className="truncate text-[17px] font-semibold leading-tight text-ink" title={gameDisplayName(session.exe)}>
-              {gameDisplayName(session.exe)}
-            </h2>
-            <p className="nums mt-0.5 text-[12px] text-muted">
-              {fmtDateTime(session.startedAt)} → {fmtDateTime(session.endedAt)} · {fmtDuration(session.durationSec)}
-            </p>
-            {session.path && (
-              <p className="mt-0.5 truncate text-[11px] text-dim" title={session.path}>
-                {session.path}
-              </p>
-            )}
+      {/* Header — typography only */}
+      <header className="px-1">
+        <h2 className="truncate font-title text-[20px] font-semibold leading-tight text-ink" title={gameDisplayName(session.exe)}>
+          {gameDisplayName(session.exe)}
+        </h2>
+        <p className="nums mt-1 text-[12.5px] text-muted">
+          {fmtDateTime(session.startedAt)} → {fmtDateTime(session.endedAt)}
+          <span className="mx-1.5 text-dim">·</span>
+          {fmtDuration(session.durationSec)}
+        </p>
+        {metaBits.length > 0 && <p className="mt-0.5 truncate text-[12px] text-dim">{metaBits.join("  ·  ")}</p>}
+        {session.path && (
+          <p className="mt-0.5 truncate font-mono text-[11px] text-dim" title={session.path}>
+            {session.path}
+          </p>
+        )}
+      </header>
+
+      {/* Frame rate — the headline */}
+      <section className="glass overflow-hidden rounded-xl">
+        <Cluster min={96}>
+          <ClusterCell className="col-span-2">
+            <Readout label="平均 FPS" value={hasFps ? Math.round(summary.avgFps as number) : null} size="xl" color={hueColor(HUE.fps, 80, 0.14)} />
+          </ClusterCell>
+          <ClusterCell><Readout label="1% Low" value={isNum(summary.low1) ? Math.round(summary.low1) : null} size="lg" /></ClusterCell>
+          <ClusterCell><Readout label="0.1% Low" value={isNum(summary.low01) ? Math.round(summary.low01) : null} size="lg" /></ClusterCell>
+          <ClusterCell><Readout label="最低 FPS" value={isNum(summary.minFps) ? Math.round(summary.minFps) : null} size="lg" /></ClusterCell>
+          <ClusterCell><Readout label="最高 FPS" value={isNum(summary.maxFps) ? Math.round(summary.maxFps) : null} size="lg" /></ClusterCell>
+          <ClusterCell><Readout label="平均帧时间" value={isNum(summary.avgFrametimeMs) ? summary.avgFrametimeMs.toFixed(1) : null} unit="ms" size="lg" /></ClusterCell>
+        </Cluster>
+      </section>
+
+      {/* Hardware summary — one column per domain */}
+      <section className="glass overflow-hidden rounded-xl">
+        <Cluster min={220}>
+          <KVColumn
+            title="CPU"
+            hue={HUE.cpu}
+            rows={[
+              { label: "平均占用", value: summary.avgCpuLoad, digits: 0, unit: "%" },
+              { label: "平均温度", value: summary.avgCpuTemp, digits: 0, unit: "°C", hot: [85, 95] },
+              { label: "最高温度", value: summary.maxCpuTemp, digits: 0, unit: "°C", hot: [85, 95] },
+              { label: "平均功耗", value: summary.avgCpuPower, digits: 0, unit: "W" },
+              { label: "平均频率", value: summary.avgCpuClock, digits: 0, unit: "MHz" },
+            ]}
+          />
+          <KVColumn
+            title="GPU"
+            hue={HUE.gpu}
+            rows={[
+              { label: "平均占用", value: summary.avgGpuLoad, digits: 0, unit: "%" },
+              { label: "平均温度", value: summary.avgGpuTemp, digits: 0, unit: "°C", hot: [80, 88] },
+              { label: "最高温度", value: summary.maxGpuTemp, digits: 0, unit: "°C", hot: [80, 88] },
+              { label: "平均功耗", value: summary.avgGpuPower, digits: 0, unit: "W" },
+              { label: "平均频率", value: summary.avgGpuClock, digits: 0, unit: "MHz" },
+              { label: "平均显存占用", value: summary.avgVramLoad, digits: 0, unit: "%" },
+            ]}
+          />
+          <div className="min-w-0 border-l border-t border-line px-5 py-4">
+            <div className="mb-2 flex items-center gap-2 text-[12px] font-medium text-ink">
+              <span className="h-2 w-2 rounded-full" style={{ background: hueColor(HUE.power, 78, 0.14) }} />
+              {tf("系统与能耗", "System & energy")}
+            </div>
+            <dl className="space-y-1.5">
+              <div className="flex items-baseline justify-between gap-3">
+                <dt className="text-[12px] text-muted">{tf("平均内存占用", "Avg memory")}</dt>
+                <dd className="nums text-[14px] text-ink">{num(summary.avgMemLoad)}{isNum(summary.avgMemLoad) && <span className="ml-0.5 text-[11px] text-dim">%</span>}</dd>
+              </div>
+              <div className="flex items-baseline justify-between gap-3">
+                <dt className="text-[12px] text-muted">{tf("用电量 (CPU + GPU)", "Energy (CPU + GPU)")}</dt>
+                <dd className="nums text-[14px] text-ink">{energy.value}<span className="ml-0.5 text-[11px] text-dim">{energy.unit}</span></dd>
+              </div>
+              <div className="flex items-baseline justify-between gap-3">
+                <dt className="text-[12px] text-muted">{tf("二氧化碳 (估算)", "CO₂ (estimate)")}</dt>
+                <dd className="nums text-[14px] text-ink">{co2.value}<span className="ml-0.5 text-[11px] text-dim">{co2.unit}</span></dd>
+              </div>
+            </dl>
+            <p className="mt-2 text-[11px] text-dim">{tf(`按 ${CO2_KG_PER_KWH} kg CO₂/kWh 估算`, `Estimated at ${CO2_KG_PER_KWH} kg CO₂/kWh`)}</p>
           </div>
-        </div>
-
-        <div className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-line pt-3.5 sm:grid-cols-4">
-          <MetaItem
-            icon={<Database size={14} />}
-            label="采样间隔"
-            value={samples.length > 0 ? `${(session.durationSec / samples.length).toFixed(1)}s` : DASH}
-          />
-          <MetaItem icon={<Cpu size={14} />} label="CPU" value={session.cpuName ?? DASH} />
-          <MetaItem icon={<MonitorPlay size={14} />} label="GPU" value={session.gpuName ?? DASH} />
-          <MetaItem
-            icon={<MonitorPlay size={14} />}
-            label="刷新率"
-            value={session.refreshHz != null ? `${session.refreshHz} Hz` : DASH}
-          />
-        </div>
-      </div>
-
-      {/* Energy + CO₂ headline */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <HeadlineCard
-          icon={<Zap size={20} />}
-          label="用电量 (CPU + GPU)"
-          value={energy.value}
-          unit={energy.unit}
-          hue={85}
-          sub="本次会话 CPU + GPU 功耗积分"
-        />
-        <HeadlineCard
-          icon={<Leaf size={20} />}
-          label="二氧化碳排放量 (估算)"
-          value={co2.value}
-          unit={co2.unit}
-          hue={158}
-          sub={tf(`估算值 · ${CO2_KG_PER_KWH} kg CO₂/kWh`, `Estimate · ${CO2_KG_PER_KWH} kg CO₂/kWh`)}
-        />
-      </div>
-
-      {/* Summary stat grid */}
-      <div className="glass hairline rounded-2xl p-4">
-        <div className="mb-3 flex items-center gap-2">
-          <Activity size={15} className="text-accent" />
-          <span className="hud-label text-[10px] text-muted">性能汇总 · SUMMARY</span>
-        </div>
-        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
-          {STATS.map((stat) => (
-            <StatCell key={stat.key} stat={stat} value={summary[stat.key] as number | null} />
-          ))}
-        </div>
-      </div>
+        </Cluster>
+      </section>
 
       {/* Featured big chart — user switches which metric it shows */}
       <FeaturedChart
@@ -656,7 +609,7 @@ export function PerfReport({ session }: { session: PerfSessionMeta }) {
       {/* Time-series charts (shared synced cursor + floating tooltip) */}
       <div
         ref={wrapRef}
-        className="glass hairline relative grid grid-cols-1 gap-4 rounded-2xl p-4 lg:grid-cols-2"
+        className="relative grid grid-cols-1 gap-3 lg:grid-cols-2"
         onPointerMove={onPointerMove}
         onPointerLeave={onPointerLeave}
       >
@@ -675,22 +628,24 @@ export function PerfReport({ session }: { session: PerfSessionMeta }) {
           ))}
 
         {hasNet && (
-          <div className="rounded-2xl border border-line bg-surface2/40 p-4 lg:col-span-2">
-            <div className="mb-2 flex items-center gap-2">
-              <Activity size={15} style={{ color: hueColor(224, 80, 0.13) }} />
-              <span className="hud-label text-[10px] text-muted">网络上传 / 下载</span>
-              <span className="nums ml-1 text-[10.5px] font-normal">
-                <span style={{ color: hueColor(75, 80, 0.13) }}>↑ 上传</span>
-                <span className="text-dim"> · </span>
-                <span style={{ color: hueColor(224, 80, 0.13) }}>↓ 下载</span>
+          <div className="glass rounded-xl px-4 pb-3 pt-3.5 lg:col-span-2">
+            <div className="mb-1.5 flex items-center gap-3 text-[12.5px] font-medium text-ink">
+              {tf("网络上传 / 下载", "Network up / down")}
+              <span className="flex items-center gap-1.5 text-[11.5px] font-normal text-muted">
+                <span className="h-0.5 w-3 rounded-full" style={{ background: hueColor(HUE.netUp, 78, 0.14) }} />
+                {tf("上传", "Up")}
+              </span>
+              <span className="flex items-center gap-1.5 text-[11.5px] font-normal text-muted">
+                <span className="h-0.5 w-3 rounded-full" style={{ background: hueColor(HUE.netDown, 78, 0.14) }} />
+                {tf("下载", "Down")}
               </span>
             </div>
             <DualAxisChart
               timesSec={timesSec}
               up={netUp}
               down={netDown}
-              upHue={75}
-              downHue={224}
+              upHue={HUE.netUp}
+              downHue={HUE.netDown}
               format={rate}
               syncKey={syncKey}
               onHover={onHover}
@@ -731,19 +686,20 @@ function HoverTooltip({
 
   return (
     <div
-      className="pointer-events-none absolute z-20 w-[200px] rounded-xl border border-line-strong bg-surface/95 p-3 shadow-xl backdrop-blur"
+      className="float pointer-events-none absolute z-20 w-[200px] rounded-xl p-3"
       style={{ left: Math.max(4, left), top: Math.max(4, cursor.y - 8) }}
     >
-      <div className="nums mb-2 border-b border-line pb-1.5 text-[10.5px] font-medium text-dim">
+      <div className="nums mb-2 border-b border-line pb-1.5 text-[11px] text-muted">
         {fmtElapsed(sample.t)}
       </div>
       <div className="grid grid-cols-2 gap-x-3 gap-y-1">
         {rows.map((r) => (
-          <div key={r.label} className="flex items-baseline justify-between gap-1.5">
-            <span className="truncate text-[10.5px] text-dim">{r.label}</span>
-            <span className="nums shrink-0 text-[11px] font-medium" style={{ color: hueColor(r.hue, 82, 0.13) }}>
-              {r.value}
+          <div key={r.label} className="flex items-center justify-between gap-1.5">
+            <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-dim">
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hueColor(hueOf(r.hue), 78, 0.14) }} />
+              <span className="truncate">{r.label}</span>
             </span>
+            <span className="nums shrink-0 text-[11.5px] text-ink">{r.value}</span>
           </div>
         ))}
       </div>

@@ -11,6 +11,7 @@
  * needs real-looking data from one.
  */
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
+import { summarize, type PerfSample } from "../lib/perf";
 
 const GB = 1024 ** 3;
 const MB = 1024 ** 2;
@@ -208,6 +209,64 @@ const startup = [
 const store = new Map<string, string>(Object.entries(JSON.parse(localStorage.getItem("cp-preview-store") ?? "{}")));
 const saveStore = () => localStorage.setItem("cp-preview-store", JSON.stringify(Object.fromEntries(store)));
 
+// Three recorded game sessions for 游戏历史 (samples served by perf_session_load).
+const SESSIONS: Array<[string, string, number, number]> = [
+  ["cyberpunk2077.exe", "Cyberpunk 2077", 118, 42],
+  ["eldenring.exe", "ELDEN RING", 60, 31],
+  ["valorant-win64-shipping.exe", "VALORANT", 380, 18],
+];
+const sessionSamples = new Map<string, PerfSample[]>();
+if (!store.has("corepilot-perf-history")) {
+  const now = Date.now();
+  const rows = SESSIONS.map(([exe, name, fpsBase, minutes], k) => {
+    const id = `mock-${k}`;
+    const n = 360;
+    const samples: PerfSample[] = Array.from({ length: n }, (_, i) => {
+      const dip = i % 97 === 50 ? 0.55 : i % 41 === 7 ? 0.8 : 1;
+      const fps = Math.max(10, fpsBase * dip * (0.94 + Math.sin(i / 9) * 0.04 + Math.random() * 0.05));
+      return {
+        t: (i * minutes * 60_000) / n,
+        fps,
+        frametimeMs: 1000 / fps,
+        cpuLoad: 34 + Math.sin(i / 14) * 8 + Math.random() * 4,
+        cpuTemp: 66 + Math.sin(i / 30) * 5 + Math.random(),
+        cpuPower: 104 + Math.sin(i / 14) * 18,
+        cpuClock: 5120 + Math.random() * 80,
+        gpuLoad: Math.min(99, 90 + Math.random() * 8),
+        gpuTemp: 62 + i / 40 + Math.random(),
+        gpuPower: 360 + Math.random() * 40,
+        gpuClock: 2730 + Math.random() * 40,
+        vramLoad: 52 + i / 60,
+        memLoad: 44 + Math.random() * 2,
+        gpuMemClock: 10501,
+        gpuMemCtrlLoad: 40 + Math.random() * 10,
+        gpuFan: 48 + i / 30,
+        diskLoad: 2 + Math.random() * 6,
+        diskRead: Math.random() * 30 * MB,
+        diskWrite: Math.random() * 6 * MB,
+        netDown: Math.random() * 400_000,
+        netUp: Math.random() * 90_000,
+      };
+    });
+    sessionSamples.set(id, samples);
+    const startedAt = now - (k + 1) * 26 * 3600_000;
+    return {
+      id,
+      exe,
+      name,
+      path: null,
+      startedAt,
+      endedAt: startedAt + minutes * 60_000,
+      durationSec: minutes * 60,
+      cpuName: "AMD Ryzen 9 9950X3D 16-Core Processor",
+      gpuName: "NVIDIA GeForce RTX 4090",
+      refreshHz: 240,
+      summary: summarize(samples),
+    };
+  });
+  store.set("corepilot-perf-history", JSON.stringify({ state: { sessions: rows }, version: 2 }));
+}
+
 // URL overrides are applied to the persisted blobs BEFORE the stores hydrate.
 const params = new URLSearchParams(location.search);
 const patchStore = (key: string, patch: Record<string, unknown>) => {
@@ -218,6 +277,9 @@ const patchStore = (key: string, patch: Record<string, unknown>) => {
 const style = params.get("style");
 if (style) patchStore("corepilot-settings", { themeStyle: style, theme: style === "porcelain" || style === "sandstone" ? "light" : "dark" });
 if (params.get("lang")) patchStore("corepilot-settings", { language: params.get("lang") });
+// Static screenshots: settle all motion instantly (headless virtual time can
+// leave WAAPI animations unfinished). Explicit either way so it never sticks.
+if (params.has("still")) patchStore("corepilot-settings", { reduceMotion: params.get("still") !== "0" });
 
 mockWindows("main");
 mockIPC(
@@ -259,7 +321,9 @@ mockIPC(
       case "ui_occluded":
         return false;
       case "perf_session_ids":
-        return [];
+        return [...sessionSamples.keys()];
+      case "perf_session_load":
+        return sessionSamples.has(a.id as string) ? JSON.stringify(sessionSamples.get(a.id as string)) : null;
       case "game_library_list":
         return [];
       case "osd_fps":

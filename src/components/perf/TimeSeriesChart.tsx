@@ -57,7 +57,7 @@ const PAD_RIGHT = 56;
 // uPlot paints axes/grid/points to <canvas>, which can't resolve CSS custom
 // properties (var(--…)) — these must be literal color/font strings. They mirror
 // the design tokens (--color-dim, --color-line, --font-mono) by hand.
-const AXIS_FONT = '10px "Cascadia Mono", ui-monospace, monospace';
+const AXIS_FONT = '10.5px Bahnschrift, "Segoe UI Variable Text", sans-serif';
 
 /** Canvas axis/grid/point colors, tuned per theme (canvas can't read CSS vars). */
 function chartChrome(): { axis: string; grid: string; point: string } {
@@ -135,7 +135,7 @@ export function TimeSeriesChart({
       height,
       // Compact: no built-in legend/title; we render our own shared tooltip.
       legend: { show: false },
-      padding: [10, PAD_RIGHT, 2, 0],
+      padding: [10, PAD_RIGHT, 2, 14],
       cursor: {
         // Vertical crosshair only; sync x across the whole report.
         x: true,
@@ -195,7 +195,7 @@ export function TimeSeriesChart({
           fill: (u) => {
             const ctx = u.ctx;
             const grad = ctx.createLinearGradient(0, u.bbox.top, 0, u.bbox.top + u.bbox.height);
-            grad.addColorStop(0, withAlpha(fill, 0.34));
+            grad.addColorStop(0, withAlpha(fill, 0.22));
             grad.addColorStop(1, withAlpha(fill, 0));
             return grad;
           },

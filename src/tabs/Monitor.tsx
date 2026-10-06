@@ -1,4 +1,3 @@
-import { Gauge } from "lucide-react";
 import { PerfHistory } from "../components/perf/PerfHistory";
 import { TabHeader } from "../components/ui/TabHeader";
 
@@ -10,7 +9,6 @@ export function Monitor() {
   return (
     <>
       <TabHeader
-        icon={Gauge}
         title="游戏历史"
         subtitle="每局游戏的性能报告 — CPU / GPU / 内存 / 磁盘 / 网络"
       />

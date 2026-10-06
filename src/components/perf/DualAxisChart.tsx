@@ -32,7 +32,7 @@ interface DualAxisChartProps {
   onHover: (idx: number | null) => void;
 }
 
-const AXIS_FONT = '10px "Cascadia Mono", ui-monospace, monospace';
+const AXIS_FONT = '10.5px Bahnschrift, "Segoe UI Variable Text", sans-serif';
 const Y_AXIS_SIZE = 54;
 
 /** Canvas axis/grid colors, tuned per theme (canvas can't read CSS vars). */
