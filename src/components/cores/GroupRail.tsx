@@ -1,23 +1,19 @@
-import { Check, Download, ListTree, Loader2, Plus, Power, Upload } from "lucide-react";
+import { Download, ListTree, Plus, Upload } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useMemo, type CSSProperties } from "react";
+import { useMemo } from "react";
 import { cn } from "../../lib/cn";
-import { groupColor, isLightTheme } from "../../lib/colors";
-import { useTf } from "../../lib/i18n";
+import { groupColor } from "../../lib/colors";
+import { useT, useTf } from "../../lib/i18n";
 import { maskToCpuList } from "../../lib/format";
-import { hoverPop } from "../../lib/motion";
+import { easeOut, springSmooth } from "../../lib/motion";
 import type { ProcInfo } from "../../lib/ipc";
 import { useGroups, type GroupRule } from "../../store/groups";
-import { ClickRipple } from "../ui/Ripple";
+import { Badge } from "../ui/Readout";
+import { Toggle } from "../ui/Toggle";
 
 interface GroupRailProps {
   processes: ProcInfo[];
   fullMask: bigint;
-  optimizationEnabled: boolean;
-  /** True while a toggle's apply/restore sweep is still running — locks the
-   *  button so a second click can't interleave two affinity sweeps. */
-  optimizationBusy: boolean;
-  onToggleOptimization: () => void;
   optimizeOnStartup: boolean;
   onToggleOptimizeOnStartup: () => void;
   onExport: () => void;
@@ -27,28 +23,50 @@ interface GroupRailProps {
 // How many of the group's name patterns currently have a process running — i.e.
 // "active rules", always ≤ the pattern count shown as the denominator. (Counting
 // matched patterns, not process instances: a group with N rules could otherwise
-// report far more than N "active" when names like svchost.exe run many copies,
-// which read as a nonsensical "657 / 239".)
+// report far more than N "active" when names like svchost.exe run many copies.)
 //
-// `running` is built ONCE per render by the caller. It used to be rebuilt inside
-// this function, i.e. ~350 `toLowerCase()` calls and 350 Set inserts per group
-// per 1.5 s poll — the rail's cost scaled with (groups × processes) for a number
-// that fits in a tooltip.
+// `running` is built ONCE per render by the caller, not per group per poll.
 function activeCount(group: GroupRule, running: ReadonlySet<string>): number {
   return group.patterns.reduce((n, pat) => (running.has(pat.toLowerCase()) ? n + 1 : n), 0);
 }
 
-export function GroupRail({
-  processes,
-  fullMask,
-  optimizationEnabled,
-  optimizationBusy,
-  onToggleOptimization,
-  optimizeOnStartup,
-  onToggleOptimizeOnStartup,
-  onExport,
-  onImport,
-}: GroupRailProps) {
+function RailItem({
+  selected,
+  onSelect,
+  color,
+  children,
+}: {
+  selected: boolean;
+  onSelect: () => void;
+  color: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-current={selected ? "true" : undefined}
+      className={cn(
+        "no-drag relative w-full cursor-pointer rounded-lg px-3 py-2 text-left transition-colors duration-150",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
+        selected ? "bg-surface2" : "hover:bg-surface2/50",
+      )}
+    >
+      {selected && (
+        <motion.span
+          layoutId="group-pill"
+          className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full"
+          style={{ background: color }}
+          transition={springSmooth}
+        />
+      )}
+      {children}
+    </button>
+  );
+}
+
+export function GroupRail({ processes, fullMask, optimizeOnStartup, onToggleOptimizeOnStartup, onExport, onImport }: GroupRailProps) {
+  const t = useT();
   const tf = useTf();
   const groups = useGroups((s) => s.groups);
   const selectedId = useGroups((s) => s.selectedId);
@@ -68,172 +86,106 @@ export function GroupRail({
   }, [processes]);
 
   return (
-    <div className="flex w-[244px] shrink-0 flex-col border-r border-line">
-      <div className="flex items-center justify-between px-3 py-3">
-        <span className="hud-label text-[10.5px] text-muted">进程分组</span>
-        <motion.button
-          whileHover={{ scale: 1.12 }}
-          whileTap={{ scale: 0.9 }}
-          onClick={() => addGroup({ mask: fullMask })}
-          className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-lg bg-accent/15 text-accent transition-colors hover:bg-accent/25 hover:text-accent-bright"
-          title="创建分组"
-        >
-          <Plus size={15} />
-        </motion.button>
-      </div>
-
-      {/* py-2.5 matches px-2.5 so the selected item's glow-sm (≈10px blur) isn't
-          clipped by overflow-auto at the top/bottom edges. */}
-      <div className="min-h-0 flex-1 space-y-1.5 overflow-auto px-2.5 py-2.5">
-        <button
-          onClick={() => select(null)}
-          className={cn(
-            "no-drag flex w-full cursor-pointer items-center justify-between rounded-xl border p-2.5 text-left transition-[background-color,border-color] duration-150",
-            selectedId === null
-              ? "border-accent/40 bg-accent/10 glow-sm"
-              : "border-line bg-surface2 hover:border-line-strong hover:bg-surface3",
-          )}
-        >
-          <div className="flex items-center gap-2">
-            <ListTree size={14} className={selectedId === null ? "text-accent-bright" : "text-dim"} />
-            <span className="text-[13px] font-medium text-ink">全部进程</span>
+    <div className="flex w-[232px] shrink-0 flex-col border-r border-line">
+      <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
+        <RailItem selected={selectedId === null} onSelect={() => select(null)} color="var(--color-accent)">
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-2.5">
+              <ListTree size={15} className={selectedId === null ? "text-accent" : "text-dim"} />
+              <span className="text-[13px] font-medium text-ink">{t("全部进程")}</span>
+            </span>
+            <span className="nums text-[12px] text-dim">{settableCount}</span>
           </div>
-          <span className="nums text-[11px] text-muted">{settableCount}</span>
-        </button>
-        <div className="hud-label px-1 pt-1.5 text-[9.5px] text-dim">分组</div>
-        <AnimatePresence initial={false}>
-          {groups.map((group) => {
-          const active = activeCount(group, running);
-          const selected = group.id === selectedId;
-          const color = groupColor(group.hue);
-          return (
-            <motion.button
-              key={group.id}
-              layout
-              initial={{ opacity: 0, scale: 0.8 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.8 }}
-              onClick={() => select(group.id)}
-              whileHover={{ scale: 1.02, y: -2 }}
-              whileTap={{ scale: 0.985 }}
-              transition={hoverPop}
-              className={cn(
-                "relative w-full cursor-pointer overflow-hidden rounded-xl border p-2.5 text-left transition-[background-color,border-color] duration-150",
-                selected
-                  ? "bg-surface3/60"
-                  : "border-line bg-surface2 hover:border-line-strong hover:bg-surface3",
-              )}
-              style={
-                // ALWAYS emit boxShadow (the glow when selected, else "none"). With
-                // motion's `layout`, boxShadow is a layout-corrected / forced motion
-                // value, so returning `undefined` for the unselected branch does NOT
-                // clear a previously-applied glow — a card that was ever selected (the
-                // seeder selects each built-in group once as it creates them) keeps a
-                // STALE colored glow. That's the recurring "all groups glow at once"
-                // bug. Explicit "none" clears it. borderColor is a plain style (not
-                // motion-corrected), so leaving it off the unselected branch is fine
-                // and preserves the `hover:border-line-strong` className.
-                selected
-                  ? {
-                      borderColor: `color-mix(in oklch, ${color} 50%, transparent)`,
-                      boxShadow: isLightTheme()
-                        ? `inset 2px 0 0 0 ${color}`
-                        : `0 0 14px -3px color-mix(in oklch, ${color} 55%, transparent), inset 2px 0 0 0 ${color}`,
-                    }
-                  : { boxShadow: "none" }
-              }
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span
-                    className={cn("h-2.5 w-2.5 shrink-0 rounded-full", selected && "glow-sm")}
-                    style={{ background: color, "--glow": color } as CSSProperties}
-                  />
-                  <span className="truncate text-[13px] font-medium text-ink">{group.name}</span>
-                  {group.builtin && (
-                    <span className="hud-label shrink-0 rounded border border-line px-1 py-px text-[8px] text-dim">
-                      内置
-                    </span>
-                  )}
-                </div>
-                <span
-                  className="nums shrink-0 text-[11px] text-muted"
-                  title={tf(`${active} / ${group.patterns.length} 个规则有进程正在运行`, `${active} / ${group.patterns.length} rules have running processes`)}
+        </RailItem>
+
+        <div className="mb-1 mt-4 flex items-center justify-between px-3">
+          <span className="text-[11.5px] text-dim">{tf("分组", "Groups")}</span>
+          <button
+            type="button"
+            onClick={() => addGroup({ mask: fullMask })}
+            title={tf("创建分组", "New group")}
+            aria-label={tf("创建分组", "New group")}
+            className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-muted transition-colors hover:bg-surface2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+          >
+            <Plus size={15} />
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-0.5">
+          <AnimatePresence initial={false}>
+            {groups.map((group) => {
+              const active = activeCount(group, running);
+              const selected = group.id === selectedId;
+              const color = groupColor(group.hue);
+              return (
+                <motion.div
+                  key={group.id}
+                  layout="position"
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: 0.2, ease: easeOut }}
                 >
-                  <span className={active > 0 ? "text-ink" : ""}>{active}</span> / {group.patterns.length}
-                </span>
-              </div>
-              <div className="nums mt-1 truncate text-[10.5px] text-dim">
-                CPU {group.mask === 0n ? "全部" : maskToCpuList(group.mask)}
-              </div>
-              <ClickRipple />
-            </motion.button>
-          );
-          })}
-        </AnimatePresence>
+                  <RailItem selected={selected} onSelect={() => select(group.id)} color={color}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="flex min-w-0 items-center gap-2.5">
+                        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: color }} />
+                        <span className="truncate text-[13px] font-medium text-ink">{group.name}</span>
+                        {group.builtin && <Badge className="h-[18px] px-1 text-[10.5px]">{t("内置")}</Badge>}
+                      </span>
+                      <span
+                        className="nums shrink-0 text-[12px] text-dim"
+                        title={tf(`${active} / ${group.patterns.length} 个规则有进程正在运行`, `${active} / ${group.patterns.length} rules have running processes`)}
+                      >
+                        <span className={active > 0 ? "text-ink" : ""}>{active}</span>/{group.patterns.length}
+                      </span>
+                    </div>
+                    <div className="nums mt-0.5 truncate pl-5 text-[11.5px] text-dim">
+                      CPU {group.mask === 0n ? t("全部") : maskToCpuList(group.mask)}
+                    </div>
+                  </RailItem>
+                </motion.div>
+              );
+            })}
+          </AnimatePresence>
+        </div>
+
         {groups.length === 0 && (
-          <div className="mx-1 mt-2 rounded-xl border border-dashed border-line px-3 py-8 text-center text-[12px] leading-relaxed text-dim">
-            还没有分组
-            <br />
-            {tf("点击右上角", "Click the")} <Plus size={11} className="inline -translate-y-px" /> {tf("创建", "to create")}
+          <div className="px-3 py-6 text-[12px] leading-relaxed text-muted">
+            {tf("还没有分组。", "No groups yet.")}
+            <button
+              type="button"
+              onClick={() => addGroup({ mask: fullMask })}
+              className="no-drag ml-1 cursor-pointer text-accent underline-offset-2 hover:underline"
+            >
+              {tf("创建第一个分组", "Create the first one")}
+            </button>
           </div>
         )}
       </div>
 
-      <div className="space-y-2 border-t border-line p-2.5">
-        <button
-          type="button"
-          role="checkbox"
-          aria-checked={optimizeOnStartup}
-          onClick={onToggleOptimizeOnStartup}
-          className="no-drag flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[11px] text-dim transition-colors hover:text-muted"
-        >
-          <span
-            className={cn(
-              "grid h-[15px] w-[15px] shrink-0 place-items-center rounded border transition-colors",
-              // text-on-accent, not text-white: the tick sits on the accent fill,
-              // which is neon yellow/green on the bright-accent themes.
-              optimizeOnStartup ? "border-accent bg-accent-bright text-on-accent" : "border-line",
-            )}
-          >
-            {optimizeOnStartup && <Check size={10} strokeWidth={3} />}
+      <div className="border-t border-line px-3 py-3">
+        <label className="flex cursor-pointer items-center justify-between gap-3 text-[12.5px] text-ink">
+          <span>
+            {tf("启动时自动启用", "Enable on launch")}
+            <span className="block text-[11.5px] text-dim">{tf("下次启动时开始绑定", "Pins from the next launch")}</span>
           </span>
-          {tf("下次启动时自动应用", "Auto-apply on next launch")}
-        </button>
-        <motion.button
-          whileHover={{ scale: 1.015 }}
-          whileTap={{ scale: 0.97 }}
-          transition={hoverPop}
-          onClick={onToggleOptimization}
-          disabled={optimizationBusy}
-          style={optimizationEnabled ? ({ "--glow": "var(--color-ok)" } as CSSProperties) : undefined}
-          className={cn(
-            "flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl py-2.5 text-[12.5px] font-semibold transition-[background-color,border-color,color] duration-150",
-            optimizationEnabled
-              ? "border border-ok/45 bg-ok/15 text-ok glow-sm"
-              : "border border-danger/40 bg-danger/15 text-danger hover:bg-danger/25",
-            optimizationBusy && "cursor-wait opacity-75",
-          )}
-        >
-          {optimizationBusy ? <Loader2 size={15} className="animate-spin" /> : <Power size={15} />}
-          {optimizationBusy
-            ? tf("应用中…", "Applying…")
-            : optimizationEnabled
-              ? "优化已启用"
-              : "已停用 · 点击启用"}
-        </motion.button>
-        <div className="flex gap-2">
+          <Toggle checked={optimizeOnStartup} onChange={onToggleOptimizeOnStartup} label={tf("下次启动时自动应用", "Auto-apply on next launch")} />
+        </label>
+        <div className="mt-3 flex gap-1">
           <button
+            type="button"
             onClick={onImport}
-            className="no-drag flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-line bg-surface2 py-1.5 text-[11.5px] text-muted transition-colors hover:border-line-strong hover:bg-surface3 hover:text-ink"
+            className="no-drag flex h-7 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md text-[12px] text-muted transition-colors hover:bg-surface2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
           >
-            <Upload size={13} /> 导入
+            <Upload size={13} /> {t("导入")}
           </button>
           <button
+            type="button"
             onClick={onExport}
-            className="no-drag flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-line bg-surface2 py-1.5 text-[11.5px] text-muted transition-colors hover:border-line-strong hover:bg-surface3 hover:text-ink"
+            className="no-drag flex h-7 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md text-[12px] text-muted transition-colors hover:bg-surface2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
           >
-            <Download size={13} /> 导出
+            <Download size={13} /> {t("导出")}
           </button>
         </div>
       </div>

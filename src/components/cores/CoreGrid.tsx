@@ -1,7 +1,6 @@
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
-import { isLightTheme } from "../../lib/colors";
-import { useTf } from "../../lib/i18n";
+import { useT, useTf } from "../../lib/i18n";
 import { clusterName, clusterTag, clusterTone, maskFromIds, maskHas, toggleBit } from "../../lib/cpu";
 import type { CpuTopology } from "../../lib/ipc";
 
@@ -12,33 +11,17 @@ interface CoreGridProps {
 }
 
 const presetClass =
-  "no-drag cursor-pointer rounded-md border border-line bg-surface2 px-2.5 py-1 text-[11px] font-medium text-muted transition-[background-color,border-color,color] duration-150 hover:border-line-strong hover:bg-surface3 hover:text-ink active:scale-[0.97]";
+  "no-drag h-7 cursor-pointer rounded-md bg-surface2 px-2.5 text-[12px] text-muted shadow-[inset_0_0_0_1px_var(--color-line)] transition-colors duration-150 hover:bg-surface3 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60";
 
-// Color classes per cluster tone (performance / secondary / neutral).
-// `glow` (the neon box-shadow) is split out so it can be dropped in light mode,
-// where a colored halo on a white grid reads as muddy.
+// Selected-cell classes per cluster tone (performance / secondary / neutral).
 const TONE = {
-  vcache: {
-    text: "text-vcache",
-    dot: "bg-vcache",
-    on: "border-vcache/55 bg-vcache/20 text-vcache",
-    glow: "shadow-[0_0_10px_-1px_color-mix(in_oklch,var(--color-vcache)_45%,transparent)]",
-  },
-  freq: {
-    text: "text-freq",
-    dot: "bg-freq",
-    on: "border-freq/55 bg-freq/20 text-freq",
-    glow: "shadow-[0_0_10px_-1px_color-mix(in_oklch,var(--color-freq)_45%,transparent)]",
-  },
-  neutral: {
-    text: "text-accent",
-    dot: "bg-accent",
-    on: "border-accent/55 bg-accent/20 text-accent",
-    glow: "shadow-[0_0_10px_-1px_color-mix(in_oklch,var(--color-accent)_45%,transparent)]",
-  },
+  vcache: { dot: "bg-vcache", on: "bg-vcache/22 text-ink shadow-[inset_0_0_0_1.5px_var(--color-vcache)]" },
+  freq: { dot: "bg-freq", on: "bg-freq/22 text-ink shadow-[inset_0_0_0_1.5px_var(--color-freq)]" },
+  neutral: { dot: "bg-accent", on: "bg-accent/22 text-ink shadow-[inset_0_0_0_1.5px_var(--color-accent)]" },
 } as const;
 
 export function CoreGrid({ topo, mask, onChange }: CoreGridProps) {
+  const t = useT();
   const tf = useTf();
   const allMask = maskFromIds(topo.logical.map((l) => l.id));
   const vcache = topo.ccds.find((c) => c.isVcache);
@@ -48,9 +31,9 @@ export function CoreGrid({ topo, mask, onChange }: CoreGridProps) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <span className="hud-label text-[10px] text-dim">CORE MAP · 核心映射</span>
-        <span className="nums text-[11px] text-muted">
-          <span className="text-accent">{selectedCount}</span> / {topo.logical.length} {tf("已选", "selected")}
+        <span className="text-[12.5px] text-muted">{tf("点击核心切换；分组内进程只会运行在选中的核心上。", "Click cores to toggle; the group's processes run only on selected cores.")}</span>
+        <span className="nums shrink-0 text-[12px] text-muted">
+          <span className="text-ink">{selectedCount}</span> / {topo.logical.length} {tf("已选", "selected")}
         </span>
       </div>
       {topo.ccds.map((ccd) => {
@@ -61,16 +44,16 @@ export function CoreGrid({ topo, mask, onChange }: CoreGridProps) {
         const tag = clusterTag(ccd);
         const onInCluster = ccd.logicalCpus.filter((id) => maskHas(mask, id)).length;
         return (
-          <div key={ccd.ccdId} className="hud-frame rounded-xl border border-line bg-surface2/30 p-3">
+          <div key={ccd.ccdId} className="border-t border-line pt-3">
             <div className="mb-2.5 flex items-center justify-between">
-              <div className="flex items-center gap-2 text-[11.5px]">
-                <span className={cn("h-2 w-2 rounded-full glow-sm", tone.dot)} />
-                <span className="font-semibold text-ink">{name}</span>
-                {tag && <span className={cn("hud-label text-[9.5px]", tone.text)}>{tag}</span>}
-                <span className="nums text-[10.5px] text-dim">{onInCluster}/{ccd.logicalCpus.length}</span>
+              <div className="flex items-center gap-2 text-[12px]">
+                <span className={cn("h-2 w-2 rounded-full", tone.dot)} />
+                <span className="font-medium text-ink">{t(name)}</span>
+                {tag && <span className="text-dim">{t(tag)}</span>}
+                <span className="nums text-dim">{onInCluster}/{ccd.logicalCpus.length}</span>
               </div>
               <button className={presetClass} onClick={() => onChange(maskFromIds(ccd.logicalCpus))}>
-                {multiCluster ? "仅此组" : "全选"}
+                {multiCluster ? t("仅此组") : t("全选")}
               </button>
             </div>
             <div className="grid grid-cols-8 gap-1.5">
@@ -79,14 +62,13 @@ export function CoreGrid({ topo, mask, onChange }: CoreGridProps) {
                 return (
                   <motion.button
                     key={id}
-                    whileTap={{ scale: 0.86 }}
+                    whileTap={{ scale: 0.92 }}
+                    aria-pressed={on}
                     onClick={() => onChange(toggleBit(mask, id))}
                     title={`CPU ${id}`}
                     className={cn(
-                      "nums grid h-8 cursor-pointer place-items-center rounded-md border text-[11px] font-medium transition-[background-color,border-color,color,box-shadow] duration-150",
-                      on
-                        ? cn(tone.on, !isLightTheme() && tone.glow)
-                        : "border-line bg-surface2 text-dim hover:border-line-strong hover:bg-surface3 hover:text-muted",
+                      "nums grid h-8 cursor-pointer place-items-center rounded-md text-[12px] transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
+                      on ? tone.on : "bg-surface2 text-dim shadow-[inset_0_0_0_1px_var(--color-line)] hover:bg-surface3 hover:text-muted",
                     )}
                   >
                     {id}
@@ -98,7 +80,7 @@ export function CoreGrid({ topo, mask, onChange }: CoreGridProps) {
         );
       })}
 
-      <div className="flex flex-wrap gap-2 pt-0.5">
+      <div className="flex flex-wrap gap-2 border-t border-line pt-3">
         <button className={presetClass} onClick={() => onChange(allMask)}>
           全选
         </button>

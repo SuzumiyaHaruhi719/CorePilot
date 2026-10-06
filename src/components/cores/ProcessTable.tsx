@@ -1,4 +1,3 @@
-import { ArrowDown, ArrowUp } from "lucide-react";
 import { memo, useMemo, type MouseEvent } from "react";
 import { cn } from "../../lib/cn";
 import { groupColor } from "../../lib/colors";
@@ -8,7 +7,7 @@ import { formatBytes } from "../../lib/format";
 import type { CpuTopology, ProcInfo } from "../../lib/ipc";
 import { useGroups, type GroupRule } from "../../store/groups";
 import { useSettings } from "../../store/settings";
-import { TableBodyState } from "../taskmgr/TmProcessTable";
+import { SortHead as Head, TABLE, TABLE_HEAD, TABLE_ROW, TableBodyState } from "../ui/Table";
 
 export type SortKey = "name" | "group" | "threads" | "cpu" | "gpu" | "gpuMem" | "mem" | "power";
 
@@ -30,6 +29,9 @@ interface ProcessTableProps {
   loading?: boolean;
   /** First process read failed — show a retry/error state. */
   error?: boolean;
+  /** Empty-state copy (defaults to the search-miss message). */
+  emptyLabel?: string;
+  emptyHint?: string;
 }
 
 // The 分组 column is only present in the 全部进程 view; both literal templates
@@ -75,32 +77,6 @@ function HwThreads({ mask, topo, tf }: { mask: bigint; topo: CpuTopology | null;
       <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dot)} />
       <span className="nums text-muted">{c.count}</span>
     </span>
-  );
-}
-
-interface HeadProps {
-  k: SortKey;
-  label: string;
-  sortKey: SortKey;
-  sortDir: "asc" | "desc";
-  onSort: (k: SortKey) => void;
-  align?: "left" | "right";
-}
-
-function Head({ k, label, sortKey, sortDir, onSort, align = "right" }: HeadProps) {
-  const active = sortKey === k;
-  return (
-    <button
-      onClick={() => onSort(k)}
-      className={cn(
-        "hud-label no-drag flex cursor-pointer items-center gap-1 rounded-sm text-[9.5px] transition-colors hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60",
-        align === "right" ? "justify-end" : "justify-start",
-        active ? "text-accent" : "text-muted",
-      )}
-    >
-      {label}
-      {active && (sortDir === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
-    </button>
   );
 }
 
@@ -172,19 +148,18 @@ const Row = memo(function Row({
       onClick={() => onToggle(p.pid)}
       onContextMenu={(e) => onRowContextMenu?.(e, p)}
       className={cn(
-        "grid cursor-pointer items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] transition-colors",
+        "cursor-pointer py-[7px]",
+        TABLE_ROW,
         ROW_CV,
         cols,
-        isSelected
-          ? "bg-accent/10 shadow-[inset_2px_0_0_0_var(--color-accent)]"
-          : "hover:bg-surface2/50",
+        isSelected && "bg-accent/10 hover:bg-accent/14",
         offline && "opacity-65",
       )}
     >
       <span
         className={cn(
-          "grid h-4 w-4 place-items-center rounded border transition-colors",
-          isSelected ? "border-accent bg-accent" : "border-line-strong",
+          "grid h-4 w-4 place-items-center rounded-[4px] transition-colors duration-100",
+          isSelected ? "bg-accent" : "shadow-[inset_0_0_0_1.5px_var(--color-dim)]",
         )}
       >
         {/* bg-on-accent, not bg-white: this square sits ON the accent fill, and
@@ -207,8 +182,8 @@ const Row = memo(function Row({
           {p.name}
         </span>
         {offline && (
-          <span className="shrink-0 rounded-full border border-line-strong/60 px-1.5 py-px text-[10px] font-medium text-dim">
-            未运行
+          <span className="shrink-0 rounded bg-surface3 px-1.5 text-[11px] font-medium leading-5 text-dim">
+            {tf("未运行", "Not running")}
           </span>
         )}
       </div>
@@ -216,7 +191,7 @@ const Row = memo(function Row({
       {showGroup &&
         (group ? (
           <span
-            className="max-w-full justify-self-start truncate rounded-full px-2 py-0.5 text-[11px] font-medium"
+            className="max-w-full justify-self-start truncate rounded px-1.5 text-[11.5px] font-medium leading-5"
             style={{
               background: `color-mix(in oklch, ${groupColor(group.hue)} 16%, transparent)`,
               color: groupColor(group.hue),
@@ -238,10 +213,10 @@ const Row = memo(function Row({
           <span className="relative h-1 w-8 overflow-hidden rounded-full bg-surface3">
             <span
               className={cn(
-                "absolute inset-y-0 left-0 rounded-full transition-colors",
+                "absolute inset-0 origin-left rounded-full transition-[transform,background-color] duration-300",
                 p.cpu >= 60 ? "bg-warn" : "bg-accent",
               )}
-              style={{ width: `${Math.min(p.cpu, 100)}%` }}
+              style={{ transform: `scaleX(${Math.min(p.cpu, 100) / 100})` }}
             />
           </span>
           <span className="nums w-[38px] text-right text-ink">{p.cpu.toFixed(1)}</span>
@@ -268,6 +243,8 @@ export function ProcessTable({
   showGroup = false,
   loading,
   error,
+  emptyLabel = "没有匹配的进程",
+  emptyHint,
 }: ProcessTableProps) {
   // One language subscription for the whole table instead of one `useTf()` per
   // row (every row previously subscribed to the settings store just to format a
@@ -297,19 +274,17 @@ export function ProcessTable({
   }, [groups]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/40">
-      <div
-        className={cn(
-          "grid items-center gap-2 border-b border-line bg-surface2/60 px-3 py-2.5",
-          COLS,
-        )}
-      >
+    <div className={TABLE}>
+      <div className={cn(TABLE_HEAD, COLS)}>
         <button
+          type="button"
           onClick={onToggleAll}
-          title="全选 / 取消全选"
+          title={tf("全选 / 取消全选", "Select all / none")}
+          aria-label={tf("全选 / 取消全选", "Select all / none")}
+          aria-pressed={allOn}
           className={cn(
-            "grid h-4 w-4 cursor-pointer place-items-center rounded border transition-colors",
-            allOn ? "border-accent bg-accent" : "border-line-strong hover:border-accent/60",
+            "no-drag grid h-4 w-4 cursor-pointer place-items-center rounded-[4px] transition-colors duration-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
+            allOn ? "bg-accent" : "shadow-[inset_0_0_0_1.5px_var(--color-dim)] hover:shadow-[inset_0_0_0_1.5px_var(--color-muted)]",
           )}
         >
           {/* On the accent fill — see the row checkbox above. */}
@@ -345,7 +320,8 @@ export function ProcessTable({
           <TableBodyState
             loading={loading}
             error={error}
-            emptyLabel="没有匹配的进程"
+            emptyLabel={emptyLabel}
+            emptyHint={emptyHint}
           />
         )}
       </div>

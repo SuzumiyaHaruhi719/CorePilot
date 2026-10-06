@@ -292,6 +292,7 @@ if (tab) {
   void import("../store/ui").then(({ useUi }) => {
     const go = () => {
       useUi.getState().setTab(tab as never);
+      if (params.get("group") === "all") setTimeout(() => void import("../store/groups").then(({ useGroups }) => useGroups.getState().select(null)), 1500);
       const sec = params.get("sec");
       if (sec) useUi.setState(tab === "monitor" ? { monitorSub: sec as never } : { taskmgrSec: sec as never });
     };
