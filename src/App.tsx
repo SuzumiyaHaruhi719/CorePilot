@@ -33,6 +33,8 @@ import { Tuning } from "./tabs/Tuning";
 import { useGpuProfiles } from "./store/gpuProfiles";
 import { useGpuOcGuard, type GpuOcBlock } from "./store/gpuOcGuard";
 import { useFanProfiles } from "./store/fanProfiles";
+import { useFanAutotune } from "./store/fanAutotune";
+import type { PassiveAdjustment } from "./lib/ipc";
 import {
   TASKBAR_DEFAULTS,
   TBMON_DEFAULTS,
@@ -281,6 +283,29 @@ function App() {
     return () => {
       un?.();
       if (retry) clearTimeout(retry);
+    };
+  }, []);
+
+  // Passive-learning fan corrections arrive from the backend whether or not the
+  // Fan tab is open (passive.rs applies the model correction regardless), so the
+  // listener lives here; on the Fan tab only, hand-edit detection still pauses it.
+  useEffect(() => {
+    // `disposed` guards the unmount-vs-late-promise race.
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<PassiveAdjustment>("fan-autotune-passive", (e) => {
+      const s = useFanAutotune.getState();
+      if (!s.passiveEnabled || s.passivePaused || !s.result) return;
+      s.applyTuned(e.payload.curves, s.result.cpuSourceId ?? null, s.result.gpuSourceId ?? null);
+      s.setResult({ ...s.result, curves: e.payload.curves });
+      s.addPassiveLog({ atMs: Date.now(), axis: e.payload.axis, deltaC: e.payload.deltaC, medianResidualC: e.payload.medianResidualC });
+    }).then((u) => {
+      if (disposed) u();
+      else unlisten = u;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 

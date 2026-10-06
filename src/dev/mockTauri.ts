@@ -267,6 +267,34 @@ if (!store.has("corepilot-perf-history")) {
   store.set("corepilot-perf-history", JSON.stringify({ state: { sessions: rows }, version: 2 }));
 }
 
+// Fans: CPU Fan on a curve, CPU OPT manual, the rest on BIOS auto.
+if (!store.has("corepilot-fan-profiles")) {
+  const curve = [
+    { tempC: 30, duty: 25 },
+    { tempC: 50, duty: 35 },
+    { tempC: 65, duty: 55 },
+    { tempC: 78, duty: 80 },
+    { tempC: 88, duty: 100 },
+  ];
+  store.set(
+    "corepilot-fan-profiles",
+    JSON.stringify({
+      state: {
+        configs: {
+          "/lpc/nct6799d/control/0": { mode: "curve", manualPct: 50, tempSourceId: "/amdcpu/0/temperature/2", curve, minDuty: 20, spinUpPct: 70, spinDownPct: 30 },
+          "/lpc/nct6799d/control/1": { mode: "manual", manualPct: 45, tempSourceId: null, curve, minDuty: 20, spinUpPct: 100, spinDownPct: 100 },
+        },
+        labels: {},
+        spunFans: [],
+        applyOnStartup: true,
+        profiles: [{ id: "p1", name: "游戏全速", configs: {} }],
+        activeProfileId: "preset-standard",
+      },
+      version: 1,
+    }),
+  );
+}
+
 // URL overrides are applied to the persisted blobs BEFORE the stores hydrate.
 const params = new URLSearchParams(location.search);
 const patchStore = (key: string, patch: Record<string, unknown>) => {

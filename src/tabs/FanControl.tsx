@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Eye, EyeOff, Fan, Gauge, Info, Layers, Loader2, Moon, Pencil, RefreshCw, RotateCcw, Save, Sparkles, Thermometer, Trash2, Wind } from "lucide-react";
+import { AlertTriangle, Check, Eye, EyeOff, Fan, Gauge, Info, Layers, Loader2, Moon, Pencil, Plus, RefreshCw, RotateCcw, Save, Sparkles, Thermometer, Trash2, Wind } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -7,15 +7,16 @@ import { FanCurveEditor } from "../components/fans/FanCurveEditor";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
 import { Segmented } from "../components/ui/Segmented";
-import { Slider } from "../components/ui/Slider";
+import { Panel } from "../components/ui/Panel";
+import { Meter } from "../components/ui/Readout";
+import { RangeInput, Slider } from "../components/ui/Slider";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { curvesDiverge } from "../lib/autotuneUtils";
 import { cn } from "../lib/cn";
-import { hueColor, isLightTheme } from "../lib/colors";
 import { useT, useTf } from "../lib/i18n";
-import { hoverPop } from "../lib/motion";
-import { api, withTimeout, type FanCalibProgress, type FanCalibration, type FanChannel, type FanCurvePoint, type FanInfo, type FanMode, type FanTempSource, type PassiveAdjustment } from "../lib/ipc";
+import { easeOut } from "../lib/motion";
+import { api, withTimeout, type FanCalibProgress, type FanCalibration, type FanChannel, type FanCurvePoint, type FanInfo, type FanMode, type FanTempSource } from "../lib/ipc";
 import { useUiActive } from "../hooks/useUiActive";
 import { useFanAutotune } from "../store/fanAutotune";
 import { useSettings } from "../store/settings";
@@ -57,12 +58,6 @@ function pickDefaultTempSource(temps: FanTempSource[]): string | null {
   return (cpu ?? temps[0]).id;
 }
 
-function tempHue(t: number): number {
-  if (t >= 80) return 22;
-  if (t >= 65) return 55;
-  return 200;
-}
-
 interface ChannelCardProps {
   channel: FanChannel;
   config: FanConfig;
@@ -74,6 +69,7 @@ interface ChannelCardProps {
 }
 
 function ChannelCard({ channel, config, temps, label, onChange, onRename }: ChannelCardProps) {
+  const t = useT();
   const tf = useTf();
   const locked = !channel.controllable;
   const [editing, setEditing] = useState(false);
@@ -115,25 +111,19 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
   const spinning = !locked && config.mode !== "auto";
   const rpm = channel.rpm != null ? Math.round(channel.rpm) : null;
   const pct = channel.pct != null ? Math.round(channel.pct) : null;
+  // The glyph turns at a rate that tracks the real fan: faster fan, faster spin.
+  const spinSec = rpm && rpm > 0 ? Math.max(0.5, Math.min(4, 2400 / rpm)) : 0;
 
   return (
-    <div
-      className={cn(
-        "hud-frame glass hairline relative overflow-hidden rounded-2xl p-4 transition-colors duration-200",
-        locked && "opacity-60",
-      )}
-    >
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5">
-          <span
-            className={cn(
-              "grid h-9 w-9 place-items-center rounded-lg transition-colors duration-200",
-              spinning ? "bg-accent/20 text-accent glow-sm" : "bg-surface3 text-dim",
-            )}
-            style={spinning ? ({ "--glow": "var(--color-accent)" } as React.CSSProperties) : undefined}
-          >
-            <Fan size={17} className={spinning ? "animate-spin-slow" : ""} />
-          </span>
+    <section className={cn("glass rounded-xl", locked && "opacity-60")}>
+      <header className="flex items-center justify-between gap-4 px-4 pb-3 pt-3.5">
+        <div className="flex min-w-0 items-center gap-3">
+          <Fan
+            size={20}
+            strokeWidth={1.6}
+            className={cn("shrink-0 transition-colors", spinning ? "text-accent" : "text-dim", spinSec > 0 && "animate-spin-slow")}
+            style={spinSec > 0 ? { animationDuration: `${spinSec}s` } : undefined}
+          />
           <div className="min-w-0">
             {editing ? (
               <input
@@ -147,181 +137,159 @@ function ChannelCard({ channel, config, temps, label, onChange, onRename }: Chan
                 }}
                 placeholder={channel.name}
                 maxLength={24}
-                className="no-drag w-32 rounded-md border border-accent/50 bg-surface2 px-1.5 py-0.5 text-[13px] font-semibold text-ink outline-none glow-sm"
+                aria-label={tf("风扇名称", "Fan name")}
+                className="field no-drag h-7 w-36 px-2 text-[13px] font-semibold"
               />
             ) : (
               <button
                 type="button"
                 onClick={startEdit}
-                title="点击重命名"
-                className="no-drag group flex cursor-pointer items-center gap-1.5 text-left"
+                title={tf("点击重命名", "Click to rename")}
+                className="no-drag group flex max-w-full cursor-pointer items-center gap-1.5 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
               >
-                <span className="text-[13.5px] font-semibold text-ink underline decoration-dotted decoration-dim/40 underline-offset-4 transition-colors group-hover:decoration-accent">{displayName}</span>
-                <Pencil size={12} className="text-dim/70 transition-colors group-hover:text-accent" />
+                <span className="truncate text-[13.5px] font-semibold text-ink">{displayName}</span>
+                <Pencil size={12} className="shrink-0 text-dim opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
               </button>
             )}
-            <div className="text-[10.5px] text-dim">
+            <div className="truncate text-[11.5px] text-dim">
               {channel.hw}
               {label ? ` · ${channel.name}` : ""}
             </div>
           </div>
         </div>
-        <div className="flex items-stretch gap-2">
-          <div className="rounded-lg border border-line bg-surface2/50 px-2.5 py-1 text-right">
-            <div className="hud-label text-[8.5px] text-dim">转速</div>
-            <div className="nums text-[15px] font-semibold leading-tight text-accent" style={{ textShadow: rpm != null && !isLightTheme() ? "0 0 10px color-mix(in oklch, var(--color-accent) 30%, transparent)" : undefined }}>
-              {rpm ?? "—"}
-              <span className="ml-0.5 text-[9.5px] font-normal text-dim">RPM</span>
+        <div className="flex shrink-0 items-baseline gap-4 text-right">
+          <div>
+            <div className="nums text-[22px] leading-none text-ink">
+              {rpm ?? <span className="text-dim">—</span>}
+              <span className="ml-1 text-[11px] text-dim">RPM</span>
             </div>
           </div>
-          <div className="rounded-lg border border-line bg-surface2/50 px-2.5 py-1 text-right">
-            <div className="hud-label text-[8.5px] text-dim">占空比</div>
-            <div className="nums text-[15px] font-semibold leading-tight text-ink">
-              {pct ?? "—"}
-              <span className="ml-0.5 text-[9.5px] font-normal text-dim">%</span>
-            </div>
+          <div className="nums w-12 text-[15px] leading-none text-muted">
+            {pct ?? "—"}
+            <span className="ml-0.5 text-[11px] text-dim">%</span>
           </div>
         </div>
-      </div>
+      </header>
 
-      {locked ? (
-        <div className="flex items-center gap-2 rounded-lg border border-warn/25 bg-warn/10 px-3 py-2 text-[11.5px] text-warn">
-          <AlertTriangle size={13} className="shrink-0" /> 此风扇接口被主板固件锁定，无法软件调速（仅可读取转速）。
-        </div>
-      ) : (
-        <>
-          <Segmented id={`fan-mode-${channel.id}`} value={config.mode} options={MODE_OPTIONS} onChange={setMode} />
-
-          {config.mode === "manual" && (
-            <div className="mt-3">
-              <Slider
-                label="手动转速"
-                value={config.manualPct}
-                min={MIN_SAFE_DUTY}
-                max={100}
-                unit="%"
-                onChange={(v) => onChange({ manualPct: v })}
-              />
+      <div className="border-t border-line px-4 pb-4 pt-3">
+        {locked ? (
+          <div className="flex items-center gap-2 text-[12.5px] text-warn">
+            <AlertTriangle size={14} className="shrink-0" /> 此风扇接口被主板固件锁定，无法软件调速（仅可读取转速）。
+          </div>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <Segmented id={`fan-mode-${channel.id}`} value={config.mode} options={MODE_OPTIONS} onChange={setMode} />
+              {config.mode === "curve" && liveTemp != null && (
+                <span className="nums flex items-center gap-1.5 text-[12.5px] text-muted" title={tf("当前温度 → 曲线目标转速", "Current temperature → curve target")}>
+                  <span className="live-dot text-cyan" />
+                  <span className={cn(liveTemp >= 80 ? "text-danger" : liveTemp >= 65 ? "text-warn" : "text-ink")}>{Math.round(liveTemp)}°C</span>
+                  <span className="text-dim">→</span>
+                  <span className="text-ink">{liveDuty != null ? Math.round(liveDuty) : "—"}%</span>
+                </span>
+              )}
             </div>
-          )}
 
-          {config.mode === "curve" && (
-            <div className="mt-3 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <label className="flex items-center gap-2 text-[11.5px] text-muted">
-                  <Thermometer size={13} className="text-warn" /> 温度源
-                  <select
-                    value={config.tempSourceId ?? ""}
-                    onChange={(e) => onChange({ tempSourceId: e.target.value })}
-                    className="no-drag cursor-pointer rounded-lg border border-line bg-surface2 px-2 py-1 text-[12px] text-ink outline-none transition-colors hover:border-line-strong focus:border-accent/50"
-                  >
-                    {temps.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name}
-                        {t.c != null ? ` (${Math.round(t.c)}°C)` : ""}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {liveTemp != null && (
-                  <span
-                    className="nums inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11.5px] font-medium"
-                    style={{
-                      background: `color-mix(in oklch, ${hueColor(tempHue(liveTemp), 82, 0.13)} 14%, transparent)`,
-                      borderColor: `color-mix(in oklch, ${hueColor(tempHue(liveTemp), 82, 0.13)} 35%, transparent)`,
-                      color: hueColor(tempHue(liveTemp), 82, 0.13),
-                    }}
-                  >
-                    <span
-                      className="h-1.5 w-1.5 animate-pulse rounded-full"
-                      style={{ background: hueColor(tempHue(liveTemp), 82, 0.13) }}
+            {config.mode === "manual" && (
+              <div className="mt-4">
+                <Slider label="手动转速" value={config.manualPct} min={MIN_SAFE_DUTY} max={100} unit="%" onChange={(v) => onChange({ manualPct: v })} />
+              </div>
+            )}
+
+            {config.mode === "curve" && (
+              <div className="mt-3 space-y-4">
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="flex min-w-0 items-center gap-2 text-[12.5px] text-muted">
+                    <Thermometer size={14} className="shrink-0 text-dim" /> {t("温度源")}
+                    <select
+                      value={config.tempSourceId ?? ""}
+                      onChange={(e) => onChange({ tempSourceId: e.target.value })}
+                      className="field no-drag h-7 min-w-0 cursor-pointer pr-6 text-[12px]"
+                    >
+                      {temps.map((tp) => (
+                        <option key={tp.id} value={tp.id}>
+                          {tp.name}
+                          {tp.c != null ? ` (${Math.round(tp.c)}°C)` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {config.curve2 && config.curve2.length > 0 && (
+                    <Segmented
+                      id={`fan-curvesel-${channel.id}`}
+                      value={activeCurve}
+                      options={[
+                        { value: "primary", label: tf("CPU 源", "CPU source") },
+                        { value: "gpu", label: tf("GPU 辅助", "GPU assist") },
+                      ]}
+                      onChange={(v) => setActiveCurve(v as "primary" | "gpu")}
                     />
-                    {Math.round(liveTemp)}°C → {liveDuty != null ? Math.round(liveDuty) : "—"}%
-                  </span>
+                  )}
+                </div>
+
+                {activeCurve === "primary" || !config.curve2?.length ? (
+                  <FanCurveEditor
+                    points={effectiveCurve}
+                    onChange={setDraftCurve}
+                    onCommit={(curve) => {
+                      setDraftCurve(null);
+                      onChange({ curve });
+                    }}
+                    minDuty={config.minDuty}
+                    live={liveTemp != null && liveDuty != null ? { tempC: liveTemp, duty: liveDuty } : null}
+                  />
+                ) : (
+                  <FanCurveEditor
+                    points={config.curve2 ?? []}
+                    onChange={() => undefined}
+                    onCommit={(curve2) => onChange({ curve2 })}
+                    minDuty={config.minDuty}
+                    live={
+                      gpuLiveTemp != null
+                        ? { tempC: gpuLiveTemp, duty: Math.max(config.minDuty, interpCurve(config.curve2 ?? [], gpuLiveTemp)) }
+                        : null
+                    }
+                  />
                 )}
-              </div>
 
-              {config.curve2 && config.curve2.length > 0 && (
-                <Segmented
-                  id={`fan-curvesel-${channel.id}`}
-                  value={activeCurve}
-                  options={[
-                    { value: "primary", label: tf("CPU 源", "CPU source") },
-                    { value: "gpu", label: tf("GPU 辅助", "GPU assist") },
-                  ]}
-                  onChange={(v) => setActiveCurve(v as "primary" | "gpu")}
-                />
-              )}
-
-              {activeCurve === "primary" || !config.curve2?.length ? (
-                <FanCurveEditor
-                  points={effectiveCurve}
-                  onChange={setDraftCurve}
-                  onCommit={(curve) => {
-                    setDraftCurve(null);
-                    onChange({ curve });
-                  }}
-                  minDuty={config.minDuty}
-                  live={liveTemp != null && liveDuty != null ? { tempC: liveTemp, duty: liveDuty } : null}
-                />
-              ) : (
-                <FanCurveEditor
-                  points={config.curve2 ?? []}
-                  onChange={() => undefined}
-                  onCommit={(curve2) => onChange({ curve2 })}
-                  minDuty={config.minDuty}
-                  live={
-                    gpuLiveTemp != null
-                      ? { tempC: gpuLiveTemp, duty: Math.max(config.minDuty, interpCurve(config.curve2 ?? [], gpuLiveTemp)) }
-                      : null
-                  }
-                />
-              )}
-
-              <Slider
-                label="最低转速下限（风扇不会低于此值）"
-                value={config.minDuty}
-                min={MIN_SAFE_DUTY}
-                max={100}
-                unit="%"
-                onChange={(v) => onChange({ minDuty: v })}
-              />
-
-              {/* Spin up / down time — how fast the fan ramps toward its curve
-                  target. Smooth (0) eases over several ticks; Immediate (100)
-                  jumps straight there (the default / classic behavior). */}
-              <div>
                 <Slider
-                  label={tf("风扇加速时间", "Fan Spin Up Time")}
-                  value={config.spinUpPct ?? 100}
-                  min={0}
+                  label="最低转速下限（风扇不会低于此值）"
+                  value={config.minDuty}
+                  min={MIN_SAFE_DUTY}
                   max={100}
-                  onChange={(v) => onChange({ spinUpPct: v })}
+                  unit="%"
+                  onChange={(v) => onChange({ minDuty: v })}
                 />
-                <div className="mt-0.5 flex justify-between text-[10.5px] text-dim">
-                  <span>{tf("平缓", "Smooth")}</span>
-                  <span>{tf("立即", "Immediate")}</span>
+
+                {/* Spin up / down time — how fast the fan ramps toward its curve
+                    target. Smooth (0) eases over several ticks; Immediate (100)
+                    jumps straight there (the default / classic behavior). */}
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {(
+                    [
+                      ["spinUpPct", tf("加速响应", "Spin-up")],
+                      ["spinDownPct", tf("减速响应", "Spin-down")],
+                    ] as const
+                  ).map(([key, title]) => (
+                    <div key={key}>
+                      <div className="mb-1 flex items-baseline justify-between text-[12.5px] text-muted">
+                        <span>{title}</span>
+                        <span className="nums text-[13px] text-ink">{config[key] ?? 100}</span>
+                      </div>
+                      <RangeInput label={title} value={config[key] ?? 100} min={0} max={100} ticks={false} onChange={(v) => onChange({ [key]: v })} />
+                      <div className="flex justify-between text-[11px] text-dim">
+                        <span>{tf("平缓", "Smooth")}</span>
+                        <span>{tf("立即", "Immediate")}</span>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
-
-              <div>
-                <Slider
-                  label={tf("风扇减速时间", "Fan Spin Down Time")}
-                  value={config.spinDownPct ?? 100}
-                  min={0}
-                  max={100}
-                  onChange={(v) => onChange({ spinDownPct: v })}
-                />
-                <div className="mt-0.5 flex justify-between text-[10.5px] text-dim">
-                  <span>{tf("平缓", "Smooth")}</span>
-                  <span>{tf("立即", "Immediate")}</span>
-                </div>
-              </div>
-            </div>
-          )}
-        </>
-      )}
-    </div>
+            )}
+          </>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -451,28 +419,6 @@ export function FanControl() {
     };
   }, [pollMs]);
 
-  // Passive-learning adjustments arrive from the backend: apply + log.
-  useEffect(() => {
-    // `disposed` guards the unmount-vs-late-promise race: if cleanup runs before
-    // listen() resolves, immediately unlisten the handle once it arrives.
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void listen<PassiveAdjustment>("fan-autotune-passive", (e) => {
-      const s = useFanAutotune.getState();
-      if (!s.passiveEnabled || s.passivePaused || !s.result) return;
-      s.applyTuned(e.payload.curves, s.result.cpuSourceId ?? null, s.result.gpuSourceId ?? null);
-      s.setResult({ ...s.result, curves: e.payload.curves });
-      s.addPassiveLog({ atMs: Date.now(), axis: e.payload.axis, deltaC: e.payload.deltaC, medianResidualC: e.payload.medianResidualC });
-    }).then((u) => {
-      if (disposed) u();
-      else unlisten = u;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
   // Hand-edit detection: configs diverging from the tuned curves pause passive
   // learning (spec §7 — never overwrite the user's manual work).
   useEffect(() => {
@@ -550,22 +496,38 @@ export function FanControl() {
     }
   }
 
+  const chip = (active: boolean, disabled: boolean) =>
+    cn(
+      "no-drag group relative flex h-8 cursor-pointer items-center gap-2 rounded-md px-3 text-[12.5px] transition-[background-color,color,box-shadow] duration-150",
+      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
+      active
+        ? "bg-accent/12 font-medium text-ink shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--color-accent)_55%,transparent)]"
+        : "bg-surface2 text-muted shadow-[inset_0_0_0_1px_var(--color-line)] hover:bg-surface3 hover:text-ink",
+      disabled && "cursor-not-allowed opacity-45",
+    );
+
   return (
     <>
       <TabHeader
-        icon={Fan}
         title="风扇控制"
         subtitle="主板风扇调速 — 手动 / 温度曲线（FanXpert 式），基于 LibreHardwareMonitor，配置自动保存"
+        actions={
+          <label className="flex cursor-pointer items-center gap-3">
+            <span className="text-right">
+              <span className="block text-[13px] font-medium text-ink">{t("启动时自动应用")}</span>
+              <span className="block text-[11.5px] text-dim">{tf("开机即按配置调速", "Fans follow your setup at boot")}</span>
+            </span>
+            <Toggle checked={applyOnStartup} onChange={setApplyOnStartup} label={tf("启动时自动应用", "Apply on startup")} />
+          </label>
+        }
       />
 
       {info && !info.available ? (
         <div className="grid flex-1 place-items-center px-6 pb-8">
-          <div className="glass hairline flex max-w-md flex-col items-center gap-3 rounded-2xl p-8 text-center">
-            <span className="grid h-12 w-12 place-items-center rounded-xl bg-warn/15 text-warn">
-              <Wind size={22} />
-            </span>
-            <div className="text-[14px] font-semibold text-ink">未检测到主板风扇传感器</div>
-            <p className="text-[12px] leading-relaxed text-dim">
+          <div className="flex max-w-sm flex-col items-center text-center">
+            <Wind size={22} className="text-warn" />
+            <div className="mt-3 text-[14px] font-semibold text-ink">未检测到主板风扇传感器</div>
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-muted">
               风扇调速依赖主板 Super-I/O 芯片（Nuvoton / ITE / Fintek）。请确认以管理员身份运行；部分笔记本或精简主板可能不暴露风扇控制。
             </p>
           </div>
@@ -573,210 +535,11 @@ export function FanControl() {
       ) : (
         <div className="min-h-0 flex-1 space-y-4 overflow-auto px-6 pb-6">
           {info && !info.supported && (
-            <div className="flex items-start gap-2 rounded-xl border border-warn/30 bg-warn/10 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-warn">
-              <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+            <div className="flex items-start gap-2.5 rounded-lg bg-warn/10 px-3.5 py-2.5 text-[12.5px] leading-relaxed text-warn ring-1 ring-inset ring-warn/25">
+              <AlertTriangle size={15} className="mt-0.5 shrink-0" />
               <p>
                 检测到风扇转速，但本主板固件未开放软件写入风扇接口（部分锁定的消费级主板如此）。可读取监控，暂不能调速 —— 这是主板固件限制，并非 CorePilot 问题。
               </p>
-            </div>
-          )}
-
-          {/* Fan profiles — one-click switch */}
-          <div className="glass hairline rounded-2xl p-3.5">
-            <div className="mb-2.5 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Layers size={13} className="text-accent" />
-                <span className="hud-label text-[10px] text-dim">风扇配置</span>
-                {profiles.length > 0 && <span className="nums text-[10px] text-dim">· {profiles.length}</span>}
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="primary"
-                  onClick={() => setShowTuneWizard(true)}
-                  disabled={calibrating || controllableIds.length === 0}
-                  title={tf("实测本机散热系统,自动调出最优温度曲线(约 25–32 分钟)", "Measure this machine's cooling and auto-tune optimal curves (≈25–32 min)")}
-                >
-                  <Sparkles size={13} /> {tf("智能调优", "Smart Tune")}
-                </Button>
-                <Button
-                  onClick={() => setShowCalibConfirm(true)}
-                  disabled={calibrating || controllableIds.length === 0}
-                  title="逐个风扇扫描转速，自动生成专属曲线（约 30 秒/风扇）"
-                >
-                  {calibrating ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />} AI 智能校准
-                </Button>
-                <Button
-                  onClick={() => setShowResetConfirm(true)}
-                  disabled={calibrating || controllableIds.length === 0}
-                  title="撤销 AI 校准 / 自定义，恢复内置默认曲线"
-                >
-                  <RotateCcw size={13} /> 重置默认曲线
-                </Button>
-                <Button onClick={updateActiveProfile} disabled={!activeProfileId} title="覆盖保存到当前所选配置">
-                  <Save size={13} /> 保存当前
-                </Button>
-                <Button onClick={() => { setNewName(""); setShowSave(true); }} title="保存为新的配置">
-                  <Layers size={13} /> 另存为
-                </Button>
-              </div>
-            </div>
-
-            {calibrating && (
-              <div className="mb-3 rounded-lg border border-accent/30 bg-accent/[0.06] px-3 py-2">
-                <div className="flex items-center gap-2 text-[11.5px] text-muted">
-                  <Loader2 size={13} className="animate-spin text-accent-bright" />
-                  <span>正在校准</span>
-                  <span className="font-medium text-ink">{calibProgress?.name ?? "…"}</span>
-                  {calibProgress && (
-                    <span className="text-dim">
-                      ({calibProgress.fanIndex + 1}/{calibProgress.fanTotal})
-                    </span>
-                  )}
-                  <span className="nums ml-auto text-dim">
-                    {calibProgress ? `${calibProgress.duty}% → ${calibProgress.rpm ?? "—"} RPM` : ""}
-                  </span>
-                </div>
-                <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-surface3">
-                  <div
-                    className="h-full rounded-full bg-accent transition-[width] duration-300"
-                    style={{ width: `${calibProgress?.duty ?? 0}%` }}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Built-in quick presets (Quiet/Turbo curves + Full Blast). */}
-            <div className="mb-3">
-              <div className="hud-label mb-1.5 text-[9.5px] text-dim">快速预设 · PRESETS</div>
-              <div className="flex flex-wrap gap-2">
-                {FAN_PRESETS.map((preset) => {
-                  const Icon = PRESET_ICON[preset.id as keyof typeof PRESET_ICON] ?? Layers;
-                  const pending = preset.id === pendingProfileId;
-                  const active = preset.id === activeProfileId && !pending;
-                  // Block overlapping fan writes: disable every preset (including
-                  // the pending one — it shows a spinner) while any apply is pending.
-                  const disabled = controllableIds.length === 0 || pendingProfileId !== null;
-                  return (
-                    <motion.button
-                      key={preset.id}
-                      whileHover={disabled ? undefined : { scale: 1.03, y: -2 }}
-                      whileTap={disabled ? undefined : { scale: 0.97 }}
-                      transition={hoverPop}
-                      disabled={disabled}
-                      onClick={() => applyPreset(preset.id, controllableIds, presetTempSourceId)}
-                      aria-pressed={active}
-                      title={preset.mode === "curve" ? "温度曲线预设(自动按温度调速)" : "全速 100%"}
-                      className={cn(
-                        "no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
-                        active
-                          ? "border-accent/50 bg-accent/12 text-accent-bright glow-sm"
-                          : "border-line bg-surface2/50 text-muted hover:bg-surface3 hover:text-ink",
-                        disabled && "cursor-not-allowed opacity-40",
-                      )}
-                    >
-                      {pending ? <Loader2 size={12} className="animate-spin" /> : <Icon size={12} />}
-                      {preset.name}
-                    </motion.button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {profiles.length === 0 ? (
-              <p className="text-[11px] leading-relaxed text-dim">
-                把每个风扇调好后点「保存当前」存为一套方案,之后即可一键切换(如「静音」「游戏全速」)。
-              </p>
-            ) : (
-              <div className="flex flex-wrap gap-2">
-                <AnimatePresence>
-                  {profiles.map((p) => {
-                    const pending = p.id === pendingProfileId;
-                    const active = p.id === activeProfileId && !pending;
-                    // Disable all profiles (including the pending one, which shows
-                    // its spinner) while an apply is in flight — no overlapping writes.
-                    const blocked = pendingProfileId !== null;
-                    return (
-                      <motion.button
-                        key={p.id}
-                        layout
-                        initial={{ opacity: 0, scale: 0.9 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0, scale: 0.85 }}
-                        whileHover={blocked ? undefined : { scale: 1.03, y: -2 }}
-                        whileTap={blocked ? undefined : { scale: 0.97 }}
-                        transition={hoverPop}
-                        disabled={blocked}
-                        onClick={() => applyProfile(p.id)}
-                        aria-pressed={active}
-                        className={cn(
-                          "no-drag group relative flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
-                          active ? "border-accent/50 bg-accent/10 glow-sm" : "border-line bg-surface2/50 hover:bg-surface3",
-                          blocked && "cursor-not-allowed opacity-50",
-                        )}
-                      >
-                        {pending ? (
-                          <Loader2 size={13} className="animate-spin text-accent-bright" />
-                        ) : (
-                          <Layers size={13} className={active ? "text-accent-bright" : "text-dim"} />
-                        )}
-                        <span className="text-[12.5px] font-medium text-ink">{p.name}</span>
-                        {active && <Check size={12} className="text-accent-bright" />}
-                        <span
-                          role="button"
-                          tabIndex={0}
-                          aria-label={tf(`删除配置 ${p.name}`, `Delete profile ${p.name}`)}
-                          onClick={(e) => { e.stopPropagation(); setDelProfile({ id: p.id, name: p.name }); }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              setDelProfile({ id: p.id, name: p.name });
-                            }
-                          }}
-                          className="ml-0.5 grid h-5 w-5 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 group-focus-within:opacity-100 group-hover:opacity-100"
-                        >
-                          <Trash2 size={11} />
-                        </span>
-                      </motion.button>
-                    );
-                  })}
-                </AnimatePresence>
-              </div>
-            )}
-          </div>
-
-          {autotune.result && (
-            <div className="glass hairline flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl px-3.5 py-2 text-[11px] text-muted">
-              <span>
-                {tf("上次智能调优", "Last smart tune")}:{" "}
-                <span className="nums text-ink">{new Date(autotune.result.finishedAtMs).toLocaleString()}</span>
-              </span>
-              <span>
-                {tf("目标", "Target")} <span className="nums text-ink">{Math.round(autotune.result.effectiveTarget)}°C</span>
-                {" · "}
-                {tf("满载实测", "validated")} <span className="nums text-ink">{Math.round(autotune.result.validation.tV * 10) / 10}°C</span>
-              </span>
-              <button
-                type="button"
-                onClick={() => void resynthNow()}
-                disabled={resynthBusy}
-                title={tf("从已存模型秒级重算并应用曲线(无需重新测量;算法更新后用这个)", "Re-solve curves from the stored model in seconds (no re-measurement; use after algorithm updates)")}
-                className="no-drag flex cursor-pointer items-center gap-1 text-[11px] text-dim transition-colors hover:text-muted disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <RefreshCw size={11} className={resynthBusy ? "animate-spin" : ""} /> {tf("重算曲线", "Re-solve")}
-              </button>
-              <label className="ml-auto flex cursor-pointer items-center gap-2">
-                {tf("被动学习", "Passive learning")}
-                {autotune.passivePaused && <span className="text-[10px] text-warn">{tf("(已暂停:检测到手动修改)", "(paused: hand-edit detected)")}</span>}
-                <Toggle checked={autotune.passiveEnabled && !autotune.passivePaused} onChange={(v) => {
-                  if (autotune.passivePaused && v) {
-                    // Re-enabling after a hand-edit re-applies the tuned curves.
-                    autotune.applyTuned(autotune.result!.curves, autotune.result!.cpuSourceId ?? null, autotune.result!.gpuSourceId ?? null);
-                  }
-                  autotune.setPassiveEnabled(v);
-                  autotune.setPassivePaused(false);
-                }} />
-              </label>
             </div>
           )}
 
@@ -789,65 +552,233 @@ export function FanControl() {
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: "auto" }}
                 exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.2, ease: easeOut }}
                 onClick={clearError}
-                title="点击关闭"
-                className="no-drag flex w-full items-start gap-2 overflow-hidden rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-left text-[11.5px] text-danger transition-colors hover:bg-danger/15"
+                title={tf("点击关闭", "Click to dismiss")}
+                className="no-drag flex w-full items-start gap-2.5 overflow-hidden rounded-lg bg-danger/10 px-3.5 py-2.5 text-left text-[12.5px] text-danger ring-1 ring-inset ring-danger/25 transition-colors hover:bg-danger/14"
               >
-                <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                <AlertTriangle size={15} className="mt-0.5 shrink-0" />
                 <span className="min-w-0">{tf(`应用风扇配置失败:${lastError}`, `Failed to apply fan profile: ${lastError}`)}</span>
               </motion.button>
             )}
           </AnimatePresence>
 
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Gauge size={13} className="text-accent" />
-              <span className="hud-label text-[10px] text-dim">风扇接口</span>
-              <span className="nums text-[10px] text-dim">· {visibleChannels.length}</span>
-              <span className="h-px flex-1 bg-line" />
+          {/* Profiles — presets + saved setups, one click applies to every fan */}
+          <Panel
+            title="风扇配置"
+            desc={tf("点击即应用到所有可调风扇", "Click to apply to every controllable fan")}
+            actions={
+              <>
+                <Button
+                  variant="primary"
+                  onClick={() => setShowTuneWizard(true)}
+                  disabled={calibrating || controllableIds.length === 0}
+                  title={tf("实测本机散热系统,自动调出最优温度曲线(约 25–32 分钟)", "Measure this machine's cooling and auto-tune optimal curves (≈25–32 min)")}
+                >
+                  <Sparkles size={14} /> {tf("智能调优", "Smart Tune")}
+                </Button>
+                <Button
+                  onClick={() => setShowCalibConfirm(true)}
+                  disabled={calibrating || controllableIds.length === 0}
+                  title="逐个风扇扫描转速，自动生成专属曲线（约 30 秒/风扇）"
+                >
+                  {calibrating && <Loader2 size={14} className="animate-spin" />} AI 智能校准
+                </Button>
+                <span className="mx-0.5 h-5 w-px bg-line" aria-hidden />
+                <Button variant="subtle" className="w-8 px-0" onClick={updateActiveProfile} disabled={!activeProfileId} title="覆盖保存到当前所选配置" ariaLabel={tf("保存当前", "Save current")}>
+                  <Save size={15} />
+                </Button>
+                <Button variant="subtle" className="w-8 px-0" onClick={() => { setNewName(""); setShowSave(true); }} title="保存为新的配置" ariaLabel={tf("另存为", "Save as")}>
+                  <Plus size={16} />
+                </Button>
+                <Button
+                  variant="subtle"
+                  className="w-8 px-0"
+                  onClick={() => setShowResetConfirm(true)}
+                  disabled={calibrating || controllableIds.length === 0}
+                  title="撤销 AI 校准 / 自定义，恢复内置默认曲线"
+                  ariaLabel={tf("重置默认曲线", "Reset default curves")}
+                >
+                  <RotateCcw size={15} />
+                </Button>
+              </>
+            }
+          >
+            <AnimatePresence>
+              {calibrating && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: 0.2, ease: easeOut }}
+                  className="overflow-hidden"
+                >
+                  <div className="mb-3 rounded-lg bg-surface2 px-3 py-2.5">
+                    <div className="flex items-center gap-2 text-[12.5px] text-muted">
+                      <Loader2 size={14} className="animate-spin text-accent" />
+                      <span>{t("正在校准")}</span>
+                      <span className="font-medium text-ink">{calibProgress?.name ?? "…"}</span>
+                      {calibProgress && (
+                        <span className="nums text-dim">
+                          {calibProgress.fanIndex + 1}/{calibProgress.fanTotal}
+                        </span>
+                      )}
+                      <span className="nums ml-auto text-dim">
+                        {calibProgress ? `${calibProgress.duty}% → ${calibProgress.rpm ?? "—"} RPM` : ""}
+                      </span>
+                    </div>
+                    <Meter className="mt-2" value={calibProgress?.duty ?? 0} />
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            <div role="radiogroup" aria-label={tf("风扇配置", "Fan profiles")} className="flex flex-wrap items-center gap-1.5">
+              {FAN_PRESETS.map((preset) => {
+                const Icon = PRESET_ICON[preset.id as keyof typeof PRESET_ICON] ?? Layers;
+                const pending = preset.id === pendingProfileId;
+                const active = preset.id === activeProfileId && !pending;
+                // Block overlapping fan writes while any apply is pending.
+                const disabled = controllableIds.length === 0 || pendingProfileId !== null;
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    disabled={disabled}
+                    onClick={() => applyPreset(preset.id, controllableIds, presetTempSourceId)}
+                    title={preset.mode === "curve" ? "温度曲线预设(自动按温度调速)" : "全速 100%"}
+                    className={chip(active, disabled)}
+                  >
+                    {pending ? <Loader2 size={13} className="animate-spin" /> : <Icon size={13} className={active ? "text-accent" : "text-dim"} />}
+                    {preset.name}
+                  </button>
+                );
+              })}
+              {profiles.length > 0 && <span className="mx-1.5 h-5 w-px bg-line" aria-hidden />}
+              <AnimatePresence initial={false}>
+                {profiles.map((p) => {
+                  const pending = p.id === pendingProfileId;
+                  const active = p.id === activeProfileId && !pending;
+                  const blocked = pendingProfileId !== null;
+                  return (
+                    <motion.div
+                      key={p.id}
+                      layout="position"
+                      initial={{ opacity: 0, scale: 0.96 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.96 }}
+                      transition={{ duration: 0.16, ease: easeOut }}
+                      className="group relative"
+                    >
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        disabled={blocked}
+                        onClick={() => applyProfile(p.id)}
+                        className={cn(chip(active, blocked), "pr-8")}
+                      >
+                        {pending ? <Loader2 size={13} className="animate-spin" /> : active ? <Check size={13} className="text-accent" /> : <Layers size={13} className="text-dim" />}
+                        {p.name}
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={tf(`删除配置 ${p.name}`, `Delete profile ${p.name}`)}
+                        onClick={() => setDelProfile({ id: p.id, name: p.name })}
+                        className="no-drag absolute right-1 top-1/2 grid h-6 w-6 -translate-y-1/2 cursor-pointer place-items-center rounded text-dim opacity-0 transition-[opacity,color,background-color] duration-150 hover:bg-danger/12 hover:text-danger focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 group-hover:opacity-100"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </motion.div>
+                  );
+                })}
+              </AnimatePresence>
             </div>
-            <div className="flex shrink-0 items-center gap-3">
-              <button
-                type="button"
-                onClick={() => void refreshFans()}
-                title="刷新风扇接口"
-                aria-label="刷新风扇接口"
-                className="no-drag flex cursor-pointer items-center gap-1.5 text-[11px] text-dim transition-colors hover:text-muted"
-              >
-                <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} /> 刷新
-              </button>
+            {profiles.length === 0 && (
+              <p className="mt-2.5 text-[12px] leading-relaxed text-dim">
+                把每个风扇调好后点「保存当前」存为一套方案,之后即可一键切换(如「静音」「游戏全速」)。
+              </p>
+            )}
+
+            {autotune.result && (
+              <div className="-mx-4 -mb-4 mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 rounded-b-xl border-t border-line bg-surface2/40 px-4 py-2.5 text-[12px] text-muted">
+                <span>
+                  {tf("上次智能调优", "Last smart tune")}{" "}
+                  <span className="nums text-ink">{new Date(autotune.result.finishedAtMs).toLocaleString()}</span>
+                </span>
+                <span>
+                  {tf("目标", "Target")} <span className="nums text-ink">{Math.round(autotune.result.effectiveTarget)}°C</span>
+                  <span className="mx-1.5 text-dim">·</span>
+                  {tf("满载实测", "validated")} <span className="nums text-ink">{Math.round(autotune.result.validation.tV * 10) / 10}°C</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void resynthNow()}
+                  disabled={resynthBusy}
+                  title={tf("从已存模型秒级重算并应用曲线(无需重新测量;算法更新后用这个)", "Re-solve curves from the stored model in seconds (no re-measurement; use after algorithm updates)")}
+                  className="no-drag flex cursor-pointer items-center gap-1.5 rounded text-[12px] text-muted transition-colors hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <RefreshCw size={12} className={resynthBusy ? "animate-spin" : ""} /> {tf("重算曲线", "Re-solve")}
+                </button>
+                <label className="ml-auto flex cursor-pointer items-center gap-2.5">
+                  <span>
+                    {tf("被动学习", "Passive learning")}
+                    {autotune.passivePaused && <span className="ml-1.5 text-warn">{tf("已暂停 · 检测到手动修改", "Paused · hand-edit detected")}</span>}
+                  </span>
+                  <Toggle
+                    checked={autotune.passiveEnabled && !autotune.passivePaused}
+                    label={tf("被动学习", "Passive learning")}
+                    onChange={(v) => {
+                      if (autotune.passivePaused && v) {
+                        // Re-enabling after a hand-edit re-applies the tuned curves.
+                        autotune.applyTuned(autotune.result!.curves, autotune.result!.cpuSourceId ?? null, autotune.result!.gpuSourceId ?? null);
+                      }
+                      autotune.setPassiveEnabled(v);
+                      autotune.setPassivePaused(false);
+                    }}
+                  />
+                </label>
+              </div>
+            )}
+          </Panel>
+
+          <div className="flex items-center justify-between gap-3 px-1 pt-1">
+            <div className="flex items-baseline gap-2">
+              <span className="text-[13px] font-semibold text-ink">{t("风扇接口")}</span>
+              <span className="nums text-[12px] text-dim">{visibleChannels.length}</span>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
               {refreshErr && (
-                <span className="flex items-center gap-1 text-[10.5px] text-danger">
-                  <AlertTriangle size={11} /> {tf("刷新失败 · 传感器服务未就绪", "Refresh failed · sensor service not ready")}
+                <span className="mr-2 flex items-center gap-1 text-[12px] text-danger">
+                  <AlertTriangle size={12} /> {tf("刷新失败 · 传感器服务未就绪", "Refresh failed · sensor service not ready")}
                 </span>
               )}
               {channels.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setShowAll((v) => !v)}
-                  className="no-drag flex cursor-pointer items-center gap-1.5 text-[11px] text-dim transition-colors hover:text-muted"
-                >
-                  {showAll ? <EyeOff size={12} /> : <Eye size={12} />}
-                  {showAll ? "仅显示活动" : hiddenCount > 0 ? tf(`显示全部 (+${hiddenCount})`, `Show all (+${hiddenCount})`) : "显示全部"}
-                </button>
+                <Button variant="subtle" size="sm" onClick={() => setShowAll((v) => !v)}>
+                  {showAll ? <EyeOff size={13} /> : <Eye size={13} />}
+                  {showAll ? t("仅显示活动") : hiddenCount > 0 ? tf(`显示全部 (+${hiddenCount})`, `Show all (+${hiddenCount})`) : t("显示全部")}
+                </Button>
               )}
-              <label className="flex shrink-0 cursor-pointer items-center gap-2 text-[11.5px] text-muted">
-                启动时自动应用
-                <Toggle checked={applyOnStartup} onChange={setApplyOnStartup} />
-              </label>
+              <Button variant="subtle" size="sm" onClick={() => void refreshFans()} ariaLabel={tf("刷新风扇接口", "Refresh fan headers")}>
+                <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} /> {t("刷新")}
+              </Button>
             </div>
           </div>
 
           {channels.length === 0 ? (
-            <div className="flex items-center gap-2.5 rounded-xl border border-dashed border-line bg-surface2/30 px-3.5 py-3 text-[11.5px] text-dim">
-              <Fan size={14} className="animate-spin-slow text-accent" /> 正在读取风扇接口…
+            <div className="grid gap-3 lg:grid-cols-2" aria-busy>
+              <div className="skeleton h-[120px] rounded-xl" />
+              <div className="skeleton h-[120px] rounded-xl" />
             </div>
           ) : visibleChannels.length === 0 ? (
-            <div className="flex items-center gap-2.5 rounded-xl border border-dashed border-line bg-surface2/30 px-3.5 py-3 text-[11.5px] text-dim">
-              <Fan size={14} className="text-dim" /> 暂未检测到有效转速的风扇接口（接口接入风扇并转动后会自动显示）。
+            <div className="flex flex-col items-center py-10 text-center">
+              <Fan size={22} className="text-dim" />
+              <p className="mt-2 text-[12.5px] text-muted">暂未检测到有效转速的风扇接口（接口接入风扇并转动后会自动显示）。</p>
             </div>
           ) : (
-            <div className="grid gap-3 lg:grid-cols-2">
+            <div className="grid items-start gap-3 lg:grid-cols-2">
               {visibleChannels.map((ch) => (
                 <ChannelCard
                   key={ch.id}
@@ -862,13 +793,13 @@ export function FanControl() {
             </div>
           )}
 
-          <div className="flex items-start gap-2 text-[11px] leading-relaxed text-dim">
-            <Info size={13} className="mt-0.5 shrink-0 text-accent/70" />
-            <p>
+          <p className="flex max-w-[110ch] items-start gap-2 text-[11.5px] leading-relaxed text-dim">
+            <Info size={13} className="mt-0.5 shrink-0" />
+            <span>
               曲线模式按所选温度源实时插值调速；手动模式固定转速；自动模式交还主板 BIOS 控制。CorePilot 退出时会把所有被接管的风扇恢复为 BIOS 默认，避免风扇被锁定在某一转速。
-              <span className="text-warn/90"> 调速会影响散热，请确保温度处于安全范围。</span>
-            </p>
-          </div>
+              <span className="text-warn"> 调速会影响散热，请确保温度处于安全范围。</span>
+            </span>
+          </p>
         </div>
       )}
 
@@ -902,9 +833,9 @@ export function FanControl() {
             }
           }}
           placeholder="配置名称，例如「静音」「游戏全速」"
-          className="no-drag w-full rounded-lg border border-line bg-surface2 px-3 py-2 text-[13px] text-ink outline-none transition-colors focus:border-accent/50"
+          className="field no-drag h-9 w-full text-[13px]"
         />
-        <p className="mt-2 text-[11.5px] text-dim">将保存当前每个风扇的模式与曲线，可随时一键切换。</p>
+        <p className="mt-2 text-[12px] text-muted">将保存当前每个风扇的模式与曲线，可随时一键切换。</p>
       </Modal>
 
       <Modal
@@ -1004,10 +935,7 @@ export function FanControl() {
             </p>
             <div className="space-y-1.5">
               {(calibResults ?? []).map((c) => (
-                <div
-                  key={c.controlId}
-                  className="flex items-center justify-between rounded-lg border border-line bg-surface2/50 px-3 py-2 text-[12px]"
-                >
+                <div key={c.controlId} className="flex items-center justify-between border-t border-line py-2 text-[12.5px] first:border-t-0">
                   <span className="font-medium text-ink">{labels[c.controlId] ?? c.name}</span>
                   {c.disconnected ? (
                     <span className="text-dim">未检测到风扇</span>

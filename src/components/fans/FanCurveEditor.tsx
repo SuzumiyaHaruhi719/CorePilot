@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { isLightTheme } from "../../lib/colors";
 import { useTf } from "../../lib/i18n";
 import type { FanCurvePoint } from "../../lib/ipc";
 
@@ -119,7 +118,7 @@ export function FanCurveEditor({ points, onChange, onCommit, live, minDuty = 0 }
   return (
     <div
       ref={wrapRef}
-      className="hud-frame no-drag w-full select-none overflow-hidden rounded-xl border border-line bg-surface2/30"
+      className="no-drag relative w-full select-none overflow-hidden rounded-lg bg-base/60 shadow-[inset_0_0_0_1px_var(--color-line)]"
     >
       <svg
         width={width}
@@ -132,28 +131,28 @@ export function FanCurveEditor({ points, onChange, onCommit, live, minDuty = 0 }
       >
         <defs>
           <linearGradient id="fan-curve-fill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--color-accent)" stopOpacity={0.22} />
-            <stop offset="100%" stopColor="var(--color-accent)" stopOpacity={0.02} />
+            <stop offset="0%" style={{ stopColor: "var(--color-accent)", stopOpacity: 0.18 }} />
+            <stop offset="100%" style={{ stopColor: "var(--color-accent)", stopOpacity: 0 }} />
           </linearGradient>
         </defs>
 
         {/* grid */}
         {[0, 25, 50, 75, 100].map((t) => (
           <g key={`v${t}`} className="text-line">
-            <line x1={xToPx(t)} y1={PAD} x2={xToPx(t)} y2={HEIGHT - PAD} stroke="currentColor" strokeWidth={1} opacity={0.5} />
-            <text x={xToPx(t)} y={HEIGHT - 8} textAnchor="middle" fill="currentColor" className="text-dim text-[9px]">{t}°</text>
+            <line x1={xToPx(t)} y1={PAD} x2={xToPx(t)} y2={HEIGHT - PAD} stroke="var(--color-line)" strokeWidth={1} />
+            <text x={xToPx(t)} y={HEIGHT - 8} textAnchor="middle" fill="currentColor" className="nums" style={{ fill: "var(--color-dim)", fontSize: 10.5 }}>{t}°</text>
           </g>
         ))}
         {[0, 25, 50, 75, 100].map((d) => (
           <g key={`h${d}`} className="text-line">
-            <line x1={PAD} y1={yToPx(d)} x2={width - PAD} y2={yToPx(d)} stroke="currentColor" strokeWidth={1} opacity={0.5} />
-            <text x={8} y={yToPx(d) + 3} textAnchor="start" fill="currentColor" className="text-dim text-[9px]">{d}</text>
+            <line x1={PAD} y1={yToPx(d)} x2={width - PAD} y2={yToPx(d)} stroke="var(--color-line)" strokeWidth={1} />
+            <text x={8} y={yToPx(d) + 3} textAnchor="start" fill="currentColor" className="nums" style={{ fill: "var(--color-dim)", fontSize: 10.5 }}>{d}</text>
           </g>
         ))}
 
         {/* edit hint */}
-        <text x={width - PAD} y={13} textAnchor="end" fill="currentColor" className="text-dim text-[8.5px]">
-          双击空白加点 · 双击点删除
+        <text x={width - PAD} y={15} textAnchor="end" style={{ fill: "var(--color-dim)", fontSize: 11 }}>
+          {tf("双击空白加点 · 双击点删除", "Double-click to add · double-click a point to remove")}
         </text>
 
         {/* min-duty floor band */}
@@ -169,26 +168,17 @@ export function FanCurveEditor({ points, onChange, onCommit, live, minDuty = 0 }
           points={linePath}
           fill="none"
           stroke="var(--color-accent)"
-          strokeWidth={2.5}
+          strokeWidth={2}
           strokeLinejoin="round"
           strokeLinecap="round"
-          style={{ filter: isLightTheme() ? "none" : "drop-shadow(0 0 5px color-mix(in oklch, var(--color-accent) 50%, transparent))" }}
         />
 
         {/* live operating point */}
         {live && (
           <g className="text-cyan">
             <line x1={liveX} y1={PAD} x2={liveX} y2={HEIGHT - PAD} stroke="currentColor" strokeWidth={1} strokeDasharray="3 3" opacity={0.6} />
-            <circle cx={liveX} cy={liveY} r={9} fill="currentColor" opacity={0.18} />
-            <circle
-              cx={liveX}
-              cy={liveY}
-              r={5}
-              fill="currentColor"
-              stroke="var(--color-base)"
-              strokeWidth={1.5}
-              style={{ filter: isLightTheme() ? "none" : "drop-shadow(0 0 6px color-mix(in oklch, var(--color-cyan) 70%, transparent))" }}
-            />
+            <circle cx={liveX} cy={liveY} r={9} fill="currentColor" opacity={0.16} />
+            <circle cx={liveX} cy={liveY} r={4.5} fill="currentColor" stroke="var(--color-base)" strokeWidth={1.5} />
           </g>
         )}
 
@@ -198,17 +188,26 @@ export function FanCurveEditor({ points, onChange, onCommit, live, minDuty = 0 }
           return (
             <g key={i}>
               {isActive && (
-                <circle cx={xToPx(p.tempC)} cy={yToPx(p.duty)} r={12} fill="var(--color-accent-bright)" opacity={0.18} />
+                <>
+                  <circle cx={xToPx(p.tempC)} cy={yToPx(p.duty)} r={13} fill="var(--color-accent)" opacity={0.16} />
+                  {/* Live readout while dragging — the exact point being set. */}
+                  <g transform={`translate(${Math.min(width - PAD - 70, Math.max(PAD, xToPx(p.tempC) - 35))}, ${Math.max(4, yToPx(p.duty) - 34)})`}>
+                    <rect width={70} height={20} rx={5} fill="var(--color-elevated)" stroke="var(--color-line-strong)" />
+                    <text x={35} y={14} textAnchor="middle" className="nums" style={{ fill: "var(--color-ink)", fontSize: 11.5 }}>
+                      {p.tempC}° → {p.duty}%
+                    </text>
+                  </g>
+                </>
               )}
               <circle
                 cx={xToPx(p.tempC)}
                 cy={yToPx(p.duty)}
-                r={isActive ? 8 : 6}
-                fill="var(--color-accent-bright)"
+                r={isActive ? 7 : 5.5}
+                fill="var(--color-elevated)"
                 className={isActive ? "cursor-grabbing" : "cursor-grab"}
-                stroke="var(--color-base)"
-                strokeWidth={2}
-                style={{ filter: isLightTheme() ? "none" : "drop-shadow(0 0 4px color-mix(in oklch, var(--color-accent-bright) 60%, transparent))", transition: "r 120ms ease-out" }}
+                stroke="var(--color-accent)"
+                strokeWidth={2.5}
+                style={{ transition: "r 120ms ease-out" }}
                 onPointerDown={(e) => {
                   e.currentTarget.setPointerCapture?.(e.pointerId);
                   setDragging(i);

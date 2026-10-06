@@ -290,10 +290,10 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
           />
 
           <div>
-            <div className="hud-label mb-1.5 text-[9.5px] text-dim">{tf("风扇分组", "FAN GROUPS")}</div>
+            <div className="hud-label mb-1.5 text-[11px] text-dim">{tf("风扇分组", "Fan groups")}</div>
             <div className="space-y-1.5">
               {controllable.map((c) => (
-                <div key={c.id} className="flex items-center justify-between gap-2 rounded-lg border border-line bg-surface2/50 px-2.5 py-1.5">
+                <div key={c.id} className="flex items-center justify-between gap-2 rounded-lg bg-surface2/60 px-2.5 py-1.5">
                   <span className="min-w-0 truncate text-[12px] text-ink">{labels[c.id] ?? c.name}</span>
                   <Segmented
                     id={`tune-group-${c.id}`}
@@ -309,7 +309,7 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
               ))}
             </div>
             {Object.entries(assign).some(([id, a]) => a === "excluded" && /pump|水泵/i.test(labels[id] ?? controllable.find((c) => c.id === id)?.name ?? "")) && (
-              <p className="mt-1.5 text-[10.5px] text-dim">
+              <p className="mt-1.5 text-[11.5px] text-dim">
                 {tf("检测到水泵接口已自动排除:水泵必须恒速,不能跟随温度曲线。", "Pump headers are auto-excluded: a pump must run at constant speed, never on a temp curve.")}
               </p>
             )}
@@ -338,9 +338,9 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
                 {progress.step}/{progress.stepTotal}
               </span>
             )}
-            {progress?.note && <span className="text-[10.5px] text-dim">{progress.note}</span>}
+            {progress?.note && <span className="text-[11.5px] text-dim">{progress.note}</span>}
             {progress?.phase === "fanCalib" && calib && (
-              <span className="nums ml-auto text-[10.5px] text-dim">
+              <span className="nums ml-auto text-[11.5px] text-dim">
                 {(labels[calib.controlId] ?? calib.name)} ({calib.fanIndex + 1}/{calib.fanTotal}) ·{" "}
                 {Math.round(calib.duty)}% → {calib.rpm != null ? Math.round(calib.rpm) : "—"} RPM
               </span>
@@ -379,7 +379,7 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
             </svg>
           )}
           {error && (
-            <div className="flex items-start gap-2 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11.5px] text-danger">
+            <div className="flex items-start gap-2 rounded-lg bg-danger/10 ring-1 ring-inset ring-danger/25 px-3 py-2 text-[11.5px] text-danger">
               <AlertTriangle size={13} className="mt-0.5 shrink-0" />
               <div className="min-w-0">
                 <p>{error}</p>
@@ -427,11 +427,11 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
 
 function Readout({ label, value, unit, warn }: { label: string; value?: number | null; unit: string; warn?: boolean }) {
   return (
-    <div className="rounded-lg border border-line bg-surface2/50 px-2.5 py-1.5">
-      <div className="hud-label text-[8.5px] text-dim">{label}</div>
+    <div className="rounded-lg bg-surface2/60 px-2.5 py-1.5">
+      <div className="hud-label text-[11px] text-dim">{label}</div>
       <div className={`nums text-[14px] font-semibold leading-tight ${warn ? "text-warn" : "text-ink"}`}>
         {value != null ? Math.round(value * 10) / 10 : "—"}
-        <span className="ml-0.5 text-[9px] font-normal text-dim">{unit}</span>
+        <span className="ml-0.5 text-[11px] font-normal text-dim">{unit}</span>
       </div>
     </div>
   );
@@ -440,7 +440,7 @@ function Readout({ label, value, unit, warn }: { label: string; value?: number |
 function WarningRow({ w, busy, onRaiseCeiling }: { w: TuneWarning; busy: boolean; onRaiseCeiling: () => void }) {
   const tf = useTf();
   return (
-    <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[11.5px] text-warn">
+    <div className="rounded-lg bg-warn/10 ring-1 ring-inset ring-warn/25 px-3 py-2 text-[11.5px] text-warn">
       <div className="flex items-start gap-2">
         <Thermometer size={13} className="mt-0.5 shrink-0" />
         <p className="min-w-0">{tf(w.messageZh, w.messageEn)}</p>
@@ -450,7 +450,7 @@ function WarningRow({ w, busy, onRaiseCeiling }: { w: TuneWarning; busy: boolean
           <Button disabled={busy} onClick={onRaiseCeiling}>
             {tf("放宽上限到 100% 并重算", "Raise ceiling to 100% & re-solve")}
           </Button>
-          <span className="self-center text-[10.5px] text-dim">{tf("或保持现状(接受可达温度)", "or keep as-is (accept the achievable temp)")}</span>
+          <span className="self-center text-[11.5px] text-dim">{tf("或保持现状(接受可达温度)", "or keep as-is (accept the achievable temp)")}</span>
         </div>
       )}
     </div>

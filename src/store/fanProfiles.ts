@@ -323,13 +323,14 @@ export const useFanProfiles = create<FanProfileState>()(
       applyOnStartup: false,
       lastError: null,
       clearError: () => set({ lastError: null }),
-      markSpun: (ids) =>
-        set((s) => {
-          const next = new Set(s.spunFans);
-          let changed = false;
-          for (const id of ids) if (!next.has(id)) { next.add(id); changed = true; }
-          return changed ? { spunFans: [...next] } : {};
-        }),
+      // Called on every fan poll. Check BEFORE calling set: persist writes the
+      // whole blob on ANY set (even one returning `{}`), which re-sent the fan
+      // profiles over persist_set every tick while nothing had changed.
+      markSpun: (ids) => {
+        const cur = get().spunFans;
+        const fresh = ids.filter((id) => !cur.includes(id));
+        if (fresh.length > 0) set({ spunFans: [...cur, ...fresh] });
+      },
       setConfig: (controlId, patch) => {
         const prev = get().configs[controlId] ?? defaultConfig();
         const next = { ...prev, ...patch };
