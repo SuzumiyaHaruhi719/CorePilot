@@ -1,5 +1,4 @@
 import { CheckCircle2, Download, ExternalLink, Loader2, RefreshCw, XCircle } from "lucide-react";
-import { motion } from "motion/react";
 import { Button } from "../ui/Button";
 import { Toggle } from "../ui/Toggle";
 import { cn } from "../../lib/cn";
@@ -48,19 +47,8 @@ export function UpdateCard() {
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 14 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1], delay: 0.09 }}
-      className="glass hairline mx-auto mt-4 max-w-2xl rounded-2xl px-5 py-4"
-    >
-      <div className="flex items-center gap-2 border-b border-line/60 py-3">
-        <Download size={13} className="text-accent-bright" />
-        <span className="hud-label text-[10.5px] text-dim">{t("更新 · UPDATES")}</span>
-        <span className="h-px flex-1 bg-line/50" />
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-3 py-2.5">
         <div className="min-w-0">
           <div className="text-[13px] font-medium text-ink">
             {info
@@ -74,11 +62,11 @@ export function UpdateCard() {
         <div className="no-drag flex items-center gap-2">
           <button
             onClick={() => void api.openExternal(releasesUrl).catch(() => undefined)}
-            className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink"
+            className="flex h-8 cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-[12.5px] text-muted transition-colors hover:bg-surface2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
           >
             <ExternalLink size={13} /> 打开发布页
           </button>
-          <Button variant="primary" onClick={() => void runCheck()} disabled={checking || installing}>
+          <Button onClick={() => void runCheck()} disabled={checking || installing}>
             {checking ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
             {checking ? "检查中…" : "检查更新"}
           </Button>
@@ -90,8 +78,8 @@ export function UpdateCard() {
       {info && !checking && (
         <div
           className={cn(
-            "flex items-start gap-1.5 rounded-lg border px-3 py-2 text-[11.5px] leading-relaxed",
-            info.available ? "border-accent/40 bg-accent/10 text-accent-bright" : "border-ok/40 bg-ok/10 text-ok",
+            "flex items-start gap-1.5 rounded-lg px-3 py-2 text-[12px] leading-relaxed ring-1 ring-inset",
+            info.available ? "bg-accent/10 text-accent ring-accent/25" : "bg-ok/10 text-ok ring-ok/25",
           )}
         >
           <CheckCircle2 size={13} className="mt-0.5 shrink-0" />
@@ -104,7 +92,7 @@ export function UpdateCard() {
       )}
 
       {error && !checking && (
-        <div className="flex items-start gap-1.5 break-all rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11.5px] leading-relaxed text-danger">
+        <div className="flex items-start gap-1.5 break-all rounded-lg bg-danger/10 ring-1 ring-inset ring-danger/25 px-3 py-2 text-[11.5px] leading-relaxed text-danger">
           <XCircle size={13} className="mt-0.5 shrink-0" />
           <span className="min-w-0">{error}</span>
         </div>
@@ -124,10 +112,10 @@ export function UpdateCard() {
         </>
       )}
 
-      <div className="mt-1 flex items-center justify-between gap-6 border-t border-line/60 pt-3.5">
+      <div className="mt-3 flex items-center justify-between gap-6 border-t border-line py-3.5">
         <div>
-          <div className="text-[13.5px] font-medium text-ink">{t("启动时自动检查更新")}</div>
-          <div className="text-[12px] text-dim">
+          <div className="text-[13px] font-medium text-ink">{t("启动时自动检查更新")}</div>
+          <div className="mt-0.5 text-[12px] text-muted">
             {t("每次启动检查一次(最快 4 小时一次),发现新版本时询问是否更新;游戏运行中不打扰。")}
           </div>
         </div>
@@ -138,6 +126,6 @@ export function UpdateCard() {
           />
         </div>
       </div>
-    </motion.div>
+    </div>
   );
 }

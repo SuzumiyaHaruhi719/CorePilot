@@ -66,7 +66,7 @@ export function UpdatePrompt() {
       <UpdateProgress phase={phase} downloaded={downloaded} total={total} />
 
       {error && (
-        <div className="mt-3 break-all rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11.5px] leading-relaxed text-danger">
+        <div className="mt-3 break-all rounded-lg bg-danger/10 ring-1 ring-inset ring-danger/25 px-3 py-2 text-[11.5px] leading-relaxed text-danger">
           {error}
         </div>
       )}

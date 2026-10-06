@@ -9,7 +9,8 @@ export type ThemeStyle = "graphite" | "midnight" | "terminal" | "cyberpunk" | "p
 export type Language = "zh" | "en";
 
 /** Theme-style metadata for the Settings picker. `mode` is the base (dark/light)
- *  the style refines. Swatches are [page, surface, accent] for the card preview. */
+ *  the style refines. Swatches are [chrome, surface, accent] — the preset's own
+ *  token values (index.css), drawn as a miniature window on the card. */
 export interface ThemeStyleDef {
   id: ThemeStyle;
   name: string; // Chinese label (translated via i18n)
@@ -20,12 +21,12 @@ export interface ThemeStyleDef {
 
 /** The selectable theme styles, shown as cards in Settings. Co-designed w/ Codex. */
 export const THEME_STYLES: ThemeStyleDef[] = [
-  { id: "graphite", name: "石墨", mode: "dark", desc: "纯黑中性表面 + 暖橙强调，适合长时间使用。", swatches: ["oklch(9% 0 0)", "oklch(18.5% 0 0)", "oklch(70% 0.175 50)"] },
-  { id: "midnight", name: "午夜", mode: "dark", desc: "更深更蓝的午夜界面，冷紫蓝强调色。", swatches: ["oklch(10.5% 0.045 270)", "oklch(20.5% 0.075 270)", "oklch(68% 0.2 274)"] },
-  { id: "terminal", name: "终端", mode: "dark", desc: "近黑终端 + 磷光绿，极客风。", swatches: ["oklch(12% 0.004 160)", "oklch(21% 0.006 160)", "oklch(82% 0.2 144)"] },
-  { id: "cyberpunk", name: "赛博朋克", mode: "dark", desc: "赛博朋克 2077 黑·黄·蓝，暗夜街头。", swatches: ["#00060e", "#54c1e6", "#fee801"] },
-  { id: "porcelain", name: "瓷白", mode: "light", desc: "高对比度浅色，淡蓝强调，简洁清爽。", swatches: ["oklch(98.6% 0.004 285)", "oklch(94% 0.01 287)", "oklch(52% 0.17 235)"] },
-  { id: "sandstone", name: "砂岩", mode: "light", desc: "暖色浅色调，明亮环境更舒适。", swatches: ["oklch(97.4% 0.023 83)", "oklch(94.8% 0.032 81)", "oklch(42% 0.155 48)"] },
+  { id: "graphite", name: "石墨", mode: "dark", desc: "纯黑中性表面 + 暖橙强调，适合长时间使用。", swatches: ["oklch(11.5% 0.002 60)", "oklch(21% 0.004 60)", "oklch(72% 0.16 50)"] },
+  { id: "midnight", name: "午夜", mode: "dark", desc: "更深更蓝的午夜界面，冷紫蓝强调色。", swatches: ["oklch(11% 0.03 268)", "oklch(22% 0.045 268)", "oklch(72% 0.15 278)"] },
+  { id: "terminal", name: "终端", mode: "dark", desc: "近黑终端 + 磷光绿，极客风。", swatches: ["oklch(10.5% 0.003 160)", "oklch(20.5% 0.006 160)", "oklch(82% 0.19 144)"] },
+  { id: "cyberpunk", name: "赛博朋克", mode: "dark", desc: "赛博朋克 2077 黑·黄·蓝，暗夜街头。", swatches: ["oklch(9% 0.03 245)", "oklch(21.5% 0.065 234)", "#fee801"] },
+  { id: "porcelain", name: "瓷白", mode: "light", desc: "高对比度浅色，淡蓝强调，简洁清爽。", swatches: ["oklch(95.2% 0.005 255)", "oklch(100% 0 0)", "oklch(53% 0.17 252)"] },
+  { id: "sandstone", name: "砂岩", mode: "light", desc: "暖色浅色调，明亮环境更舒适。", swatches: ["oklch(93.8% 0.016 78)", "oklch(99.2% 0.005 80)", "oklch(52% 0.15 42)"] },
 ];
 export type PerfCard = "cpu" | "mem" | "gpu" | "disk" | "net" | "power";
 

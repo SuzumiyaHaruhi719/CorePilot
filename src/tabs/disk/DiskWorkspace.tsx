@@ -48,7 +48,7 @@ import type { ColorMode } from "./treemap/colors";
  *    paused / finished tab stops polling. `mounted` only while this disk is the
  *    active tab, so background tabs never poll (their scan still runs).
  *  - A one-shot ~220ms zoom tween on drill (gated by `data-reduce-motion`; canvas
- *    stays out of any Motion `layout` container — MEMORY: group).
+ *    stays out of any Motion `layout` container — MEMORY: group glow).
  *  - The side detail panel (`disk_top_items` + selection).
  *
  * See docs/superpowers/specs/2026-06-23-disk-space-analyzer-design.md §3.4/§3.8/§4.

@@ -101,7 +101,7 @@ export function UpdateProgress({
 export function ReleaseNotes({ notes }: { notes: string | null }) {
   if (!notes?.trim()) return null;
   return (
-    <div className="hairline mt-3 max-h-[220px] overflow-auto rounded-xl border border-line bg-surface2/40 px-3.5 py-3">
+    <div className="mt-3 max-h-[220px] overflow-auto rounded-lg bg-surface2/60 px-3.5 py-3">
       <pre className="whitespace-pre-wrap break-words font-sans text-[12px] leading-relaxed text-muted">
         {notes.trim()}
       </pre>
