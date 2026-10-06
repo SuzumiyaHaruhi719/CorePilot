@@ -345,7 +345,6 @@ export function ProcessTable({
           <TableBodyState
             loading={loading}
             error={error}
-            emptyTag="NO PROCESSES"
             emptyLabel="没有匹配的进程"
           />
         )}

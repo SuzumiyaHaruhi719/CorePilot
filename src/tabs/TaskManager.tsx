@@ -1,4 +1,3 @@
-import { ListTree } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { PerfView } from "../components/taskmgr/PerfView";
 import { ProcessView } from "../components/taskmgr/ProcessView";
@@ -6,6 +5,7 @@ import { ServicesView } from "../components/taskmgr/ServicesView";
 import { StartupView } from "../components/taskmgr/StartupView";
 import { SecondaryTabs } from "../components/ui/SecondaryTabs";
 import { TabHeader } from "../components/ui/TabHeader";
+import { easeOut } from "../lib/motion";
 import { useUi, type TaskmgrSec as Sec } from "../store/ui";
 
 const SECS: { id: Sec; label: string }[] = [
@@ -25,16 +25,15 @@ export function TaskManager() {
 
   return (
     <>
-      <TabHeader icon={ListTree} title="任务管理器" subtitle="复刻 Windows 任务管理器 — 实时性能与进程管理" />
+      <TabHeader title="任务管理器" subtitle="复刻 Windows 任务管理器 — 实时性能与进程管理" />
       <SecondaryTabs tabs={SECS} active={sec} onChange={setSec} layoutId="tm-sec" />
       <div className="relative flex min-h-0 flex-1 flex-col">
         <AnimatePresence mode="wait">
           <motion.div
             key={sec}
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.18 }}
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0, transition: { duration: 0.18, ease: easeOut } }}
+            exit={{ opacity: 0, transition: { duration: 0.08 } }}
             className="flex min-h-0 flex-1 flex-col"
           >
             {sec === "perf" && <PerfView />}

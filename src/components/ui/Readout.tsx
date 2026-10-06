@@ -92,3 +92,28 @@ export function Badge({ tone = "neutral", dot, children, className }: { tone?: T
     </span>
   );
 }
+
+/**
+ * Instrument cluster: readout cells in an auto-fit grid, divided by hairlines
+ * (cells draw left/top rules; the grid is pulled -1px so the outer edge hides).
+ * Put it directly inside a `Panel flush` (or any rounded, overflow-hidden box).
+ */
+export function Cluster({ min = 128, className, children }: { min?: number; className?: string; children: ReactNode }) {
+  return (
+    <div className={cn("overflow-hidden", className)}>
+      <div className="-ml-px -mt-px grid" style={{ gridTemplateColumns: `repeat(auto-fit, minmax(${min}px, 1fr))` }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** One cell of a `Cluster`: content + optional usage meter pinned to the bottom. */
+export function ClusterCell({ children, meter, meterColor, className }: { children: ReactNode; meter?: number; meterColor?: string; className?: string }) {
+  return (
+    <div className={cn("flex min-w-0 flex-col justify-between gap-3 border-l border-t border-line px-5 py-4", className)}>
+      {children}
+      {meter != null && <Meter value={meter} color={meterColor} />}
+    </div>
+  );
+}

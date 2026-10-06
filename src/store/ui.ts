@@ -3,6 +3,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import type { SortKey } from "../components/cores/ProcessTable";
 import type { OsdCategory } from "../lib/osd";
 import { tauriStorage } from "../lib/persist";
+import type { PerfCard } from "./settings";
 
 export type TabId = "cores" | "taskmgr" | "monitor" | "osd" | "gpu" | "fans" | "optimize" | "disk" | "tuning" | "amd" | "settings";
 
@@ -57,6 +58,9 @@ interface UiState {
   /** Active 任务管理器 sub-tab. */
   taskmgrSec: TaskmgrSec;
   setTaskmgrSec: (sec: TaskmgrSec) => void;
+  /** Device selected in 任务管理器 → 性能 (master-detail). */
+  perfDevice: PerfCard;
+  setPerfDevice: (d: PerfCard) => void;
 
   /** 任务管理器 → 进程 / 详细信息: filter text and sort order (shared by both
    *  views on purpose — they list the same processes). */
@@ -106,6 +110,8 @@ export const useUi = create<UiState>()(
 
       taskmgrSec: "perf",
       setTaskmgrSec: (taskmgrSec) => set({ taskmgrSec }),
+      perfDevice: "cpu",
+      setPerfDevice: (perfDevice) => set({ perfDevice }),
 
       procSearch: "",
       setProcSearch: (procSearch) => set({ procSearch }),

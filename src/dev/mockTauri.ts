@@ -192,9 +192,9 @@ const volumes = [
   { scanId: "E:\\", root: "E:\\", letter: "E:", label: "Media", fileSystem: "exFAT", driveType: "removable", total: 931 * GB, free: 288 * GB, supported: true },
 ];
 
-const services = ["AudioSrv|Windows Audio|Running|Automatic", "BITS|Background Intelligent Transfer Service|Stopped|Manual", "Dhcp|DHCP Client|Running|Automatic", "NVDisplay.ContainerLocalSystem|NVIDIA Display Container LS|Running|Automatic", "Spooler|Print Spooler|Running|Automatic", "WSearch|Windows Search|Running|Automatic (Delayed Start)", "wuauserv|Windows Update|Stopped|Manual", "SysMain|SysMain|Running|Automatic"].map((s, i) => {
+const services = ["AudioSrv|Windows Audio|running|Automatic", "BITS|Background Intelligent Transfer Service|stopped|Manual", "Dhcp|DHCP Client|running|Automatic", "NVDisplay.ContainerLocalSystem|NVIDIA Display Container LS|running|Automatic", "Spooler|Print Spooler|running|Automatic", "WSearch|Windows Search|running|Automatic (Delayed Start)", "wuauserv|Windows Update|stopped|Manual", "SysMain|SysMain|running|Automatic"].map((s, i) => {
   const [name, display, status, startType] = s.split("|");
-  return { name, display, status, startType, pid: status === "Running" ? 1200 + i * 88 : undefined, description: `${display} service`, group: "LocalSystemNetworkRestricted" };
+  return { name, display, status, startType, pid: status === "running" ? 1200 + i * 88 : undefined, description: `${display} service`, group: "LocalSystemNetworkRestricted" };
 });
 
 const startup = [
@@ -290,7 +290,11 @@ mockIPC(
 const tab = params.get("tab");
 if (tab) {
   void import("../store/ui").then(({ useUi }) => {
-    const go = () => useUi.getState().setTab(tab as never);
+    const go = () => {
+      useUi.getState().setTab(tab as never);
+      const sec = params.get("sec");
+      if (sec) useUi.setState(tab === "monitor" ? { monitorSub: sec as never } : { taskmgrSec: sec as never });
+    };
     if (useUi.persist.hasHydrated()) go();
     else useUi.persist.onFinishHydration(go);
   });

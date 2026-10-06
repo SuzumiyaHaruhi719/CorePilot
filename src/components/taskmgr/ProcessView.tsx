@@ -1,5 +1,7 @@
 import { ChevronsUp, Copy, FolderOpen, Loader2, MonitorPlay, RotateCw, Search, X } from "lucide-react";
-import { useCallback, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { AnimatePresence, motion } from "motion/react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { easeOut } from "../../lib/motion";
 import { useProcesses } from "../../hooks/useProcesses";
 import { useTf } from "../../lib/i18n";
 import { PRIORITY, api, type ProcInfo } from "../../lib/ipc";
@@ -45,6 +47,14 @@ export function ProcessView({ detailed }: ProcessViewProps) {
   const [status, setStatus] = useState("");
   const [menu, setMenu] = useState<MenuState | null>(null);
   const addOsdTarget = useOsdTargets((s) => s.addTarget);
+
+  // Action feedback is transient: it fades after a few seconds instead of
+  // lingering as stale text beside the search box.
+  useEffect(() => {
+    if (!status) return;
+    const id = window.setTimeout(() => setStatus(""), 4000);
+    return () => window.clearTimeout(id);
+  }, [status]);
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -197,24 +207,38 @@ export function ProcessView({ detailed }: ProcessViewProps) {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 px-6 pb-6 pt-4">
       <div className="flex items-center gap-3">
-        <div className="no-drag relative">
-          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-dim" />
+        <label className="field no-drag flex w-64 items-center gap-2">
+          <Search size={14} className="shrink-0 text-dim" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索进程…"
-            className="w-56 rounded-lg border border-line bg-surface2 py-1.5 pl-8 pr-3 text-[12.5px] text-ink outline-none transition-colors focus:border-accent/50"
+            className="min-w-0 flex-1 bg-transparent text-[12.5px] text-ink outline-none"
           />
-        </div>
-        <span className="nums text-[11.5px] text-dim">{visible.length} 个进程</span>
-        {status && (
-          <span className="ml-auto flex items-center gap-1.5 text-[11.5px] text-accent">
-            <span className="h-1.5 w-1.5 rounded-full bg-accent glow-sm" />
-            {status}
-          </span>
-        )}
+          {search && (
+            <button type="button" onClick={() => setSearch("")} aria-label={tf("清除搜索", "Clear search")} className="grid h-5 w-5 shrink-0 cursor-pointer place-items-center rounded text-dim hover:bg-surface3 hover:text-ink">
+              <X size={12} />
+            </button>
+          )}
+        </label>
+        <span className="nums text-[12px] text-dim">{tf(`${visible.length} 个进程`, `${visible.length} processes`)}</span>
+        <AnimatePresence>
+          {status && (
+            <motion.span
+              key={status}
+              role="status"
+              initial={{ opacity: 0, y: 3 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18, ease: easeOut }}
+              className="ml-auto truncate text-[12px] text-muted"
+            >
+              {status}
+            </motion.span>
+          )}
+        </AnimatePresence>
       </div>
 
       {detailed ? (

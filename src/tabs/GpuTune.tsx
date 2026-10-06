@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
 import { Panel } from "../components/ui/Panel";
-import { Badge, Meter, Readout } from "../components/ui/Readout";
+import { Badge, Cluster, ClusterCell as Cell, Readout } from "../components/ui/Readout";
 import { Segmented } from "../components/ui/Segmented";
 import { RangeInput } from "../components/ui/Slider";
 import { TabHeader } from "../components/ui/TabHeader";
@@ -64,16 +64,6 @@ function tempColor(t: number): string | undefined {
   if (t >= 83) return "var(--color-danger)";
   if (t >= 72) return "var(--color-warn)";
   return undefined;
-}
-
-/** One cell of the instrument cluster: readout + optional usage meter. */
-function Cell({ children, meter, meterColor }: { children: ReactNode; meter?: number; meterColor?: string }) {
-  return (
-    <div className="flex min-w-0 flex-col justify-between gap-3 border-l border-t border-line px-5 py-4">
-      {children}
-      {meter != null && <Meter value={meter} color={meterColor} />}
-    </div>
-  );
 }
 
 interface TuneRowProps {
@@ -370,8 +360,7 @@ export function GpuTune() {
             }
             flush
           >
-            <div className="overflow-hidden rounded-b-xl">
-              <div className="-ml-px -mt-px grid grid-cols-[repeat(auto-fit,minmax(128px,1fr))]">
+            <Cluster className="rounded-b-xl">
                 <Cell>
                   <Readout
                     label="核心频率"
@@ -412,8 +401,7 @@ export function GpuTune() {
                 <Cell meter={info.fanSpeedPct} meterColor="var(--color-muted)">
                   <Readout label="风扇" value={info.fanSpeedPct} unit="%" size="lg" />
                 </Cell>
-              </div>
-            </div>
+            </Cluster>
           </Panel>
 
           <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">

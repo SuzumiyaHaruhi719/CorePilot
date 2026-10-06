@@ -1,10 +1,12 @@
-import { ArrowDown, ArrowUp, Loader2, Play, RotateCw, Search, Square } from "lucide-react";
+import { Loader2, Play, RotateCw, Search, Square } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { cn } from "../../lib/cn";
 import { useTf } from "../../lib/i18n";
 import { api, type ServiceItem } from "../../lib/ipc";
 import { Button } from "../ui/Button";
 import { Modal } from "../ui/Modal";
+import { Badge } from "../ui/Readout";
+import { SortHead as Head, HeadLabel, TABLE, TABLE_HEAD, TABLE_ROW, TableBodyState } from "../ui/Table";
 
 const COLS = "grid-cols-[minmax(110px,0.9fr)_52px_minmax(0,1.5fr)_70px_minmax(0,0.7fr)_108px]";
 
@@ -18,10 +20,10 @@ const MIN_W = "min-w-[720px]";
 // row stays in the DOM. Service rows are always single-line.
 const ROW_CV = "[content-visibility:auto] [contain-intrinsic-size:auto_30px]";
 
-const STATUS_STYLE: Record<string, string> = {
-  running: "text-ok",
-  stopped: "text-dim",
-  paused: "text-warn",
+const STATUS_TONE: Record<string, "ok" | "neutral" | "warn"> = {
+  running: "ok",
+  stopped: "neutral",
+  paused: "warn",
 };
 
 const STATUS_LABEL: Record<string, string> = {
@@ -29,6 +31,13 @@ const STATUS_LABEL: Record<string, string> = {
   stopped: "已停止",
   paused: "已暂停",
   other: "其他",
+};
+
+const STATUS_EN: Record<string, string> = {
+  running: "Running",
+  stopped: "Stopped",
+  paused: "Paused",
+  other: "Other",
 };
 
 const STATUS_RANK: Record<string, number> = { running: 0, paused: 1, stopped: 2, other: 3 };
@@ -48,19 +57,8 @@ function SortHead({
   onClick: () => void;
   align?: "left" | "right";
 }) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "hud-label no-drag flex cursor-pointer items-center gap-1 rounded-sm text-[9.5px] transition-colors hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60",
-        align === "right" ? "justify-end" : "justify-start",
-        active ? "text-accent" : "text-muted",
-      )}
-    >
-      {label}
-      {active && (dir === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
-    </button>
-  );
+  // Local sort state (not the shared SortKey); same look as ui/Table's SortHead.
+  return <Head k="x" label={label} sortKey={active ? "x" : "-"} sortDir={dir} onSort={onClick} align={align} />;
 }
 
 export function ServicesView() {
@@ -127,60 +125,61 @@ export function ServicesView() {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 px-6 pb-6 pt-4">
       <div className="flex items-center gap-3">
-        <div className="no-drag relative">
-          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-dim" />
+        <label className="field no-drag flex w-64 items-center gap-2">
+          <Search size={14} className="shrink-0 text-dim" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索服务…"
-            className="w-56 rounded-lg border border-line bg-surface2 py-1.5 pl-8 pr-3 text-[12.5px] text-ink outline-none transition-colors focus:border-accent/50"
+            className="min-w-0 flex-1 bg-transparent text-[12.5px] text-ink outline-none"
           />
-        </div>
-        <span className="nums text-[11.5px] text-dim">{tf(`${visible.length} 项服务`, `${visible.length} services`)}</span>
+        </label>
+        <span className="nums text-[12px] text-dim">{tf(`${visible.length} 项服务`, `${visible.length} services`)}</span>
         <button
           onClick={() => void load()}
           disabled={loading}
           title="刷新"
           aria-label="刷新服务列表"
-          className="no-drag grid h-7 w-7 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-surface3 hover:text-ink disabled:opacity-50"
+          className="no-drag grid h-8 w-8 cursor-pointer place-items-center rounded-md text-dim transition-colors hover:bg-surface2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-50"
         >
           <RotateCw size={13} className={loading ? "animate-spin" : ""} />
         </button>
-        {status && <span className="ml-auto text-[11.5px] text-accent">{status}</span>}
+        {status && <span role="status" className="ml-auto truncate text-[12px] text-muted">{status}</span>}
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/50">
+      <div className={TABLE}>
         {/* Horizontal scroll on narrow windows; min-w wrapper keeps the header
             and body aligned while the body scrolls vertically. */}
         <div className="flex min-h-0 flex-1 flex-col overflow-x-auto">
-        <div className={cn(MIN_W, "grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2.5", COLS)}>
+        <div className={cn(MIN_W, TABLE_HEAD, COLS)}>
           <SortHead label="服务名" active={sortKey === "display"} dir={sortDir} onClick={() => sort("display")} />
-          <span className="hud-label text-[9.5px] text-muted">PID</span>
-          <span className="hud-label text-[9.5px] text-muted">描述</span>
+          <HeadLabel label="PID" align="left" />
+          <HeadLabel label="描述" align="left" />
           <SortHead label="状态" active={sortKey === "status"} dir={sortDir} onClick={() => sort("status")} />
-          <span className="hud-label text-[9.5px] text-muted">组</span>
-          <span className="hud-label text-right text-[9.5px] text-muted">操作</span>
+          <HeadLabel label="组" align="left" />
+          <HeadLabel label="操作" />
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
           {visible.map((svc) => (
             <div
               key={svc.name}
-              className={cn(MIN_W, ROW_CV, "grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] transition-colors hover:bg-surface2/50", COLS)}
+              className={cn(MIN_W, ROW_CV, TABLE_ROW, "py-[7px]", COLS)}
             >
               <span className="truncate text-ink" title={svc.display || svc.name}>
                 {svc.name}
               </span>
               <span className="nums text-dim">{svc.pid ? svc.pid : "—"}</span>
-              <span className="truncate text-[11.5px] text-muted" title={svc.description || svc.display}>
+              <span className="truncate text-[12px] text-muted" title={svc.description || svc.display}>
                 {svc.description || svc.display || "—"}
               </span>
-              <span className={cn("flex items-center gap-1.5 text-[12px]", STATUS_STYLE[svc.status] ?? "text-dim")}>
-                {svc.status === "running" && <span className="h-1.5 w-1.5 rounded-full bg-ok glow-sm" />}
-                {STATUS_LABEL[svc.status] ?? svc.status}
+              <span>
+                <Badge tone={STATUS_TONE[svc.status] ?? "neutral"} dot={svc.status === "running"}>
+                  {tf(STATUS_LABEL[svc.status] ?? svc.status, STATUS_EN[svc.status] ?? svc.status)}
+                </Badge>
               </span>
-              <span className="truncate text-[11px] text-dim" title={svc.group}>
+              <span className="truncate text-[12px] text-dim" title={svc.group}>
                 {svc.group || "—"}
               </span>
               <div className="flex items-center justify-end gap-1.5">
@@ -191,7 +190,7 @@ export function ServicesView() {
                       onClick={() => setConfirm({ svc, action: "stop" })}
                       title="停止"
                       aria-label={tf(`停止 ${svc.display || svc.name}`, `Stop ${svc.display || svc.name}`)}
-                      className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim transition hover:bg-danger hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                      className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim transition-colors hover:bg-danger/12 hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       {busy === svc.name ? <Loader2 size={12} className="animate-spin" /> : <Square size={12} />}
                     </button>
@@ -200,7 +199,7 @@ export function ServicesView() {
                       onClick={() => setConfirm({ svc, action: "restart" })}
                       title="重启"
                       aria-label={tf(`重启 ${svc.display || svc.name}`, `Restart ${svc.display || svc.name}`)}
-                      className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim transition hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+                      className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       <RotateCw size={12} />
                     </button>
@@ -211,7 +210,7 @@ export function ServicesView() {
                     onClick={() => void control(svc, "start")}
                     title="启动"
                     aria-label={tf(`启动 ${svc.display || svc.name}`, `Start ${svc.display || svc.name}`)}
-                    className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim transition hover:bg-ok hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                    className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim transition-colors hover:bg-ok/12 hover:text-ok disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {busy === svc.name ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
                   </button>
@@ -220,23 +219,7 @@ export function ServicesView() {
             </div>
           ))}
           {visible.length === 0 && (
-            <div className="flex flex-col items-center gap-1.5 py-12 text-center">
-              {loading ? (
-                <span className="flex items-center gap-2 text-[12.5px] text-dim">
-                  <Loader2 size={13} className="animate-spin" /> {tf("正在读取服务…", "Reading services…")}
-                </span>
-              ) : loadErr ? (
-                <>
-                  <span className="hud-label text-[10px] text-danger">ERROR</span>
-                  <span className="text-[12.5px] text-danger">{tf("无法读取服务列表", "Couldn't read the service list")}</span>
-                </>
-              ) : (
-                <>
-                  <span className="hud-label text-[10px] text-dim">NO SERVICES</span>
-                  <span className="text-[12.5px] text-dim">没有匹配的服务</span>
-                </>
-              )}
-            </div>
+            <TableBodyState loading={loading} error={loadErr} emptyLabel="没有匹配的服务" onRetry={() => void load()} />
           )}
         </div>
         </div>

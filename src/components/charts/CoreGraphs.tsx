@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { cn } from "../../lib/cn";
 import { clusterName, clusterTag } from "../../lib/cpu";
 import type { CpuTopology } from "../../lib/ipc";
 import { historySnapshot, isRecording } from "../../hooks/useSharedTelemetry";
@@ -24,16 +23,14 @@ interface CoreGraphsProps {
   topo: CpuTopology | null;
 }
 
-function MiniGraph({ id, value, hist, vcache }: { id: number; value: number; hist: number[]; vcache: boolean }) {
+function MiniGraph({ id, value, hist, color }: { id: number; value: number; hist: number[]; color: string }) {
   return (
-    <div className="rounded-lg border border-line bg-surface2/60 p-1.5">
-      <div className="flex items-center justify-between px-0.5">
-        <span className="nums text-[9px] text-dim">{id}</span>
-        <span className={cn("nums text-[10px] font-medium", vcache ? "text-vcache" : "text-freq")}>
-          {value.toFixed(0)}
-        </span>
+    <div className="overflow-hidden rounded-md bg-surface2/50 shadow-[inset_0_0_0_1px_var(--color-line)]">
+      <div className="flex items-baseline justify-between px-1.5 pt-1">
+        <span className="nums text-[10px] text-dim">{id}</span>
+        <span className="nums text-[11px] text-ink">{value.toFixed(0)}</span>
       </div>
-      <Sparkline data={hist} max={100} hue={vcache ? 184 : 70} height={30} />
+      <Sparkline data={hist} max={100} color={color} height={28} />
     </div>
   );
 }
@@ -63,29 +60,24 @@ export function CoreGraphs({ perCore, topo }: CoreGraphsProps) {
   ];
 
   return (
-    <div className="space-y-3">
-      {ccds.map((ccd) => (
-        <div key={ccd.ccdId}>
-          <div className="mb-1.5 flex items-center gap-1.5 text-[11px]">
-            <span className={cn("h-2 w-2 rounded-full glow-sm", ccd.isVcache ? "bg-vcache" : "bg-freq")} />
-            <span className="font-medium text-muted">
-              {clusterName(topo, ccd)}
-              {clusterTag(ccd) ? ` · ${clusterTag(ccd)}` : ""}
-            </span>
+    <div className="space-y-4">
+      {ccds.map((ccd) => {
+        const color = ccd.isVcache ? "var(--color-vcache)" : "var(--color-freq)";
+        return (
+          <div key={ccd.ccdId}>
+            <div className="mb-2 flex items-center gap-2 text-[12px]">
+              <span className="h-2 w-2 rounded-full" style={{ background: color }} />
+              <span className="font-medium text-ink">{clusterName(topo, ccd)}</span>
+              {clusterTag(ccd) && <span className="text-dim">{clusterTag(ccd)}</span>}
+            </div>
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(64px,1fr))] gap-1.5">
+              {ccd.logicalCpus.map((id) => (
+                <MiniGraph key={id} id={id} value={perCore[id] ?? 0} hist={hist[id] ?? []} color={color} />
+              ))}
+            </div>
           </div>
-          <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-8">
-            {ccd.logicalCpus.map((id) => (
-              <MiniGraph
-                key={id}
-                id={id}
-                value={perCore[id] ?? 0}
-                hist={hist[id] ?? []}
-                vcache={ccd.isVcache}
-              />
-            ))}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

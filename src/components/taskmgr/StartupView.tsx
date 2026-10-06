@@ -1,8 +1,9 @@
-import { ArrowDown, ArrowUp, Loader2, RotateCw } from "lucide-react";
+import { RotateCw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { cn } from "../../lib/cn";
 import { useTf } from "../../lib/i18n";
 import { api, type StartupItem } from "../../lib/ipc";
+import { SortHead as Head, HeadLabel, TABLE, TABLE_HEAD, TABLE_ROW, TableBodyState } from "../ui/Table";
 import { Toggle } from "../ui/Toggle";
 
 const COLS = "grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_92px_64px]";
@@ -32,19 +33,8 @@ function SortHead({
   onClick: () => void;
   align?: "left" | "right";
 }) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "hud-label no-drag flex cursor-pointer items-center gap-1 rounded-sm text-[9.5px] transition-colors hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60",
-        align === "right" ? "justify-end" : "justify-start",
-        active ? "text-accent" : "text-muted",
-      )}
-    >
-      {label}
-      {active && (dir === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
-    </button>
-  );
+  // Local sort state (not the shared SortKey); same look as ui/Table's SortHead.
+  return <Head k="x" label={label} sortKey={active ? "x" : "-"} sortDir={dir} onSort={onClick} align={align} />;
 }
 
 export function StartupView() {
@@ -109,28 +99,28 @@ export function StartupView() {
   }, [items, sortKey, sortDir]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 px-6 pb-6 pt-4">
       <div className="flex items-center gap-3">
-        <span className="nums text-[11.5px] text-dim">{tf(`${items.length} 个启动项`, `${items.length} startup items`)}</span>
+        <span className="nums text-[12px] text-dim">{tf(`${items.length} 个启动项`, `${items.length} startup items`)}</span>
         <button
           onClick={() => void load()}
           disabled={loading}
           title="刷新"
           aria-label="刷新启动项"
-          className="no-drag grid h-7 w-7 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-surface3 hover:text-ink disabled:opacity-50"
+          className="no-drag grid h-8 w-8 cursor-pointer place-items-center rounded-md text-dim transition-colors hover:bg-surface2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-50"
         >
           <RotateCw size={13} className={loading ? "animate-spin" : ""} />
         </button>
-        {status && <span className="ml-auto text-[11.5px] text-accent">{status}</span>}
+        {status && <span role="status" className="ml-auto truncate text-[12px] text-muted">{status}</span>}
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/50">
+      <div className={TABLE}>
         {/* Horizontal scroll on narrow windows; min-w wrapper keeps the header
             and body aligned while the body scrolls vertically. */}
         <div className="flex min-h-0 flex-1 flex-col overflow-x-auto">
-        <div className={cn(MIN_W, "grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2.5", COLS)}>
+        <div className={cn(MIN_W, TABLE_HEAD, COLS)}>
           <SortHead label="名称" active={sortKey === "name"} dir={sortDir} onClick={() => sort("name")} />
-          <span className="hud-label text-[9.5px] text-muted">命令</span>
+          <HeadLabel label="命令" align="left" />
           <SortHead label="位置" active={sortKey === "location"} dir={sortDir} onClick={() => sort("location")} />
           <SortHead
             label="启用"
@@ -144,15 +134,15 @@ export function StartupView() {
           {visible.map((item) => (
             <div
               key={`${item.location}:${item.name}`}
-              className={cn(MIN_W, "grid items-center gap-2 border-b border-line/40 px-3 py-2 text-[12.5px] transition-colors hover:bg-surface2/50", COLS)}
+              className={cn(MIN_W, TABLE_ROW, "py-2", COLS)}
             >
               <span className={cn("truncate", item.enabled ? "text-ink" : "text-dim")} title={item.name}>
                 {item.name}
               </span>
-              <span className="truncate text-[11.5px] text-dim" title={item.command}>
+              <span className="truncate font-mono text-[11.5px] text-dim" title={item.command}>
                 {item.command}
               </span>
-              <span className="text-[11px] text-muted">{LOC_LABEL[item.location] ?? item.location}</span>
+              <span className="text-[12px] text-muted">{LOC_LABEL[item.location] ?? item.location}</span>
               <div className="flex justify-end">
                 <Toggle
                   checked={item.enabled}
@@ -164,23 +154,7 @@ export function StartupView() {
             </div>
           ))}
           {visible.length === 0 && (
-            <div className="flex flex-col items-center gap-1.5 py-12 text-center">
-              {loading ? (
-                <span className="flex items-center gap-2 text-[12.5px] text-dim">
-                  <Loader2 size={13} className="animate-spin" /> {tf("正在读取启动项…", "Reading startup items…")}
-                </span>
-              ) : loadErr ? (
-                <>
-                  <span className="hud-label text-[10px] text-danger">ERROR</span>
-                  <span className="text-[12.5px] text-danger">{tf("无法读取启动项", "Couldn't read startup items")}</span>
-                </>
-              ) : (
-                <>
-                  <span className="hud-label text-[10px] text-dim">NO STARTUP ITEMS</span>
-                  <span className="text-[12.5px] text-dim">没有启动项</span>
-                </>
-              )}
-            </div>
+            <TableBodyState loading={loading} error={loadErr} emptyLabel="没有启动项" onRetry={() => void load()} />
           )}
         </div>
         </div>

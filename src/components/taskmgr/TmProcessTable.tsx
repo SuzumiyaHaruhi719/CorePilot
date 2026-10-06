@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowDown, ArrowUp, ChevronRight, Loader2, X } from "lucide-react";
+import { ChevronRight, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { memo, useCallback, useMemo, useState, type MouseEvent } from "react";
 import { cn } from "../../lib/cn";
@@ -7,6 +7,7 @@ import { useTf } from "../../lib/i18n";
 import type { ProcInfo } from "../../lib/ipc";
 import { easeOut } from "../../lib/motion";
 import type { SortKey } from "../cores/ProcessTable";
+import { SortHead as Head, HeadLabel, TABLE, TABLE_HEAD, TABLE_ROW, TableBodyState } from "../ui/Table";
 import { ProcIcon } from "./ProcIcon";
 import { buildProcGroups, type ProcGroup } from "./procGroups";
 
@@ -34,98 +35,7 @@ interface TmProcessTableProps {
 const ROW_CV_2LINE = "[content-visibility:auto] [contain-intrinsic-size:auto_36px]";
 const ROW_CV_1LINE = "[content-visibility:auto] [contain-intrinsic-size:auto_30px]";
 
-interface HeadProps {
-  k: SortKey;
-  label: string;
-  sortKey: SortKey;
-  sortDir: "asc" | "desc";
-  onSort: (k: SortKey) => void;
-  align?: "left" | "right";
-}
-
-function Head({ k, label, sortKey, sortDir, onSort, align = "right" }: HeadProps) {
-  const active = sortKey === k;
-  return (
-    <button
-      onClick={() => onSort(k)}
-      className={cn(
-        "hud-label no-drag flex cursor-pointer items-center gap-1 rounded-sm text-[9.5px] transition-colors hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60",
-        align === "right" ? "justify-end" : "justify-start",
-        active ? "text-accent" : "text-muted",
-      )}
-    >
-      {label}
-      {active && (sortDir === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
-    </button>
-  );
-}
-
-/** A single shimmering skeleton row, sized to a generic table row so the
- *  loading state keeps the panel from collapsing while the first poll runs. */
-function SkeletonRow() {
-  return (
-    <div className="flex items-center gap-2 border-b border-line/30 px-3 py-[7px]">
-      <span className="h-4 w-4 shrink-0 animate-pulse rounded bg-surface3" />
-      <span className="h-3 flex-1 animate-pulse rounded bg-surface3/80" />
-      <span className="h-3 w-12 shrink-0 animate-pulse rounded bg-surface3/60" />
-      <span className="h-3 w-10 shrink-0 animate-pulse rounded bg-surface3/60" />
-    </div>
-  );
-}
-
-interface TableBodyStateProps {
-  loading?: boolean;
-  error?: boolean;
-  /** Uppercase HUD tag shown in the empty state (e.g. "NO PROCESSES"). */
-  emptyTag: string;
-  /** Friendly empty-state message. */
-  emptyLabel: string;
-  /** Optional retry handler; renders a retry hint in the error state. */
-  onRetry?: () => void;
-}
-
-/** The shared loading / error / empty body for every process-style table.
- *  Render this only when there are no rows to show — it picks the right state
- *  so an in-flight first read never masquerades as "no matches". */
-export function TableBodyState({ loading, error, emptyTag, emptyLabel, onRetry }: TableBodyStateProps) {
-  if (loading) {
-    return (
-      <div aria-busy="true" aria-live="polite">
-        <div className="flex items-center justify-center gap-2 py-3 text-dim">
-          <Loader2 size={13} className="animate-spin text-accent" />
-          <span className="hud-label text-[10px] text-muted">正在读取…</span>
-        </div>
-        {Array.from({ length: 7 }).map((_, i) => (
-          <SkeletonRow key={i} />
-        ))}
-      </div>
-    );
-  }
-  if (error) {
-    return (
-      <div className="flex flex-col items-center gap-2 py-12 text-center" role="alert">
-        <AlertTriangle size={20} className="text-warn" />
-        <span className="hud-label text-[10px] text-warn">READ FAILED</span>
-        <span className="text-[12.5px] text-muted">无法读取进程列表</span>
-        {onRetry && (
-          <button
-            type="button"
-            onClick={onRetry}
-            className="no-drag mt-1 cursor-pointer rounded-lg border border-line bg-surface2 px-3 py-1 text-[11.5px] text-ink transition-colors hover:border-accent/50 hover:text-accent"
-          >
-            重试
-          </button>
-        )}
-      </div>
-    );
-  }
-  return (
-    <div className="flex flex-col items-center gap-1.5 py-12 text-center">
-      <span className="hud-label text-[10px] text-dim">{emptyTag}</span>
-      <span className="text-[12.5px] text-dim">{emptyLabel}</span>
-    </div>
-  );
-}
+export { TableBodyState };
 
 /** A horizontal mini-bar + value, reused for CPU on every row.
  *  Bar hue shifts to warn above 60% load for at-a-glance telemetry. */
@@ -135,8 +45,8 @@ function CpuCell({ value }: { value: number }) {
     <div className="flex items-center justify-end gap-1.5">
       <span className="relative h-1 w-8 overflow-hidden rounded-full bg-surface3">
         <span
-          className={cn("absolute inset-y-0 left-0 rounded-full transition-colors", hot ? "bg-warn" : "bg-accent")}
-          style={{ width: `${Math.min(value, 100)}%` }}
+          className={cn("absolute inset-y-0 left-0 origin-left rounded-full transition-[transform,background-color] duration-300", hot ? "bg-warn" : "bg-accent")}
+          style={{ width: "100%", transform: `scaleX(${Math.min(value, 100) / 100})` }}
         />
       </span>
       <span className="nums w-[38px] text-right text-ink">{value.toFixed(1)}</span>
@@ -169,7 +79,7 @@ function MetricCells({ cpu, gpu, mem, threads, gpuEngine, gpuAdapter, detailed }
       {detailed &&
         (gpu > 0.05 && gpuEngine ? (
           <span
-            className="hud-label justify-self-start truncate rounded border border-vcache/30 bg-vcache/10 px-1.5 py-px text-[9px] text-vcache"
+            className="justify-self-start truncate rounded bg-vcache/12 px-1.5 text-[11px] font-medium leading-5 text-vcache"
             title={gpuAdapter ?? undefined}
           >
             {gpuEngine}
@@ -195,7 +105,8 @@ const LeafRow = memo(function LeafRow({ p, cols, detailed, onEndTask, onRowConte
     <div
       onContextMenu={(e) => onRowContextMenu?.(e, p)}
       className={cn(
-        "group grid items-center gap-2 border-b border-line/40 px-3 py-[7px] text-[12.5px] hover:bg-surface2/50",
+        "group py-[7px]",
+        TABLE_ROW,
         ROW_CV_2LINE,
         cols,
       )}
@@ -209,7 +120,7 @@ const LeafRow = memo(function LeafRow({ p, cols, detailed, onEndTask, onRowConte
             {p.description ?? p.name}
           </span>
           {p.description && (
-            <span className="truncate text-[10.5px] leading-tight text-dim" title={p.name}>
+            <span className="truncate text-[11px] leading-tight text-dim" title={p.name}>
               {p.name}
             </span>
           )}
@@ -249,7 +160,8 @@ const GroupRow = memo(function GroupRow({
       onClick={() => onToggle(g.key)}
       onContextMenu={(e) => onRowContextMenu?.(e, g.members[0])}
       className={cn(
-        "no-drag grid w-full items-center gap-2 border-b border-line/40 bg-surface2/35 px-3 py-[7px] text-left text-[12.5px] transition-colors hover:bg-surface2/70",
+        "no-drag w-full py-[7px] text-left focus-visible:outline-none focus-visible:bg-surface2",
+        TABLE_ROW,
         ROW_CV_1LINE,
         cols,
       )}
@@ -282,7 +194,8 @@ const ChildRow = memo(function ChildRow({ p, cols, detailed, onEndTask, onRowCon
     <div
       onContextMenu={(e) => onRowContextMenu?.(e, p)}
       className={cn(
-        "group grid items-center gap-2 border-b border-line/30 bg-surface/30 px-3 py-[6px] text-[12.5px] hover:bg-surface2/50",
+        "group bg-surface2/25 py-[6px]",
+        TABLE_ROW,
         ROW_CV_1LINE,
         cols,
       )}
@@ -319,7 +232,7 @@ function EndTaskButton({ onClick, name }: { onClick: () => void; name: string })
       }}
       title="结束任务"
       aria-label={tf(`结束任务 ${name}`, `End task ${name}`)}
-      className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition hover:bg-danger hover:text-white focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+      className="no-drag grid h-6 w-6 cursor-pointer place-items-center rounded-md text-dim opacity-0 transition-[opacity,color,background-color] duration-150 hover:bg-danger/12 hover:text-danger focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 group-hover:opacity-100 group-focus-within:opacity-100"
     >
       <X size={13} />
     </button>
@@ -365,26 +278,21 @@ export function TmProcessTable({
   );
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface/50">
-      <div className={cn("grid items-center gap-2 border-b border-line bg-surface2/70 px-3 py-2.5", cols)}>
+    <div className={TABLE}>
+      <div className={cn(TABLE_HEAD, cols)}>
         <Head k="name" label="进程名" sortKey={sortKey} sortDir={sortDir} onSort={onSort} align="left" />
-        {detailed && <span className="hud-label text-right text-[9.5px] text-muted">PID</span>}
+        {detailed && <HeadLabel label="PID" />}
         <Head k="threads" label="线程" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <Head k="cpu" label="CPU" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <Head k="gpu" label="GPU" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-        {detailed && <span className="hud-label text-[9.5px] text-muted">GPU 引擎</span>}
+        {detailed && <HeadLabel label="GPU 引擎" align="left" />}
         <Head k="mem" label="内存" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
         <span />
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
         {groups.length === 0 ? (
-          <TableBodyState
-            loading={loading}
-            error={error}
-            emptyTag="NO PROCESSES"
-            emptyLabel="没有匹配的进程"
-          />
+          <TableBodyState loading={loading} error={error} emptyLabel="没有匹配的进程" emptyHint="换个关键词试试" />
         ) : (
           groups.map((g) => {
             if (!g.isGroup) {
