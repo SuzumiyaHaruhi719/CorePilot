@@ -3,10 +3,11 @@ import { HardDrive, Plus, RefreshCw, RotateCw, Scan, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
+import { Meter } from "../components/ui/Readout";
 import { TabHeader } from "../components/ui/TabHeader";
-import { ClickRipple } from "../components/ui/Ripple";
 import { cn } from "../lib/cn";
 import { formatBytes } from "../lib/format";
+import { springSmooth } from "../lib/motion";
 import { useT, useTf, tf } from "../lib/i18n";
 import { api, type ScanProgress, type VolumeInfo } from "../lib/ipc";
 import { useDiskScan } from "../store/diskScan";
@@ -204,7 +205,6 @@ export function DiskAnalyzer() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <TabHeader
-        icon={HardDrive}
         title="磁盘空间分析"
         subtitle="选择磁盘后扫描,以树图查看占用空间"
         actions={
@@ -226,7 +226,6 @@ export function DiskAnalyzer() {
       />
 
       <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6">
-        <p className="mb-3 text-[12.5px] text-muted">{t("选择要扫描的磁盘")}</p>
         <DiskList
           volumes={volumes}
           selected={selected}
@@ -259,12 +258,13 @@ interface DiskTabStripProps {
 function DiskTabStrip({ order, active, onSelect, onClose, onAdd, onRescan }: DiskTabStripProps) {
   const tfL = useTf();
   return (
-    <div className="flex items-center gap-1 border-b border-line px-4">
+    <div className="flex items-center gap-1 border-b border-line px-5">
       <button
         type="button"
         onClick={onAdd}
         title={tfL("添加磁盘", "Add disk")}
-        className="no-drag mr-1 grid size-7 place-items-center rounded-md border border-line bg-surface2 text-muted transition-colors hover:border-line-strong hover:bg-surface3 hover:text-ink"
+        aria-label={tfL("添加磁盘", "Add disk")}
+        className="no-drag mr-1 grid size-7 place-items-center rounded-md text-muted transition-colors hover:bg-surface2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
       >
         <Plus size={14} />
       </button>
@@ -286,7 +286,7 @@ function DiskTabStrip({ order, active, onSelect, onClose, onAdd, onRescan }: Dis
           type="button"
           onClick={onRescan}
           title={tfL("重新扫描", "Rescan")}
-          className="no-drag ml-1 inline-flex items-center gap-1.5 rounded-md border border-line bg-surface2 px-2 py-1.5 text-[11.5px] text-muted transition-colors hover:border-line-strong hover:bg-surface3 hover:text-ink"
+          className="no-drag ml-1 inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted transition-colors hover:bg-surface2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
         >
           <RotateCw size={13} />
           {tfL("重扫", "Rescan")}
@@ -325,24 +325,24 @@ function DiskTab({ scanId, active, onSelect, onClose }: DiskTabProps) {
         onClick={onSelect}
         className="relative z-10 flex items-center gap-1.5 text-[12.5px] font-medium focus-visible:outline-none"
       >
-        <span className="display tracking-wide">{label}</span>
+        <span className="nums">{label}</span>
         {scanning ? (
           // A real progress ring when the volume's used bytes are known; an
           // indeterminate pulse otherwise (Phase 6 threads usedBytes from the picker).
           <span className="inline-flex items-center gap-1">
             <ProgressRing pct={pct} />
-            {pct != null && <span className="nums text-[10px] text-accent">{pct}%</span>}
+            {pct != null && <span className="nums text-[11px] text-accent">{pct}%</span>}
           </span>
         ) : status === "done" ? (
-          <span className="nums text-[10.5px] text-dim">
+          <span className="nums text-[11.5px] text-dim">
             {formatBytes(progress?.bytesAlloc ?? 0)}
           </span>
         ) : status === "error" ? (
-          <span className="text-[10.5px] text-warn">
+          <span className="text-[11.5px] text-warn">
             {disconnected ? tf("已断开", "offline") : tf("错误", "error")}
           </span>
         ) : (
-          <span className="text-[10.5px] text-dim">{tf("已取消", "cancelled")}</span>
+          <span className="text-[11.5px] text-dim">{tf("已取消", "cancelled")}</span>
         )}
       </button>
 
@@ -351,7 +351,7 @@ function DiskTab({ scanId, active, onSelect, onClose }: DiskTabProps) {
         onClick={onClose}
         title={tf("关闭", "Close")}
         aria-label={tf("关闭", "Close")}
-        className="relative z-10 grid size-4 place-items-center rounded text-dim opacity-0 transition-opacity hover:text-ink group-hover:opacity-100"
+        className="relative z-10 grid size-5 place-items-center rounded text-dim opacity-0 transition-[opacity,background-color,color] hover:bg-surface3 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
       >
         <X size={12} />
       </button>
@@ -359,8 +359,8 @@ function DiskTab({ scanId, active, onSelect, onClose }: DiskTabProps) {
       {active && (
         <motion.span
           layoutId="disk-sec"
-          className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-accent glow-sm"
-          transition={{ type: "spring", stiffness: 400, damping: 32 }}
+          className="absolute inset-x-2 bottom-0 h-[2px] rounded-full bg-accent"
+          transition={springSmooth}
         />
       )}
     </div>
@@ -426,11 +426,23 @@ function DiskList({ volumes, selected, onToggle, onScan, loading }: DiskListProp
   return (
     <>
       {volumes !== null && scannable.length === 0 && !loading && (
-        <div className="grid place-items-center rounded-xl border border-line bg-surface2/40 py-16 text-[13px] text-muted">
-          {t("未检测到可扫描的磁盘")}
+        <div className="flex flex-col items-center py-16 text-center">
+          <HardDrive size={22} className="text-dim" />
+          <div className="mt-2 text-[13px] text-muted">{t("未检测到可扫描的磁盘")}</div>
         </div>
       )}
-      <div className="flex flex-col gap-2.5">
+      {volumes === null && (
+        <div className="glass rounded-xl" aria-busy>
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="flex items-center gap-4 border-t border-line px-4 py-4 first:border-t-0">
+              <span className="skeleton h-4 w-4" />
+              <span className="skeleton h-6 w-10" />
+              <span className="skeleton h-3 flex-1" />
+            </div>
+          ))}
+        </div>
+      )}
+      <div className={cn("flex flex-col", (volumes ?? []).length > 0 && "glass rounded-xl")}>
         {(volumes ?? []).map((vol) => (
           <VolumeRow
             key={vol.scanId}
@@ -461,18 +473,18 @@ function VolumeRow({ vol, checked, onToggle, onScan }: VolumeRowProps) {
   return (
     <div
       className={cn(
-        "group relative flex items-center gap-4 rounded-xl border border-line bg-surface2 px-4 py-3.5 transition-colors",
-        vol.supported ? "hover:border-line-strong hover:bg-surface3" : "opacity-45",
+        "group relative flex items-center gap-4 border-t border-line px-4 py-3.5 transition-colors duration-150 first:border-t-0",
+        vol.supported ? "hover:bg-surface2/50" : "opacity-45",
       )}
     >
-      {/* Multi-select checkbox (leading). */}
+      {/* Multi-select checkbox (leading). Native, accent-tinted. */}
       <input
         type="checkbox"
         checked={checked}
         disabled={!vol.supported}
         onChange={onToggle}
         aria-label={`${vol.letter} ${tf("已选", "select")}`}
-        className="size-4 shrink-0 cursor-pointer accent-accent disabled:cursor-not-allowed"
+        className="size-4 shrink-0 cursor-pointer accent-[var(--color-accent)] disabled:cursor-not-allowed"
       />
 
       {/* Row body — single-click scans just this disk. */}
@@ -481,58 +493,50 @@ function VolumeRow({ vol, checked, onToggle, onScan }: VolumeRowProps) {
         disabled={!vol.supported}
         onClick={onScan}
         className={cn(
-          "no-drag relative flex min-w-0 flex-1 items-center gap-4 overflow-hidden text-left",
+          "no-drag relative flex min-w-0 flex-1 items-center gap-5 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
           vol.supported ? "cursor-pointer" : "cursor-not-allowed",
         )}
       >
-        <motion.div
-          whileHover={vol.supported ? { scale: 1.06 } : undefined}
-          className="grid size-11 shrink-0 place-items-center rounded-lg border border-line bg-base/40 text-accent"
-        >
-          <HardDrive size={20} strokeWidth={2.1} />
-        </motion.div>
+        <span className="nums w-12 shrink-0 text-[26px] font-light leading-none text-ink">{vol.letter}</span>
 
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
-            <span className="display text-[15px] font-bold tracking-wide text-ink">{vol.letter}</span>
-            {vol.label && <span className="truncate text-[12.5px] text-muted">{vol.label}</span>}
-            {vol.fileSystem && (
-              <span className="rounded border border-line bg-base/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-dim">
-                {vol.fileSystem}
+            <span className="truncate text-[13px] font-medium text-ink">{vol.label || tf("本地磁盘", "Local Disk")}</span>
+            {vol.fileSystem && <span className="rounded bg-surface3 px-1.5 text-[11px] leading-5 text-dim">{vol.fileSystem}</span>}
+            {vol.supported && (
+              <span className="nums ml-auto shrink-0 text-[12px] text-muted">
+                <span className={nearFull ? "text-warn" : "text-ink"}>{usedPct.toFixed(0)}%</span> {t("已用")}
               </span>
             )}
           </div>
 
           {/* Usage bar — warn-tint when >85% full. */}
-          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-surface3">
-            <motion.div
-              initial={{ width: 0 }}
-              animate={{ width: `${usedPct}%` }}
-              transition={{ type: "spring", stiffness: 160, damping: 26 }}
-              className={cn("h-full rounded-full", nearFull ? "bg-warn" : "grad-accent")}
-            />
-          </div>
+          <Meter className="mt-2" value={usedPct} color={nearFull ? "var(--color-warn)" : "var(--color-accent)"} />
 
-          <div className="mt-1.5 flex items-center gap-3 text-[11.5px] text-muted">
+          <div className="nums mt-1.5 flex items-center gap-2 text-[12px] text-muted">
             {vol.supported ? (
               <>
                 <span>
-                  {t("已用")} <span className="nums text-ink">{formatBytes(used)}</span>
-                </span>
-                <span className="text-dim">/</span>
-                <span>
-                  {t("可用")} <span className="nums text-ink">{formatBytes(vol.free)}</span>
+                  {t("已用")} <span className="text-ink">{formatBytes(used)}</span>
                 </span>
                 <span className="text-dim">·</span>
-                <span className="nums">{formatBytes(vol.total)}</span>
+                <span>
+                  {t("可用")} <span className="text-ink">{formatBytes(vol.free)}</span>
+                </span>
+                <span className="text-dim">·</span>
+                <span>{formatBytes(vol.total)}</span>
               </>
             ) : (
               <span className="text-dim">{t("无法读取")}</span>
             )}
           </div>
         </div>
-        {vol.supported && <ClickRipple />}
       </button>
+      {vol.supported && (
+        <Button size="sm" onClick={onScan} className="opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100">
+          <Scan size={13} /> {t("扫描")}
+        </Button>
+      )}
     </div>
   );
 }

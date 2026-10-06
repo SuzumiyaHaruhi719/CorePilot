@@ -46,8 +46,10 @@ export function Button({ children, onClick, variant = "ghost", size = "md", disa
         "transition-[background-color,color,box-shadow] duration-150 ease-out",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:ring-offset-2 focus-visible:ring-offset-base",
         SIZES[size],
-        VARIANTS[variant],
-        disabled ? "cursor-not-allowed opacity-40" : "cursor-pointer",
+        // A disabled primary goes neutral: a 40%-opacity accent reads as a
+        // muddy half-lit button rather than "not available yet".
+        disabled && variant === "primary" ? "bg-surface3 text-dim" : VARIANTS[variant],
+        disabled ? cn("cursor-not-allowed", variant !== "primary" && "opacity-40") : "cursor-pointer",
         className,
       )}
     >

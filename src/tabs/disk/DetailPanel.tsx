@@ -109,12 +109,12 @@ export function DetailPanel({ scanId, view, selected, metric, skipped }: DetailP
               {displayName(focus, tf)}
             </div>
             {focus.path && (
-              <div className="truncate text-[10.5px] text-dim" title={focus.path}>
+              <div className="truncate text-[11.5px] text-dim" title={focus.path}>
                 {focus.path}
               </div>
             )}
             {!selected && (
-              <div className="mt-0.5 text-[10.5px] text-dim">
+              <div className="mt-0.5 text-[11.5px] text-dim">
                 {tf("当前层级汇总", "Current level summary")}
               </div>
             )}
@@ -141,12 +141,12 @@ export function DetailPanel({ scanId, view, selected, metric, skipped }: DetailP
         {(denied || hidden) && (
           <div className="mt-2 flex flex-wrap gap-1.5">
             {denied && (
-              <span className="rounded border border-warn/40 bg-warn/10 px-1.5 py-0.5 text-[10px] text-warn">
+              <span className="rounded border border-warn/40 bg-warn/10 px-1.5 py-0.5 text-[11px] text-warn">
                 {tf("无访问权限", "Access denied")}
               </span>
             )}
             {hidden && (
-              <span className="rounded border border-line bg-base/40 px-1.5 py-0.5 text-[10px] text-dim">
+              <span className="rounded border border-line bg-base/40 px-1.5 py-0.5 text-[11px] text-dim">
                 {tf("隐藏", "Hidden")}
               </span>
             )}
@@ -236,8 +236,8 @@ export function DetailPanel({ scanId, view, selected, metric, skipped }: DetailP
           >
             <ShieldAlert size={13} className="shrink-0 text-warn" />
             <span className="flex-1">
-              {tf("已跳过", "Skipped")}{" "}
-              <span className="nums text-ink">{skipped.toLocaleString()}</span>{" "}
+              {tf("已跳过", "Skipped")}{""}
+              <span className="nums text-ink">{skipped.toLocaleString()}</span>{""}
               {tf("项", "items")}
             </span>
             <ChevronRight

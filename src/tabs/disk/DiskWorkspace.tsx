@@ -48,7 +48,7 @@ import type { ColorMode } from "./treemap/colors";
  *    paused / finished tab stops polling. `mounted` only while this disk is the
  *    active tab, so background tabs never poll (their scan still runs).
  *  - A one-shot ~220ms zoom tween on drill (gated by `data-reduce-motion`; canvas
- *    stays out of any Motion `layout` container — MEMORY: group glow).
+ *    stays out of any Motion `layout` container — MEMORY: group).
  *  - The side detail panel (`disk_top_items` + selection).
  *
  * See docs/superpowers/specs/2026-06-23-disk-space-analyzer-design.md §3.4/§3.8/§4.
@@ -601,9 +601,9 @@ function ScanProgressChip({ progress }: { progress: ScanProgress | null }) {
   const secs = progress.elapsedMs / 1000;
   const fps = secs > 0 ? Math.round(progress.filesSeen / secs) : 0;
   return (
-    <div className="nums ml-auto flex items-center gap-3 whitespace-nowrap text-[10.5px] text-dim">
+    <div className="nums ml-auto flex items-center gap-3 whitespace-nowrap text-[11.5px] text-dim">
       <span>
-        <span className="text-muted">{progress.filesSeen.toLocaleString()}</span>{" "}
+        <span className="text-muted">{progress.filesSeen.toLocaleString()}</span>{""}
         {tf("文件", "files")}
       </span>
       <span>
