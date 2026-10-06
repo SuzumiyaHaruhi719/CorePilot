@@ -1,15 +1,15 @@
-import { Activity } from "lucide-react";
+
 import { useSharedSensors } from "../../hooks/useSharedTelemetry";
 import type { CpuSensor } from "../../lib/ipc";
 import { useTf } from "../../lib/i18n";
 
 // Per-SensorType formatting. Mirrors LHM's CPU SensorType set that sensord emits.
 const UNIT: Record<string, string> = {
-  Clock: " MHz",
+  Clock: "MHz",
   Temperature: " °C",
-  Voltage: " V",
-  Power: " W",
-  Current: " A",
+  Voltage: "V",
+  Power: "W",
+  Current: "A",
   Load: "%",
   Factor: "×",
 };
@@ -56,9 +56,9 @@ export function SmuTelemetry() {
   })).filter((g) => g.items.length > 0);
 
   return (
-    <div className="glass hairline space-y-3 rounded-2xl p-4">
-      <div className="flex items-center gap-2 text-[12.5px] font-semibold text-muted">
-        <Activity size={15} className="text-accent" /> {tf("SMU 遥测", "SMU telemetry")}
+    <div className="glass space-y-3 rounded-xl p-4">
+      <div className="flex items-center gap-2 text-[13px] font-semibold text-ink">
+        {tf("SMU 遥测", "SMU telemetry")}
         <span className="text-[11px] font-normal text-dim">
           · {tf("逐核频率 / CCD 温度 / 电压 / 功耗(只读)", "per-core clocks / CCD temps / voltages / power (read-only)")}
         </span>
@@ -78,16 +78,16 @@ export function SmuTelemetry() {
               <div className="mb-1.5 text-[11px] font-medium text-dim">
                 {tf(...(GROUP_LABEL[g.kind] ?? [g.kind, g.kind]))}
               </div>
-              <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="grid gap-x-8 sm:grid-cols-2 lg:grid-cols-3">
                 {g.items.map((s, i) => (
                   <div
                     key={`${g.kind}-${i}`}
-                    className="flex items-center justify-between gap-2 rounded-lg border border-line bg-surface2/40 px-2.5 py-1.5"
+                    className="flex items-center justify-between gap-2 border-b border-line/60 py-1.5"
                   >
-                    <span className="truncate text-[11px] text-muted" title={s.name}>
+                    <span className="truncate text-[12px] text-muted" title={s.name}>
                       {s.name}
                     </span>
-                    <span className="shrink-0 font-mono text-[11.5px] font-semibold tabular-nums text-ink">
+                    <span className="nums shrink-0 text-[13px] text-ink">
                       {fmt(s)}
                     </span>
                   </div>

@@ -1,15 +1,17 @@
 import { AnimatePresence, motion } from "motion/react";
-import { AlertTriangle, Check, Globe, Loader2, MemoryStick, Power, RefreshCw, Trash2, Wand2, Zap } from "lucide-react";
+import { AlertTriangle, Check, Globe, Layers, Loader2, MemoryStick, Power, RefreshCw, Trash2, Wand2 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useEffect, useState, type CSSProperties } from "react";
-import { ClickRipple } from "../components/ui/Ripple";
+import { useEffect, useState } from "react";
+import { Button } from "../components/ui/Button";
+import { Panel } from "../components/ui/Panel";
+import { Cluster, ClusterCell, Readout } from "../components/ui/Readout";
+import { SecondaryTabs } from "../components/ui/SecondaryTabs";
 import { Segmented } from "../components/ui/Segmented";
 import { TabHeader } from "../components/ui/TabHeader";
-import { hoverPop } from "../lib/motion";
+import { easeOut } from "../lib/motion";
 import { cn } from "../lib/cn";
 import { formatBytes } from "../lib/format";
-import { hueColor, accentHue } from "../lib/colors";
-import { useTf } from "../lib/i18n";
+import { useT, useTf } from "../lib/i18n";
 import { api, type MemDetail } from "../lib/ipc";
 import { Tuning } from "./Tuning";
 
@@ -21,15 +23,17 @@ function getErrorMessage(error: unknown): string {
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-interface ActionCardProps {
+interface ActionRowProps {
   icon: LucideIcon;
   title: string;
   desc: string;
-  hue: number;
   onRun: () => Promise<string>;
 }
 
-function ActionCard({ icon: Icon, title, desc, hue, onRun }: ActionCardProps) {
+/** One single-shot action: what it does on the left, its result + run button on the right. */
+function ActionRow({ icon: Icon, title, desc, onRun }: ActionRowProps) {
+  const t = useT();
+  const tf = useTf();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ text: string; ok: boolean } | null>(null);
 
@@ -46,59 +50,33 @@ function ActionCard({ icon: Icon, title, desc, hue, onRun }: ActionCardProps) {
     }
   }
 
-  const tint = hueColor(hue, 72, 0.16);
-
   return (
-    <motion.button
-      onClick={run}
-      aria-busy={busy}
-      whileHover={{ scale: 1.02, y: -3 }}
-      whileTap={{ scale: 0.98 }}
-      transition={hoverPop}
-      className={cn(
-        "hud-frame glass hairline group relative flex min-h-[150px] flex-col items-start gap-3 overflow-hidden rounded-2xl p-4 text-left transition-[box-shadow] duration-200",
-        busy ? "cursor-wait" : "cursor-pointer",
-      )}
-      style={{ "--glow": tint } as CSSProperties}
-    >
-      {/* Faint telemetry tint that lights up on hover. */}
-      <span
-        className="pointer-events-none absolute inset-x-0 top-0 h-px opacity-60"
-        style={{ background: `linear-gradient(90deg, transparent, ${tint}, transparent)` }}
-      />
-      <span
-        className="grid h-10 w-10 place-items-center rounded-xl text-white transition-shadow duration-200 glow-sm group-hover:glow"
-        style={{ background: tint, "--glow": tint } as CSSProperties}
-      >
-        {busy ? <Loader2 size={19} className="animate-spin" /> : <Icon size={19} />}
-      </span>
-      <div className="flex-1">
-        <div className="text-[13.5px] font-semibold text-ink">{title}</div>
-        <div className="mt-0.5 text-[11.5px] leading-relaxed text-dim">{desc}</div>
+    <div className="flex items-center gap-4 border-t border-line py-3.5 first:border-t-0 first:pt-1">
+      <Icon size={17} className="shrink-0 text-dim" />
+      <div className="min-w-0 flex-1">
+        <div className="text-[13px] font-medium text-ink">{t(title)}</div>
+        <div className="text-[12px] text-muted">{t(desc)}</div>
       </div>
       <AnimatePresence mode="wait">
-        {result ? (
-          <motion.div
-            key="result"
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
+        {result && (
+          <motion.span
+            key={result.text}
+            role="status"
+            initial={{ opacity: 0, x: 4 }}
+            animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0 }}
-            className={cn("flex items-center gap-1.5 text-[11.5px] font-medium", result.ok ? "text-ok glow-text" : "text-danger")}
+            transition={{ duration: 0.18, ease: easeOut }}
+            className={cn("nums flex max-w-[40%] items-center gap-1.5 truncate text-[12px]", result.ok ? "text-ok" : "text-danger")}
           >
-            {result.ok ? <Check size={13} /> : <AlertTriangle size={13} />} <span className="nums">{result.text}</span>
-          </motion.div>
-        ) : (
-          <motion.div
-            key="cta"
-            initial={false}
-            className="hud-label text-[10px] text-dim transition-colors group-hover:text-muted"
-          >
-            {busy ? "执行中…" : "点击执行"}
-          </motion.div>
+            {result.ok ? <Check size={13} className="shrink-0" /> : <AlertTriangle size={13} className="shrink-0" />}
+            <span className="truncate">{t(result.text)}</span>
+          </motion.span>
         )}
       </AnimatePresence>
-      <ClickRipple />
-    </motion.button>
+      <Button size="sm" onClick={() => void run()} disabled={busy} className="min-w-16">
+        {busy ? <Loader2 size={13} className="animate-spin" /> : tf("执行", "Run")}
+      </Button>
+    </div>
   );
 }
 
@@ -241,169 +219,116 @@ export function Optimize() {
 
   return (
     <>
-      <TabHeader icon={Zap} title="优化" subtitle="释放内存、清理缓存、深度调优 — 一键提升游戏性能" />
-      <div className="px-6 pb-3 pt-1">
-        <Segmented
-          id="opt-view"
-          value={view}
-          onChange={(v) => setView(v as "quick" | "deep")}
-          options={[
-            { value: "quick", label: "快速优化" },
-            { value: "deep", label: "深度优化" },
-          ]}
-        />
-      </div>
+      <TabHeader title="优化" subtitle="释放内存、清理缓存、深度调优 — 一键提升游戏性能" />
+      <SecondaryTabs
+        tabs={[
+          { id: "quick", label: "快速优化" },
+          { id: "deep", label: "深度优化" },
+        ]}
+        active={view}
+        onChange={(v) => setView(v)}
+        layoutId="opt-view"
+      />
       <AnimatePresence mode="wait" initial={false}>
         <motion.div
           key={view}
-          initial={{ opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -4 }}
-          transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+          initial={{ opacity: 0, y: 4 }}
+          animate={{ opacity: 1, y: 0, transition: { duration: 0.18, ease: easeOut } }}
+          exit={{ opacity: 0, transition: { duration: 0.08 } }}
           className="flex min-h-0 flex-1 flex-col"
         >
           {view === "deep" ? (
             <Tuning embedded />
           ) : (
-            <div className="min-h-0 flex-1 space-y-5 overflow-auto px-6 pb-6">
-        {/* Memory panel */}
-        <div className="hud-frame glass hairline rounded-2xl p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <MemoryStick size={15} className="text-cyan" />
-              <span className="hud-label text-[10.5px] text-dim">物理内存 · MEMORY</span>
-            </div>
-            <button
-              onClick={() => void refresh()}
-              title="刷新"
-              className="no-drag grid h-7 w-7 cursor-pointer place-items-center rounded-lg text-dim transition-colors hover:bg-surface3 hover:text-ink"
-            >
-              <RefreshCw size={13} />
-            </button>
-          </div>
-          <div className="mb-2 flex items-end justify-between">
-            <div className="nums text-[22px] font-semibold text-ink">
-              {mem ? formatBytes(mem.used) : "—"}
-              <span className="ml-1 text-[13px] font-normal text-dim">
-                / {mem ? formatBytes(mem.total) : "—"}
-              </span>
-            </div>
-            <div className="nums text-[15px] font-semibold" style={{ color: hueColor(loadPct > 80 ? 22 : accentHue(), 72, 0.16) }}>
-              {loadPct}%
-            </div>
-          </div>
-          <div className="h-2.5 overflow-hidden rounded-full bg-surface3">
-            <motion.div
-              className="h-full rounded-full bg-accent glow-sm"
-              initial={false}
-              animate={{ width: `${loadPct}%` }}
-              transition={{ type: "spring", stiffness: 120, damping: 22 }}
-            />
-          </div>
-        </div>
+            <div className="min-h-0 flex-1 space-y-4 overflow-auto px-6 pb-6 pt-4">
+              {/* Memory instrument */}
+              <Panel
+                title="物理内存"
+                actions={
+                  <Button variant="subtle" size="sm" className="w-7 px-0" ariaLabel={tf("刷新", "Refresh")} title={tf("刷新", "Refresh")} onClick={() => void refresh()}>
+                    <RefreshCw size={13} />
+                  </Button>
+                }
+                flush
+              >
+                <Cluster className="rounded-b-xl" min={140}>
+                  <ClusterCell meter={loadPct} meterColor={loadPct > 80 ? "var(--color-warn)" : "var(--color-cyan)"}>
+                    <Readout label="已用" value={mem ? formatBytes(mem.used) : null} size="lg" sub={mem ? `/ ${formatBytes(mem.total)}` : undefined} />
+                  </ClusterCell>
+                  <ClusterCell>
+                    <Readout label="可用" value={mem ? formatBytes(mem.avail) : null} size="lg" />
+                  </ClusterCell>
+                  <ClusterCell>
+                    <Readout label="负载" value={mem ? loadPct : null} unit="%" size="lg" color={loadPct > 80 ? "var(--color-warn)" : undefined} />
+                  </ClusterCell>
+                </Cluster>
+              </Panel>
 
-        {/* Power plan */}
-        <div className="glass hairline flex items-center justify-between gap-4 rounded-2xl p-4">
-          <div className="flex items-center gap-2.5">
-            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-warn/15 text-warn">
-              <Power size={17} />
-            </span>
-            <div>
-              <div className="text-[13.5px] font-semibold text-ink">电源计划</div>
-              <div className="text-[11.5px] text-dim">高性能模式降低 CPU 调度延迟，适合游戏</div>
+              {/* One-click — the single primary action of this view. */}
+              <Panel>
+                <div className="flex flex-wrap items-center gap-4">
+                  <Wand2 size={20} className="shrink-0 text-accent" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[14px] font-semibold text-ink">{tf("一键优化", "One-click optimize")}</div>
+                    {/* Every step this button performs is listed here, the power plan
+                        included — it is the one step that persists after the click. */}
+                    <div className="mt-0.5 text-[12.5px] text-muted">
+                      {tf(
+                        "释放内存 + 清理缓存 + 清理临时文件 + 刷新 DNS + 高性能电源计划",
+                        "Free memory + clear cache + clean temp + flush DNS + High Performance power plan",
+                      )}
+                    </div>
+                  </div>
+                  <Button variant="primary" onClick={() => void runAll()} disabled={heroBusy} className="h-9 px-4">
+                    {heroBusy && <Loader2 size={14} className="animate-spin" />} {heroBusy ? tf("优化中…", "Optimizing…") : tf("立即优化", "Optimize now")}
+                  </Button>
+                </div>
+                <AnimatePresence>
+                  {heroResult && (
+                    <motion.div
+                      role="status"
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: "auto" }}
+                      exit={{ opacity: 0, height: 0 }}
+                      transition={{ duration: 0.2, ease: easeOut }}
+                      className="overflow-hidden"
+                    >
+                      <div className={cn("mt-3 flex items-center gap-2 border-t border-line pt-3 text-[12.5px]", heroResult.ok ? "text-ok" : "text-danger")}>
+                        {heroResult.ok ? <Check size={14} /> : <AlertTriangle size={14} />} <span className="nums">{heroResult.text}</span>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </Panel>
+
+              {/* Individual actions + the power plan setting */}
+              <Panel title="单项操作" desc="按需单独执行，所有操作均安全可逆" bodyClassName="px-4 pb-1">
+                <ActionRow icon={MemoryStick} title="释放内存" desc="清空所有进程的工作集，回收驻留内存" onRun={runFree} />
+                <ActionRow icon={Layers} title="清理缓存" desc="清除 standby list，释放被缓存占用的内存" onRun={runPurge} />
+                <ActionRow icon={Trash2} title="清理临时文件" desc="删除用户与系统临时目录中的文件" onRun={runClean} />
+                <ActionRow icon={Globe} title="刷新 DNS" desc="清空 DNS 解析缓存" onRun={runDns} />
+                <div className="flex items-center gap-4 border-t border-line py-3.5">
+                  <Power size={17} className="shrink-0 text-dim" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-medium text-ink">电源计划</div>
+                    <div className="text-[12px] text-muted">高性能模式降低 CPU 调度延迟，适合游戏</div>
+                  </div>
+                  <Segmented
+                    id="plan"
+                    value={powerPlan === "high" ? "high" : "balanced"}
+                    onChange={changePlan}
+                    options={[
+                      { value: "balanced", label: "平衡" },
+                      { value: "high", label: "高性能" },
+                    ]}
+                  />
+                </div>
+              </Panel>
+
+              <p className="max-w-[110ch] text-[11.5px] leading-relaxed text-dim">
+                提示：释放内存/清理缓存会让被回收的内容在下次访问时重新加载，建议在游戏前或内存占用偏高时使用。所有操作均安全可逆（缓存会自然重建）。
+              </p>
             </div>
-          </div>
-          <Segmented
-            id="plan"
-            value={powerPlan === "high" ? "high" : "balanced"}
-            onChange={changePlan}
-            options={[
-              { value: "balanced", label: "平衡" },
-              { value: "high", label: "高性能" },
-            ]}
-          />
-        </div>
-
-        {/* Hero one-click — the single primary CTA of this view. */}
-        <motion.button
-          onClick={runAll}
-          disabled={heroBusy}
-          whileHover={heroBusy ? undefined : { y: -2, scale: 1.012 }}
-          whileTap={heroBusy ? undefined : { scale: 0.99 }}
-          transition={hoverPop}
-          className={cn(
-            "relative flex w-full items-center gap-4 overflow-hidden rounded-2xl border border-accent/40 bg-accent/10 p-4 text-left text-ink glow transition-[border-color,background-color,box-shadow] duration-200",
-            heroBusy ? "cursor-wait opacity-90" : "cursor-pointer hover:border-accent/60 hover:bg-accent/15",
-          )}
-        >
-          <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl border border-accent/30 bg-accent/20 text-accent-bright glow-sm">
-            {heroBusy ? <Loader2 size={24} className="animate-spin" /> : <Wand2 size={24} />}
-          </span>
-          <div className="flex-1">
-            <div className="display text-[15px] font-bold uppercase tracking-[0.06em]">一键优化</div>
-            {/* Every step this button performs is listed here, the power plan
-                included — it is the one step that persists after the click, so
-                omitting it made 一键优化 change a Windows setting the user never
-                asked for. Uses tf() rather than a dict key because the string
-                changed and the walker's EN table is keyed by the old wording. */}
-            <div className="text-[12px] text-muted">
-              {tf(
-                "释放内存 + 清理缓存 + 清理临时文件 + 刷新 DNS + 高性能电源计划",
-                "Free memory + clear cache + clean temp + flush DNS + High Performance power plan",
-              )}
-            </div>
-            <AnimatePresence>
-              {heroResult && (
-                <motion.div
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  className={cn("mt-1 flex items-center gap-1.5 text-[12px] font-medium", heroResult.ok ? "text-ok" : "text-danger")}
-                >
-                  {heroResult.ok ? <Check size={14} /> : <AlertTriangle size={14} />} <span className="nums">{heroResult.text}</span>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-          <ClickRipple />
-        </motion.button>
-
-        {/* Action grid — individual "mission control" actions, subordinate to the hero. */}
-        <div>
-          <div className="mb-2.5 flex items-center gap-2">
-            <span className="hud-label text-[10.5px] text-dim">单项操作 · ACTIONS</span>
-            <span className="h-px flex-1 bg-line/70" />
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <ActionCard
-              icon={MemoryStick}
-              title="释放内存"
-              desc="清空所有进程的工作集，回收驻留内存"
-              hue={accentHue()}
-              onRun={runFree}
-            />
-            <ActionCard
-              icon={Trash2}
-              title="清理缓存"
-              desc="清除 standby list，释放被缓存占用的内存"
-              hue={182}
-              onRun={runPurge}
-            />
-            <ActionCard
-              icon={Trash2}
-              title="清理临时文件"
-              desc="删除用户与系统临时目录中的文件"
-              hue={75}
-              onRun={runClean}
-            />
-            <ActionCard icon={Globe} title="刷新 DNS" desc="清空 DNS 解析缓存" hue={220} onRun={runDns} />
-          </div>
-        </div>
-
-        <p className={cn("text-[11px] leading-relaxed text-dim")}>
-          提示：释放内存/清理缓存会让被回收的内容在下次访问时重新加载，建议在游戏前或内存占用偏高时使用。所有操作均安全可逆（缓存会自然重建）。
-        </p>
-          </div>
           )}
         </motion.div>
       </AnimatePresence>

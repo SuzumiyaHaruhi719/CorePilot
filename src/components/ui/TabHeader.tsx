@@ -17,7 +17,7 @@ export function TabHeader({ title, subtitle, actions }: TabHeaderProps) {
     <header className="flex shrink-0 items-end justify-between gap-6 px-6 pb-4 pt-5">
       <div className="min-w-0">
         <h1 className="font-title text-[20px] font-semibold leading-tight text-ink">{t(title)}</h1>
-        {subtitle && <p className="mt-1 max-w-[72ch] text-pretty text-[12.5px] text-muted">{t(subtitle)}</p>}
+        {subtitle && <p className="mt-1 max-w-[110ch] text-pretty text-[12.5px] text-muted">{t(subtitle)}</p>}
       </div>
       {actions && <div className="no-drag flex shrink-0 items-center gap-2">{actions}</div>}
     </header>

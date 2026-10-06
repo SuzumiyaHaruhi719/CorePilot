@@ -7,15 +7,16 @@ import {
   ShieldAlert,
   ShieldCheck,
   ShieldPlus,
-  Wrench,
 } from "lucide-react";
 import { useState } from "react";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
+import { Badge } from "../components/ui/Readout";
 import { TabHeader } from "../components/ui/TabHeader";
 import { Toggle } from "../components/ui/Toggle";
 import { cn } from "../lib/cn";
-import { translate, useTf } from "../lib/i18n";
+import { translate, useT, useTf } from "../lib/i18n";
+import { easeOut } from "../lib/motion";
 import { api } from "../lib/ipc";
 import { useTweaks } from "../store/tweaks";
 
@@ -56,6 +57,7 @@ function getErrorMessage(e: unknown): string {
 }
 
 export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
+  const t = useT();
   const tf = useTf();
   const { applied, snapshots, setApplied, setSnapshot } = useTweaks();
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -148,18 +150,16 @@ export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
     return (
       <div
         className={cn(
-          "flex items-center justify-between gap-3 rounded-xl border p-3.5",
-          zone === "danger" ? "border-danger/25 bg-danger/[0.04]" : "border-line bg-surface2/40",
+          "flex items-center justify-between gap-4 border-t py-3.5 first:border-t-0 first:pt-1",
+          zone === "danger" ? "border-danger/15" : "border-line",
         )}
       >
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="text-[13px] font-medium text-ink">{meta.name}</span>
-            {meta.reboot && (
-              <span className="rounded bg-warn/15 px-1.5 py-0.5 text-[9.5px] font-medium text-warn">需重启</span>
-            )}
+            {meta.reboot && <Badge tone="warn">{t("需重启")}</Badge>}
           </div>
-          <div className="mt-0.5 text-[11px] leading-relaxed text-dim">{meta.desc}</div>
+          <div className="mt-0.5 text-[12px] leading-relaxed text-muted">{meta.desc}</div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {busy && <Loader2 size={14} className="animate-spin text-dim" />}
@@ -178,7 +178,6 @@ export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
     <>
       {!embedded && (
         <TabHeader
-          icon={Wrench}
           title="深度优化"
           subtitle="可逆的系统性能优化 —— 安全区随便开,危险区谨慎用。每项都可一键还原为系统默认。"
         />
@@ -186,38 +185,38 @@ export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
 
       <div className="min-h-0 flex-1 space-y-4 overflow-auto px-6 pb-6">
         {/* Action bar */}
-        <div className="glass hairline flex flex-wrap items-center gap-2 rounded-2xl p-3.5">
+        <div className={cn("flex flex-wrap items-center gap-2", embedded && "pt-4")}>
+          <span className="mr-auto text-[12.5px] text-muted">{t("建议先创建还原点再调整")}</span>
+          <AnimatePresence>
+            {status && (
+              <motion.span
+                role="status"
+                initial={{ opacity: 0, x: 4 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.18, ease: easeOut }}
+                className={cn("mr-2 flex items-center gap-1.5 text-[12px]", status.ok ? "text-ok" : "text-danger")}
+              >
+                {status.ok ? <Check size={13} /> : <AlertTriangle size={13} />} {status.msg}
+              </motion.span>
+            )}
+          </AnimatePresence>
           <Button onClick={() => void makeRestorePoint()} disabled={busyId !== null}>
             {busyId === "__rp__" ? <Loader2 size={14} className="animate-spin" /> : <ShieldPlus size={14} />} 创建系统还原点
           </Button>
           <Button onClick={() => void revertAll()} disabled={busyId !== null}>
             {busyId === "__all__" ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />} 全部还原默认
           </Button>
-          <AnimatePresence>
-            {status && (
-              <motion.span
-                initial={{ opacity: 0, x: -6 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0 }}
-                className={cn(
-                  "ml-1 flex items-center gap-1.5 text-[12px] font-medium",
-                  status.ok ? "text-ok" : "text-danger",
-                )}
-              >
-                {status.ok ? <Check size={13} /> : <AlertTriangle size={13} />} {status.msg}
-              </motion.span>
-            )}
-          </AnimatePresence>
-          <span className="ml-auto text-[11px] text-dim">建议先创建还原点再调整</span>
         </div>
 
         {/* Safe zone */}
-        <div className="glass hairline space-y-3 rounded-2xl p-4">
-          <div className="flex items-center gap-2 text-[12.5px] font-semibold text-muted">
-            <ShieldCheck size={15} className="text-ok" /> 安全区
-            <span className="text-[11px] font-normal text-dim">· 可逆、低风险,放心开</span>
+        <div className="glass rounded-xl px-4 pb-1 pt-3.5">
+          <div className="mb-2 flex items-baseline gap-2">
+            <ShieldCheck size={15} className="translate-y-0.5 text-ok" />
+            <span className="text-[13px] font-semibold text-ink">{t("安全区")}</span>
+            <span className="text-[12px] text-muted">{tf("可逆、低风险,放心开", "Reversible and low-risk")}</span>
           </div>
-          <div className="grid gap-2.5 lg:grid-cols-2">
+          <div>
             {SAFE_TWEAKS.map((t) => (
               <TweakRow key={t.id} meta={t} zone="safe" />
             ))}
@@ -225,15 +224,16 @@ export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
         </div>
 
         {/* Danger zone */}
-        <div className="rounded-2xl border border-danger/30 bg-danger/[0.05] p-4">
-          <div className="mb-1 flex items-center gap-2 text-[12.5px] font-semibold text-danger">
-            <ShieldAlert size={15} /> 危险区
-            <span className="text-[11px] font-normal text-danger/70">· 性能收益更大,但会削弱系统安全/功能</span>
+        <div className="rounded-xl bg-danger/[0.04] px-4 pb-1 pt-3.5 ring-1 ring-inset ring-danger/30">
+          <div className="flex items-baseline gap-2">
+            <ShieldAlert size={15} className="translate-y-0.5 text-danger" />
+            <span className="text-[13px] font-semibold text-danger">{t("危险区")}</span>
+            <span className="text-[12px] text-muted">{tf("性能收益更大,但会削弱系统安全/功能", "Bigger gains, weaker security or features")}</span>
           </div>
-          <p className="mb-3 text-[11px] leading-relaxed text-danger/80">
+          <p className="mb-2 mt-1 max-w-[100ch] text-[12px] leading-relaxed text-muted">
             以下项目会降低系统安全性或关闭系统功能。仅在你清楚后果时使用,开启需二次确认,且随时可一键还原。
           </p>
-          <div className="grid gap-2.5 lg:grid-cols-2">
+          <div>
             {DANGER_TWEAKS.map((t) => (
               <TweakRow key={t.id} meta={t} zone="danger" />
             ))}
@@ -274,7 +274,7 @@ export function Tuning({ embedded = false }: { embedded?: boolean } = {}) {
         {confirmTweak && (
           <div className="space-y-2">
             <div className="text-[13.5px] font-semibold text-ink">{confirmTweak.name}</div>
-            <p className="text-[12px] leading-relaxed text-dim">{confirmTweak.desc}</p>
+            <p className="text-[12.5px] leading-relaxed text-muted">{confirmTweak.desc}</p>
             {confirmTweak.reboot && (
               <p className="text-[11.5px] text-warn">该项需要重启电脑后才完全生效。</p>
             )}

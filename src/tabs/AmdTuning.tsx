@@ -1,4 +1,3 @@
-import { Activity } from "lucide-react";
 import { TabHeader } from "../components/ui/TabHeader";
 import { SmuTelemetry } from "../components/tuning/SmuTelemetry";
 import { SmuTuning } from "../components/tuning/SmuTuning";
@@ -13,7 +12,6 @@ export function AmdTuning() {
   return (
     <>
       <TabHeader
-        icon={Activity}
         title="AMD 优化"
         subtitle="Ryzen SMU 级调优 —— 深度遥测、Curve Optimizer 撤压、PBO 限制。实验性:写入为实时覆盖,重启恢复 BIOS 设置。"
       />

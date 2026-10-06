@@ -2,8 +2,10 @@ import { AnimatePresence, motion } from "motion/react";
 import { Check, Cpu, Loader2, RotateCcw, ShieldAlert, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "../ui/Button";
+import { RangeInput } from "../ui/Slider";
 import { cn } from "../../lib/cn";
 import { useTf } from "../../lib/i18n";
+import { useUiActive } from "../../hooks/useUiActive";
 import { api, type SmuStatus } from "../../lib/ipc";
 import { withTimeout } from "../../lib/ipc";
 
@@ -35,7 +37,9 @@ export function SmuTuning() {
     let alive = true;
     let inFlight = false;
     const poll = async () => {
-      if (inFlight) return;
+      // Nobody is looking (tray / minimized / behind a game): status is for the
+      // eyes only, so skip the IPC entirely until the window is visible again.
+      if (inFlight || !useUiActive.getState().active) return;
       inFlight = true;
       try {
         const s = await withTimeout(api.smuStatus());
@@ -48,9 +52,13 @@ export function SmuTuning() {
     };
     void poll();
     const id = setInterval(() => void poll(), 3000);
+    const unGate = useUiActive.subscribe((st, prev) => {
+      if (st.active && !prev.active) void poll();
+    });
     return () => {
       alive = false;
       clearInterval(id);
+      unGate();
     };
   }, []);
 
@@ -112,12 +120,12 @@ export function SmuTuning() {
   }
 
   return (
-    <div className="glass hairline space-y-4 rounded-2xl p-4">
-      <div className="flex flex-wrap items-center gap-2 text-[12.5px] font-semibold text-muted">
-        <Zap size={15} className="text-accent" /> {tf("SMU 调优", "SMU tuning")}
+    <div className="glass space-y-4 rounded-xl p-4">
+      <div className="flex flex-wrap items-center gap-2 text-[13px] font-semibold text-ink">
+        {tf("SMU 调优", "SMU tuning")}
         <span
           className={cn(
-            "rounded px-1.5 py-0.5 text-[10px] font-medium",
+            "rounded px-1.5 py-0.5 text-[11px] font-medium",
             ready ? "bg-ok/15 text-ok" : "bg-warn/15 text-warn",
           )}
         >
@@ -132,7 +140,7 @@ export function SmuTuning() {
       </div>
 
       {/* Always-on warning: CO here is all-core + overrides BIOS; reboot restores. */}
-      <div className="flex items-start gap-2 rounded-xl border border-warn/30 bg-warn/[0.06] px-3 py-2 text-[11.5px] leading-relaxed text-warn">
+      <div className="flex items-start gap-2 rounded-lg bg-warn/10 ring-1 ring-inset ring-warn/25 px-3 py-2 text-[11.5px] leading-relaxed text-warn">
         <ShieldAlert size={14} className="mt-0.5 shrink-0" />
         <span>
           {tf(
@@ -157,17 +165,17 @@ export function SmuTuning() {
           <Cpu size={14} className="text-accent" /> {tf("Curve Optimizer · 全核撤压", "Curve Optimizer · all-core")}
         </div>
         <div className="flex items-center gap-3">
-          <input
-            type="range"
+          <RangeInput
+            label={tf("Curve Optimizer 全核偏移", "Curve Optimizer all-core offset")}
+            value={coMargin}
             min={-50}
             max={0}
-            step={1}
-            value={coMargin}
             disabled={!ready || busy}
-            onChange={(e) => setCoMargin(parseInt(e.target.value, 10))}
-            className="h-1.5 flex-1 cursor-pointer accent-[var(--color-accent)]"
+            onChange={setCoMargin}
+            ticks={false}
+            className="flex-1"
           />
-          <span className="w-12 shrink-0 text-right font-mono text-[13px] font-semibold tabular-nums text-ink">{coMargin}</span>
+          <span className="nums w-12 shrink-0 text-right text-[18px] text-ink">{coMargin}</span>
           <Button onClick={() => void applyCo()} disabled={!ready || busy}>
             {busy ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />} {tf("应用", "Apply")}
           </Button>
@@ -188,13 +196,13 @@ export function SmuTuning() {
             ["scalar", tf("Scalar (1–10)", "Scalar (1–10)")],
           ] as const).map(([key, label]) => (
             <label key={key} className="flex flex-col gap-1">
-              <span className="text-[10.5px] text-dim">{label}</span>
+              <span className="text-[11.5px] text-dim">{label}</span>
               <input
                 inputMode="numeric"
                 value={pbo[key]}
                 disabled={!ready || busy}
                 onChange={(e) => setPbo((p) => ({ ...p, [key]: e.target.value }))}
-                className="rounded-lg border border-line bg-surface2/40 px-2.5 py-1.5 font-mono text-[12px] text-ink outline-none focus:border-accent/50"
+                className="field nums no-drag text-[13px]"
               />
             </label>
           ))}
