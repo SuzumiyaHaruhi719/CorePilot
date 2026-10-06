@@ -3,6 +3,7 @@ import { useEffect, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn";
 import { GROUP_PALETTE, groupColor, hueDistance } from "../../lib/colors";
+import { popIn } from "../../lib/motion";
 
 export interface ColorAnchor {
   x: number;
@@ -47,18 +48,13 @@ export function ColorPicker({ anchor, hue, onChange, onClose }: ColorPickerProps
     <AnimatePresence>
       {anchor && (
         <motion.div
-          initial={{ opacity: 0, scale: 0.95, y: -4 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.96 }}
-          transition={{ duration: 0.13, ease: [0.22, 1, 0.36, 1] }}
+          {...popIn}
           style={{
             left: Math.min(anchor.x, window.innerWidth - POP_WIDTH - 8),
             top: Math.min(anchor.y, window.innerHeight - 168),
             width: POP_WIDTH,
-            // Frosted glass: translucent tint + always-on backdrop blur.
-            background: "color-mix(in oklch, var(--color-elevated) 64%, transparent)",
           }}
-          className="glass glow fixed z-[100] origin-top-left rounded-xl border border-line-strong p-3 backdrop-blur-2xl backdrop-saturate-150"
+          className="float fixed z-[100] origin-top-left rounded-xl p-3"
           onClick={(e) => e.stopPropagation()}
           onContextMenu={(e) => e.preventDefault()}
         >
@@ -66,8 +62,8 @@ export function ColorPicker({ anchor, hue, onChange, onClose }: ColorPickerProps
             <span className="text-[11.5px] font-medium text-muted">分组颜色</span>
             <span className="flex items-center gap-1.5">
               <span
-                className="h-3.5 w-3.5 rounded-full glow-sm"
-                style={{ background: groupColor(hue), "--glow": groupColor(hue) } as CSSProperties}
+                className="h-3.5 w-3.5 rounded-full"
+                style={{ background: groupColor(hue) } as CSSProperties}
               />
               <span className="nums text-[11px] text-dim">{Math.round(hue)}°</span>
             </span>
@@ -79,16 +75,15 @@ export function ColorPicker({ anchor, hue, onChange, onClose }: ColorPickerProps
               return (
                 <motion.button
                   key={h}
-                  whileHover={{ scale: 1.15 }}
                   whileTap={{ scale: 0.9 }}
                   onClick={() => onChange(h)}
                   aria-label={`色相 ${h}°`}
                   aria-pressed={active}
                   className={cn(
                     "h-7 w-7 rounded-full border-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70 focus-visible:ring-offset-1 focus-visible:ring-offset-surface",
-                    active ? "border-ink glow-sm" : "border-transparent hover:border-line-strong",
+                    active ? "border-ink" : "border-transparent hover:border-line-strong",
                   )}
-                  style={{ background: groupColor(h), "--glow": groupColor(h) } as CSSProperties}
+                  style={{ background: groupColor(h) } as CSSProperties}
                 />
               );
             })}

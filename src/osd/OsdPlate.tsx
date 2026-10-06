@@ -92,7 +92,7 @@ export function OsdPlate({
   return (
     <div
       className={cn(
-        "inline-flex font-semibold leading-none text-white",
+        "osd-plate inline-flex font-semibold leading-none text-white",
         vertical ? "flex-col items-start gap-1.5" : "flex-nowrap items-center gap-x-3 gap-y-1",
         skin ? "rounded-none" : rounded ? "rounded-lg" : "rounded-[3px]",
       )}

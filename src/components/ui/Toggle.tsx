@@ -1,5 +1,6 @@
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
+import { springSmooth } from "../../lib/motion";
 
 interface ToggleProps {
   checked: boolean;
@@ -9,6 +10,7 @@ interface ToggleProps {
   disabled?: boolean;
 }
 
+/** Windows-11-style switch: outlined when off, solid accent with a light knob when on. */
 export function Toggle({ checked, onChange, label, disabled }: ToggleProps) {
   return (
     <button
@@ -20,19 +22,21 @@ export function Toggle({ checked, onChange, label, disabled }: ToggleProps) {
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(
-        "no-drag relative h-[24px] w-[44px] shrink-0 rounded-full border transition-colors duration-300",
+        "group no-drag relative h-5 w-10 shrink-0 rounded-full transition-[background-color,box-shadow] duration-200 ease-out",
         "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:ring-offset-2 focus-visible:ring-offset-base",
-        checked ? "border-accent/60 bg-accent/30 glow-sm" : "border-line bg-surface3",
+        checked
+          ? "bg-accent hover:bg-accent-bright"
+          : "bg-transparent shadow-[inset_0_0_0_1px_var(--color-dim)] hover:bg-surface2 hover:shadow-[inset_0_0_0_1px_var(--color-muted)]",
         disabled && "cursor-not-allowed opacity-40",
       )}
     >
       <motion.span
         initial={false}
-        animate={{ x: checked ? 20 : 0, scale: checked ? 1 : 0.9 }}
-        transition={{ type: "spring", stiffness: 360, damping: 26, mass: 0.7 }}
+        animate={{ x: checked ? 20 : 0 }}
+        transition={springSmooth}
         className={cn(
-          "absolute left-[3px] top-[3px] h-[18px] w-[18px] rounded-full shadow-[0_1px_3px_rgb(0_0_0/0.45)] transition-colors duration-300",
-          checked ? "bg-accent-bright" : "bg-dim",
+          "absolute left-1 top-1 h-3 w-3 rounded-full transition-colors duration-150",
+          checked ? "bg-on-accent" : "bg-muted",
         )}
       />
     </button>

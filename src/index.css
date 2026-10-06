@@ -1,83 +1,87 @@
-/* Gaming-HUD type: Orbitron (display) + JetBrains Mono (telemetry) + Inter (body).
-   Loaded from Google Fonts (CSP is disabled in tauri.conf) with system fallbacks. */
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Orbitron:wght@500;600;700;800;900&display=swap");
+/* CorePilot — "Instrument" design system. See DESIGN.md.
+   Type is 100% native Windows: Segoe UI Variable (UI) + Microsoft YaHei UI (CJK)
+   + Bahnschrift (Microsoft's DIN 1451, the readout face) + Cascadia Mono (IDs).
+   No web-font request: the elevated app paints its final type on the first frame,
+   offline included. */
 @import "tailwindcss";
 
-/* Animated accent switching (Settings → 强调色 / Accent color).
-   CSS custom properties don't transition by default, but registering them as
-   typed <color> via @property lets Chromium (WebView2) interpolate them. We set
-   the accent vars on <html> from JS (App.tsx), so transitioning them there tweens
-   every accent-tinted surface — buttons, glows, the HUD grid — instead of an
-   instant snap. Killed under reduce-motion (see the data-reduce-motion block). */
+/* Animated accent switching (Settings → 强调色). Registering the accent vars as
+   typed <color> lets Chromium tween them, so every accent-tinted surface recolors
+   smoothly instead of snapping. Killed under reduce-motion. */
 @property --color-accent {
   syntax: "<color>";
   inherits: true;
-  initial-value: oklch(62% 0.225 293);
+  initial-value: oklch(72% 0.16 50);
 }
 @property --color-accent-bright {
   syntax: "<color>";
   inherits: true;
-  initial-value: oklch(73% 0.2 295);
+  initial-value: oklch(79% 0.14 56);
 }
 html {
   transition:
-    --color-accent 360ms cubic-bezier(0.22, 1, 0.36, 1),
-    --color-accent-bright 360ms cubic-bezier(0.22, 1, 0.36, 1);
+    --color-accent 320ms cubic-bezier(0.16, 1, 0.3, 1),
+    --color-accent-bright 320ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 /* ============================================================
-   CorePilot design tokens — "Premium Gaming HUD".
-   Deep indigo-black OLED surfaces, neon-violet primary + rose
-   energy accent, telemetry hues (GPU cyan / V-Cache teal /
-   freq amber), restrained neon glow. See design-system/MASTER.md.
+   Tokens — the default values ARE the 石墨 / Graphite preset (dark, neutral,
+   warm-orange signal). Layer model, darkest → lightest:
+     chrome (title bar, sidebar, status strip) → base (content canvas)
+     → surface (panels) → surface2 (controls, nested rows) → surface3 (hover/press)
+   `elevated` is for things that float (menus, popovers, dialogs).
    ============================================================ */
 @theme {
-  /* Surfaces — deep indigo-black, clear elevation hierarchy */
-  --color-base: oklch(13.5% 0.028 285);
-  --color-surface: oklch(18% 0.034 287);
-  --color-surface2: oklch(23% 0.042 288);
-  --color-surface3: oklch(29% 0.05 289);
-  --color-elevated: oklch(20.5% 0.04 288);
+  --color-chrome: oklch(11.5% 0.002 60);
+  --color-base: oklch(14.5% 0.003 60);
+  --color-surface: oklch(17.5% 0.003 60);
+  --color-surface2: oklch(21% 0.004 60);
+  --color-surface3: oklch(25.5% 0.005 60);
+  --color-elevated: oklch(20% 0.004 60);
 
-  /* Lines */
-  --color-line: oklch(100% 0 0 / 0.08);
-  --color-line-strong: oklch(80% 0.06 290 / 0.22);
+  --color-line: oklch(100% 0 0 / 0.075);
+  --color-line-strong: oklch(100% 0 0 / 0.14);
 
-  /* Ink */
-  --color-ink: oklch(96% 0.008 285);
-  --color-muted: oklch(72% 0.025 285);
-  --color-dim: oklch(55% 0.03 285);
+  --color-ink: oklch(95.5% 0.003 60);
+  --color-muted: oklch(75% 0.004 60);
+  --color-dim: oklch(60% 0.005 60);
 
-  /* Accent + signals — neon violet primary, rose energy accent */
-  --color-accent: oklch(62% 0.225 293);
-  --color-accent-bright: oklch(73% 0.2 295);
-  /* Ink for anything drawn ON an accent fill — a check mark, a selection square,
-     a primary button's label. White reads fine on the violet/blue baselines, but
-     NOT on the bright-accent theme styles, which override this token to near
-     black further down (see the on-accent block after the theme presets). Every
-     mark that sits on accent must use this, never a hard-coded white. */
-  --color-on-accent: #fff;
-  --color-rose: oklch(66% 0.225 12);
-  --color-rose-bright: oklch(74% 0.2 14);
-  --color-cyan: oklch(80% 0.13 218);
-  --color-vcache: oklch(82% 0.13 184);
-  --color-freq: oklch(81% 0.14 70);
-  --color-ok: oklch(80% 0.17 152);
-  --color-warn: oklch(83% 0.16 85);
-  --color-danger: oklch(66% 0.21 18);
+  /* Accent = "you / action / selection". Never decoration, never a data series. */
+  --color-accent: oklch(72% 0.16 50);
+  --color-accent-bright: oklch(79% 0.14 56);
+  /* Ink for anything drawn ON an accent fill (button label, check mark). */
+  --color-on-accent: oklch(17% 0.03 50);
 
-  /* Type — Orbitron display / JetBrains Mono telemetry / Inter + YaHei body */
-  --font-display: "Orbitron", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
-  --font-sans: "Inter", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", "Cascadia Mono", ui-monospace, "PingFang SC", "Microsoft YaHei UI", monospace;
+  /* Data series hues — one fixed hue per metric family, equal visual weight. */
+  --color-rose: oklch(70% 0.17 12);
+  --color-rose-bright: oklch(77% 0.15 14);
+  --color-cyan: oklch(80% 0.115 215);
+  --color-vcache: oklch(80% 0.115 180);
+  --color-freq: oklch(82% 0.13 78);
 
-  /* Radii */
-  --radius-xl: 16px;
-  --radius-2xl: 20px;
+  /* State. */
+  --color-ok: oklch(78% 0.15 152);
+  --color-warn: oklch(83% 0.15 85);
+  --color-danger: oklch(67% 0.19 25);
 
-  /* Motion */
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  --font-title: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  --font-readout: "Bahnschrift", "DIN Alternate", "Segoe UI Variable Text", "Microsoft YaHei UI", sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, "Microsoft YaHei UI", monospace;
+  /* Legacy name: `.display` / font-display now resolve to the readout face. */
+  --font-display: var(--font-readout);
+
+  /* Radii — tight and consistent: controls 6–8, panels 10, floating 12. */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+  --radius-2xl: 12px;
+
+  /* Motion — exponential ease-out only. No overshoot anywhere. */
   --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 @layer base {
@@ -94,25 +98,30 @@ html {
   html {
     color-scheme: dark;
   }
-  /* Glow intensity multiplier driven by the Settings tab (data-glow on <html>). */
+  /* Glow multiplier (Settings → 光晕). Instrument default is a whisper. */
   :root {
-    --glow-o: 1;
+    --glow-o: 0.5;
   }
   html[data-glow="soft"] {
-    --glow-o: 0.45;
+    --glow-o: 0;
   }
   html[data-glow="intense"] {
-    --glow-o: 1.75;
+    --glow-o: 1.3;
   }
   body {
-    background: var(--color-base);
+    background: var(--color-chrome);
     color: var(--color-ink);
     font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.45;
     font-synthesis-weight: none;
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     user-select: none;
     cursor: default;
+    transition:
+      background-color 240ms var(--ease-out-quint),
+      color 240ms var(--ease-out-quint);
   }
   /* OSD overlay window: transparent page so only the metrics plate is visible. */
   html.osd-window,
@@ -120,247 +129,130 @@ html {
   html.osd-window #root {
     background: transparent !important;
   }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
   ::selection {
-    background: color-mix(in oklch, var(--color-accent) 40%, transparent);
+    background: color-mix(in oklch, var(--color-accent) 35%, transparent);
+  }
+  ::placeholder {
+    color: var(--color-dim);
+    opacity: 1;
+  }
+  /* Default keyboard focus for anything that doesn't style its own. */
+  :focus-visible {
+    outline: 2px solid color-mix(in oklch, var(--color-accent) 75%, transparent);
+    outline-offset: 2px;
   }
   ::-webkit-scrollbar {
     width: 10px;
     height: 10px;
   }
   ::-webkit-scrollbar-thumb {
-    background: oklch(100% 0 0 / 0.1);
+    background: color-mix(in oklch, var(--color-ink) 12%, transparent);
     border: 3px solid transparent;
     background-clip: padding-box;
     border-radius: 999px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: oklch(100% 0 0 / 0.2);
+    background: color-mix(in oklch, var(--color-ink) 24%, transparent);
     background-clip: padding-box;
   }
   ::-webkit-scrollbar-corner {
     background: transparent;
   }
-  /* Telemetry numbers — JetBrains Mono, tabular so values never shift width. */
+
+  /* Telemetry numbers — Bahnschrift (DIN), tabular so values never shift width. */
   .nums {
-    font-family: var(--font-mono);
+    font-family: var(--font-readout);
     font-variant-numeric: tabular-nums;
     font-feature-settings: "tnum" 1;
-    letter-spacing: -0.01em;
+    letter-spacing: 0;
   }
-  /* Orbitron display — brand wordmark, HUD stat/section titles (Latin + numbers). */
+  /* Readout face for short Latin/number strings (big values, units, brand). */
   .display {
-    font-family: var(--font-display);
-    letter-spacing: 0.02em;
+    font-family: var(--font-readout);
+    letter-spacing: 0;
   }
-  /* Uppercase HUD micro-label. */
+  /* Condensed readout — dense tables and tight chips. */
+  .nums-tight {
+    font-family: var(--font-readout);
+    font-variant-numeric: tabular-nums;
+    font-stretch: 87.5%;
+  }
+  /* Small group label. Sentence case, no tracking (the old HUD eyebrow is gone). */
   .hud-label {
-    font-family: var(--font-display);
-    text-transform: uppercase;
-    letter-spacing: 0.14em;
+    font-family: var(--font-sans);
+    font-weight: 500;
+    letter-spacing: 0;
+    color: var(--color-muted);
   }
 }
 
 @layer utilities {
-  /* Solid panel surfaces (acrylic disabled for now) — soft depth, not flat */
+  /* Panel — the one container. Flat surface + hairline, no shadow. A panel
+     inside a panel drops its fill so nesting never stacks boxes on boxes. */
   .glass {
-    background: var(--color-surface);
-    box-shadow:
-      0 1px 2px oklch(0% 0 0 / 0.22),
-      0 14px 34px -18px oklch(0% 0 0 / 0.6);
+    background-color: var(--color-surface);
+    box-shadow: inset 0 0 0 1px var(--color-line);
   }
+  .glass .glass,
   .glass-2 {
-    background: var(--color-surface2);
+    background-color: color-mix(in oklch, var(--color-surface2) 55%, transparent);
+    box-shadow: inset 0 0 0 1px var(--color-line);
   }
   .hairline {
     box-shadow: inset 0 0 0 1px var(--color-line);
   }
 
-  /* ── "亚克力模糊" — in-app layered frosted glass (Warp-style) ───────────────
-     True DWM acrylic/mica does NOT composite through a transparent WebView2 on
-     Win11 24H2 (it just shows the windows behind, unblurred), so the window
-     stays opaque and we render the frost in-app: a soft colourful field sits
-     behind the UI; translucent panels backdrop-blur it, and nested surfaces blur
-     again for depth. Text/controls sit ON TOP of the blurred surfaces — so only
-     the background is blurred, never the content. */
-  html[data-acrylic="true"] body {
-    background:
-      radial-gradient(60% 56% at 6% -8%, color-mix(in oklch, var(--color-accent) 32%, transparent), transparent 58%),
-      radial-gradient(56% 54% at 106% 4%, color-mix(in oklch, var(--color-cyan) 26%, transparent), transparent 60%),
-      radial-gradient(60% 56% at 100% 106%, color-mix(in oklch, var(--color-accent-bright) 22%, transparent), transparent 62%),
-      var(--color-base);
-  }
-  /* Layer 1 — cards: more translucent so the colour field clearly bleeds through
-     + a heavier blur and a fine top glass-edge highlight. Text sits above the
-     backdrop filter, so only the background is blurred — never the content. */
-  html[data-acrylic="true"] .glass {
-    background: color-mix(in oklch, var(--color-surface) 50%, transparent);
-    backdrop-filter: blur(34px) saturate(185%);
-    -webkit-backdrop-filter: blur(34px) saturate(185%);
+  /* Floating layer (menus, popovers, dialogs) — the only place depth + blur live. */
+  .float {
+    background-color: color-mix(in oklch, var(--color-elevated) 92%, transparent);
     box-shadow:
-      inset 0 1px 0 oklch(100% 0 0 / 0.08),
-      0 1px 2px oklch(0% 0 0 / 0.22),
-      0 18px 44px -20px oklch(0% 0 0 / 0.6);
-  }
-  /* Layer 2 — inner surfaces frost layer 1 again, lighter blur → visible depth. */
-  html[data-acrylic="true"] .glass-2,
-  html[data-acrylic="true"] .glass .glass {
-    background: color-mix(in oklch, var(--color-surface2) 44%, transparent);
-    backdrop-filter: blur(18px) saturate(155%);
-    -webkit-backdrop-filter: blur(18px) saturate(155%);
+      inset 0 0 0 1px var(--color-line-strong),
+      0 1px 2px oklch(0% 0 0 / 0.25),
+      0 12px 32px -8px oklch(0% 0 0 / 0.5);
+    backdrop-filter: blur(20px) saturate(140%);
   }
 
-  /* "关闭动画 / 省电" — when reduce-motion is on, neuter continuous CSS
-     animations (HUD grid drift, glow pulses, spinners) and make transitions
-     instant. This is the big idle-CPU win on low-end CPUs; framer-motion is
-     separately reduced via the MotionConfig in App.tsx. */
-  html[data-reduce-motion="true"],
-  html[data-reduce-motion="true"] *,
-  html[data-reduce-motion="true"] *::before,
-  html[data-reduce-motion="true"] *::after {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
-    scroll-behavior: auto !important;
+  /* Form field — text inputs, selects, search boxes. */
+  .field {
+    height: 30px;
+    border-radius: var(--radius-md);
+    background-color: var(--color-surface2);
+    box-shadow: inset 0 0 0 1px var(--color-line);
+    padding-inline: 10px;
+    font-size: 12.5px;
+    color: var(--color-ink);
+    outline: none;
+    transition:
+      box-shadow 150ms var(--ease-out-quint),
+      background-color 150ms var(--ease-out-quint);
   }
-  /* Drop the animated HUD backdrop entirely (a full-screen continuous repaint). */
-  html[data-reduce-motion="true"] .hud-grid {
-    display: none;
+  .field:hover {
+    box-shadow: inset 0 0 0 1px var(--color-line-strong);
   }
-
-  /* 没人在看 — the window is hidden in the tray, minimized, or fully covered by a
-     fullscreen game (see the visibility watcher in App.tsx). Chromium's own
-     occlusion throttling is disabled PROCESS-WIDE so the parked OSD overlay keeps
-     ticking, which means these infinite animations otherwise keep compositing
-     frames behind the game — the webview2 gpu-process cost users blamed on
-     CorePilot while gaming.
-
-     PAUSED, not neutered: unlike the reduce-motion block above (which snaps to
-     the end frame, because the user asked for no motion at all), this is a
-     temporary freeze the user never sees begin or end — it resumes exactly where
-     it stopped, so coming back looks identical to never having left.
-
-     Scoped to the three infinite utilities actually in use rather than `*`: a
-     blanket rule would also freeze a one-shot enter animation at frame 0 and
-     leave that content invisible when the user returns. */
-  html[data-ui-idle="true"] .animate-pulse,
-  html[data-ui-idle="true"] .animate-spin,
-  html[data-ui-idle="true"] .animate-spin-slow {
-    animation-play-state: paused !important;
-  }
-
-  /* Soft glow — defaults to the live accent so it recolors with the theme. */
-  .glow {
-    --glow: var(--color-accent);
+  .field:focus,
+  .field:focus-within {
+    background-color: var(--color-surface);
     box-shadow:
-      0 0 0 1px color-mix(in oklch, var(--glow) calc(40% * var(--glow-o, 1)), transparent),
-      0 0 18px color-mix(in oklch, var(--glow) calc(34% * var(--glow-o, 1)), transparent),
-      0 0 48px color-mix(in oklch, var(--glow) calc(16% * var(--glow-o, 1)), transparent);
-  }
-  .glow-sm {
-    --glow: var(--color-accent);
-    box-shadow:
-      0 0 10px color-mix(in oklch, var(--glow) calc(30% * var(--glow-o, 1)), transparent),
-      0 0 1px color-mix(in oklch, var(--glow) calc(50% * var(--glow-o, 1)), transparent);
-  }
-  .glow-text {
-    text-shadow: 0 0 10px color-mix(in oklch, currentColor calc(36% * var(--glow-o, 1)), transparent);
+      inset 0 0 0 1px color-mix(in oklch, var(--color-accent) 70%, transparent),
+      0 0 0 3px color-mix(in oklch, var(--color-accent) 18%, transparent);
   }
 
-  .grad-accent {
-    position: relative;
-    isolation: isolate;
-    background-color: var(--color-accent);
-    background-image:
-      /* specular gloss, upper-left — light catching a glass surface */
-      radial-gradient(135% 125% at 14% -30%, rgb(255 255 255 / 0.34), rgb(255 255 255 / 0) 46%),
-      /* cylindrical depth — bright crown fading to a grounded base */
-      linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(0 0 0 / 0.22)),
-      /* rich body — deep violet rising to the accent, a single rose ember at the end */
-      linear-gradient(120deg,
-        color-mix(in oklch, var(--color-accent) 68%, #0a0712) 0%,
-        var(--color-accent) 38%,
-        var(--color-accent-bright) 70%,
-        color-mix(in oklch, var(--color-rose) 52%, var(--color-accent-bright)) 100%);
-  }
-  /* Fine film grain for material texture (质感), overlaid beneath the content. */
-  .grad-accent::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    z-index: -1;
-    border-radius: inherit;
-    pointer-events: none;
-    opacity: 0.13;
-    mix-blend-mode: overlay;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  }
-  /* Rose-tinted glow variant (energy / danger highlights). */
-  .glow-rose {
-    --glow: var(--color-rose);
-    box-shadow:
-      0 0 0 1px color-mix(in oklch, var(--glow) calc(40% * var(--glow-o, 1)), transparent),
-      0 0 18px color-mix(in oklch, var(--glow) calc(34% * var(--glow-o, 1)), transparent);
-  }
-
-  /* ── HUD instrument framing ────────────────────────────────────────────────
-     L-shaped corner ticks on opposite corners → "telemetry readout" feel. Use on
-     key panels/stat tiles, sparingly. Accent-colored, dims with --glow-o. */
-  .hud-frame {
-    position: relative;
-  }
-  .hud-frame::before,
-  .hud-frame::after {
-    content: "";
-    position: absolute;
-    width: 12px;
-    height: 12px;
-    border: 1.5px solid color-mix(in oklch, var(--color-accent) 55%, transparent);
-    pointer-events: none;
-  }
-  .hud-frame::before {
-    top: 7px;
-    left: 7px;
-    border-right: 0;
-    border-bottom: 0;
-    border-top-left-radius: 4px;
-  }
-  .hud-frame::after {
-    right: 7px;
-    bottom: 7px;
-    border-left: 0;
-    border-top: 0;
-    border-bottom-right-radius: 4px;
-  }
-
-  /* Angled tech corner (clip top-right). Sparingly on hero/key panels. */
-  .chamfer {
-    clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
-  }
-
-  /* Animated HUD backdrop — faint grid + drifting glow. Behind content only. */
-  .hud-grid {
-    background-image:
-      linear-gradient(color-mix(in oklch, var(--color-accent) 7%, transparent) 1px, transparent 1px),
-      linear-gradient(90deg, color-mix(in oklch, var(--color-accent) 7%, transparent) 1px, transparent 1px);
-    background-size: 44px 44px;
-    -webkit-mask-image: radial-gradient(120% 100% at 50% 0%, #000 35%, transparent 78%);
-    mask-image: radial-gradient(120% 100% at 50% 0%, #000 35%, transparent 78%);
-  }
-
-  /* Subtle scanlines overlay (very low opacity, pointer-events none). */
-  .scanlines::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    background: repeating-linear-gradient(
-      to bottom,
-      oklch(100% 0 0 / 0.018) 0px,
-      oklch(100% 0 0 / 0.018) 1px,
-      transparent 1px,
-      transparent 3px
+  /* Loading placeholder (never a spinner in the middle of content). */
+  .skeleton {
+    border-radius: var(--radius-md);
+    background: linear-gradient(
+      90deg,
+      var(--color-surface2) 0%,
+      var(--color-surface3) 40%,
+      var(--color-surface2) 80%
     );
-    mix-blend-mode: overlay;
+    background-size: 300% 100%;
+    animation: skeleton-sweep 1.4s var(--ease-out-quint) infinite;
   }
 
   .drag-region {
@@ -372,57 +264,85 @@ html {
     app-region: no-drag;
   }
 
-  /* Premium range slider (GPU tuning) — filled track + glowing knob. */
+  /* Glow — kept for the 光晕 setting; at the default it is a faint bloom on
+     active/live elements only. `soft` turns it off entirely. */
+  .glow,
+  .glow-sm,
+  .glow-rose {
+    --glow: var(--color-accent);
+    box-shadow: 0 0 calc(16px * var(--glow-o)) color-mix(in oklch, var(--glow) calc(22% * var(--glow-o)), transparent);
+  }
+  .glow-rose {
+    --glow: var(--color-rose);
+  }
+  .glow-text {
+    text-shadow: 0 0 calc(10px * var(--glow-o)) color-mix(in oklch, currentColor calc(30% * var(--glow-o)), transparent);
+  }
+
+  /* Primary fill. Solid — the old gradient + grain is gone. */
+  .grad-accent {
+    background-color: var(--color-accent);
+    color: var(--color-on-accent);
+  }
+
+  /* Retired HUD ornaments: no-ops so stray markup renders clean. */
+  .hud-frame,
+  .chamfer,
+  .scanlines {
+    position: relative;
+  }
+
+  /* Range slider — 4px rail, filled to --pct; Windows-11-style thumb (ring + accent core). */
   .cp-slider {
     -webkit-appearance: none;
     appearance: none;
     width: 100%;
-    height: 6px;
-    border-radius: 999px;
-    background: linear-gradient(
-      to right,
-      var(--color-accent) var(--pct, 0%),
-      var(--color-surface3) var(--pct, 0%)
-    );
+    height: 18px;
+    background: transparent;
     outline: none;
     cursor: pointer;
   }
-  /* Keyboard focus must stay visible: replace the removed default outline with
-     an on-brand glow ring (mouse interaction stays clean via :focus-visible). */
-  .cp-slider:focus-visible {
-    box-shadow:
-      0 0 0 2px color-mix(in oklch, var(--color-accent) 60%, transparent),
-      0 0 12px color-mix(in oklch, var(--color-accent) 35%, transparent);
+  .cp-slider::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 999px;
+    background: linear-gradient(to right, var(--color-accent) var(--pct, 0%), var(--color-surface3) var(--pct, 0%));
   }
   .cp-slider::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    width: 16px;
-    height: 16px;
+    width: 18px;
+    height: 18px;
+    margin-top: -7px;
     border-radius: 999px;
-    background: var(--color-accent-bright);
-    border: 2px solid var(--color-base);
+    background: radial-gradient(circle, var(--color-accent) 0 4.5px, var(--color-elevated) 5px);
     box-shadow:
-      0 0 0 1px color-mix(in oklch, var(--color-accent) 80%, transparent),
-      0 0 12px color-mix(in oklch, var(--color-accent) calc(55% * var(--glow-o, 1)), transparent);
-    transition: transform 0.14s var(--ease-out-quint);
+      0 0 0 1px var(--color-line-strong),
+      0 1px 3px oklch(0% 0 0 / 0.35);
+    transition: transform 150ms var(--ease-out-quint);
   }
   .cp-slider:hover::-webkit-slider-thumb {
-    transform: scale(1.18);
+    transform: scale(1.12);
   }
   .cp-slider:active::-webkit-slider-thumb {
-    transform: scale(1.06);
+    transform: scale(0.94);
+  }
+  .cp-slider:focus-visible {
+    outline: none;
+  }
+  .cp-slider:focus-visible::-webkit-slider-thumb {
+    box-shadow:
+      0 0 0 1px var(--color-line-strong),
+      0 0 0 4px color-mix(in oklch, var(--color-accent) 35%, transparent);
   }
   .cp-slider:disabled {
     cursor: not-allowed;
   }
 
-  /* Hue picker slider — rainbow track (set inline) + neutral ring knob that
-     stays legible over any color. */
+  /* Hue picker slider — rainbow track (set inline) + neutral ring knob. */
   .cp-hue {
     -webkit-appearance: none;
     appearance: none;
-    height: 12px;
+    height: 10px;
     border-radius: 999px;
     outline: none;
     cursor: pointer;
@@ -431,24 +351,84 @@ html {
   .cp-hue::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
     border-radius: 999px;
     background: transparent;
     border: 3px solid #fff;
     box-shadow:
-      0 0 0 1.5px oklch(0% 0 0 / 0.5),
-      0 1px 5px oklch(0% 0 0 / 0.55);
-    transition: transform 0.14s var(--ease-out-quint);
+      0 0 0 1px oklch(0% 0 0 / 0.5),
+      0 1px 4px oklch(0% 0 0 / 0.5);
+    transition: transform 150ms var(--ease-out-quint);
   }
   .cp-hue:hover::-webkit-slider-thumb {
     transform: scale(1.12);
   }
-  .cp-hue:active::-webkit-slider-thumb {
-    transform: scale(1.04);
+
+  /* "关闭动画 / 省电" — the in-app reduce-motion switch: continuous animations
+     stop and transitions become instant. framer-motion is separately reduced via
+     the MotionConfig in App.tsx. */
+  html[data-reduce-motion="true"],
+  html[data-reduce-motion="true"] *,
+  html[data-reduce-motion="true"] *::before,
+  html[data-reduce-motion="true"] *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* 没人在看 — window hidden in the tray, minimized, or covered by a fullscreen
+     game (visibility watcher in App.tsx). Chromium's occlusion throttling is off
+     process-wide (the OSD must keep ticking), so infinite animations are PAUSED
+     here — resumed exactly where they stopped. Scoped to the infinite utilities
+     only: a blanket rule would strand one-shot enter animations at frame 0. */
+  html[data-ui-idle="true"] .animate-pulse,
+  html[data-ui-idle="true"] .animate-spin,
+  html[data-ui-idle="true"] .animate-spin-slow,
+  html[data-ui-idle="true"] .skeleton,
+  html[data-ui-idle="true"] .live-dot::after {
+    animation-play-state: paused !important;
+  }
+
+  /* Live indicator — a solid dot with one soft expanding ring. */
+  .live-dot {
+    position: relative;
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: currentColor;
+  }
+  .live-dot::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: currentColor;
+    animation: live-ring 2.4s var(--ease-out-quint) infinite;
   }
 }
 
+@keyframes live-ring {
+  0% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  70%,
+  100% {
+    transform: scale(2.8);
+    opacity: 0;
+  }
+}
+@keyframes skeleton-sweep {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -50% 0;
+  }
+}
 @keyframes pulse-glow {
   0%,
   100% {
@@ -458,23 +438,6 @@ html {
     opacity: 1;
   }
 }
-
-/* uPlot perf charts — fill the sized wrapper and theme the synced crosshair to
-   match the cockpit palette (default uPlot CSS is a min-content light theme). */
-.uplot,
-.uplot .u-wrap {
-  width: 100% !important;
-  height: 100% !important;
-  font-family: var(--font-mono);
-}
-.uplot .u-hz .u-cursor-x {
-  border-right: 1px dashed oklch(100% 0 0 / 0.34);
-}
-.uplot .u-hz .u-cursor-y {
-  border-bottom: 1px dashed oklch(100% 0 0 / 0.18);
-}
-
-/* Slow spin — fan icons in active mode, loading affordances. */
 @keyframes spin-slow {
   to {
     transform: rotate(360deg);
@@ -484,123 +447,185 @@ html {
   animation: spin-slow 3s linear infinite;
 }
 
-/* Motion is controlled IN-APP only, via the 减弱动画 setting (MotionConfig in
-   App.tsx) — deliberately NOT the OS prefers-reduced-motion media query. Many
-   users run Windows with "show animations" off for the desktop but still want
-   CorePilot's premium HUD motion; honoring the OS flag here wiped all animations,
-   so animations always play unless the user turns them off inside CorePilot. */
+/* uPlot perf charts — fill the sized wrapper; crosshair in the instrument palette. */
+.uplot,
+.uplot .u-wrap {
+  width: 100% !important;
+  height: 100% !important;
+  font-family: var(--font-readout);
+}
+.uplot .u-hz .u-cursor-x {
+  border-right: 1px solid color-mix(in oklch, var(--color-ink) 30%, transparent);
+}
+.uplot .u-hz .u-cursor-y {
+  border-bottom: 1px dashed color-mix(in oklch, var(--color-ink) 16%, transparent);
+}
+
+/* Motion is controlled IN-APP only, via 减弱动画 (MotionConfig in App.tsx) —
+   deliberately NOT prefers-reduced-motion: many users run Windows with
+   animations off for the desktop but still want CorePilot's motion. */
 
 /* ============================================================
-   LIGHT THEME — full token override (applied via html[data-theme="light"]).
-   Co-designed with Codex. Pale indigo-gray surfaces, dark ink ramp, and signal
-   hues re-tuned darker/saturated for AA contrast on light surfaces. Because the
-   UI is built on semantic tokens (bg-surface / text-ink / text-accent / …),
-   overriding the tokens here re-themes the bulk of the app automatically; the
-   per-component fixes handle the few hardcoded (dark-assuming) colors. The OSD
-   plate is intentionally NOT re-themed — it renders over games, so it stays dark.
+   Acrylic (亚克力) — Mica-style: a soft accent wash lives in the chrome layer and
+   shows faintly through a translucent canvas. Pure color, no live blur, so it
+   costs nothing per frame.
+   ============================================================ */
+html[data-acrylic="true"] body {
+  background:
+    radial-gradient(70% 60% at 0% 0%, color-mix(in oklch, var(--color-accent) 13%, transparent), transparent 70%),
+    radial-gradient(60% 60% at 100% 100%, color-mix(in oklch, var(--color-cyan) 7%, transparent), transparent 70%),
+    var(--color-chrome);
+}
+html[data-acrylic="true"] .app-canvas {
+  background-color: color-mix(in oklch, var(--color-base) 90%, transparent);
+}
+html[data-acrylic="true"] .glass {
+  background-color: color-mix(in oklch, var(--color-surface) 88%, transparent);
+}
+
+/* ============================================================
+   LIGHT — 瓷白 / Porcelain baseline (html[data-theme="light"]). The OSD plate is
+   intentionally NOT re-themed — it renders over games, so it stays dark.
    ============================================================ */
 html[data-theme="light"] {
   color-scheme: light;
-
-  /* Surfaces: clean near-white shell. Base page is a hair off-white, cards go to
-     pure white and pop via shadow/hairline, inputs/hover step to light gray. */
-  --color-base: oklch(98.6% 0.004 285);
+  --color-chrome: oklch(95.2% 0.005 255);
+  --color-base: oklch(98.8% 0.002 255);
   --color-surface: oklch(100% 0 0);
-  --color-surface2: oklch(96.2% 0.006 286);
-  --color-surface3: oklch(92.6% 0.01 287);
+  --color-surface2: oklch(96.4% 0.005 255);
+  --color-surface3: oklch(93% 0.007 255);
   --color-elevated: oklch(100% 0 0);
 
-  --color-line: oklch(0% 0 0 / 0.10);
-  --color-line-strong: oklch(25% 0.045 285 / 0.24);
+  --color-line: oklch(25% 0.02 260 / 0.1);
+  --color-line-strong: oklch(25% 0.02 260 / 0.18);
 
-  --color-ink: oklch(20.5% 0.035 285);
-  --color-muted: oklch(36.5% 0.04 285);
-  --color-dim: oklch(48% 0.035 285);
+  --color-ink: oklch(21% 0.02 260);
+  --color-muted: oklch(41% 0.02 260);
+  --color-dim: oklch(51% 0.02 260);
 
-  --color-accent: oklch(52% 0.17 235);
-  --color-accent-bright: oklch(58% 0.155 237);
-  --color-rose: oklch(47% 0.245 12);
-  --color-rose-bright: oklch(53% 0.235 14);
-  --color-cyan: oklch(45% 0.18 218);
-  --color-vcache: oklch(44% 0.17 184);
-  --color-freq: oklch(46% 0.17 70);
-  --color-ok: oklch(45% 0.17 152);
-  --color-warn: oklch(47% 0.18 85);
-  --color-danger: oklch(47% 0.23 18);
+  --color-accent: oklch(53% 0.17 252);
+  --color-accent-bright: oklch(59% 0.16 252);
+  --color-on-accent: #fff;
+  --color-rose: oklch(52% 0.2 12);
+  --color-rose-bright: oklch(57% 0.19 14);
+  --color-cyan: oklch(52% 0.13 222);
+  --color-vcache: oklch(52% 0.11 182);
+  --color-freq: oklch(56% 0.14 68);
+  --color-ok: oklch(50% 0.15 150);
+  --color-warn: oklch(57% 0.15 72);
+  --color-danger: oklch(52% 0.2 25);
 }
-
-html[data-theme="light"] ::selection {
-  color: var(--color-ink);
-  background: color-mix(in oklch, var(--color-accent) 18%, transparent);
+html[data-theme="light"] .float {
+  box-shadow:
+    inset 0 0 0 1px var(--color-line),
+    0 1px 2px oklch(25% 0.02 260 / 0.08),
+    0 12px 32px -8px oklch(25% 0.02 260 / 0.22);
 }
-
-html[data-theme="light"] ::-webkit-scrollbar-thumb {
-  background: oklch(20% 0.03 285 / 0.18);
-  background-clip: padding-box;
-}
-html[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
-  background: oklch(20% 0.03 285 / 0.30);
-  background-clip: padding-box;
-}
-
 html[data-theme="light"] .glass {
-  background: var(--color-surface);
   box-shadow:
-    0 1px 2px oklch(20% 0.04 285 / 0.08),
-    0 18px 42px -28px oklch(20% 0.04 285 / 0.32);
+    inset 0 0 0 1px var(--color-line),
+    0 1px 2px oklch(25% 0.02 260 / 0.04);
 }
-
-/* Neon glow → soft elevation shadow + thin accent ring (full neon reads as a
-   muddy halo on white). */
-html[data-theme="light"] .glow {
-  --glow: var(--color-accent);
-  box-shadow:
-    0 0 0 1px color-mix(in oklch, var(--glow) 24%, transparent),
-    0 8px 22px -16px color-mix(in oklch, var(--glow) 35%, transparent),
-    0 18px 42px -30px oklch(20% 0.04 285 / 0.36);
+html[data-theme="light"] .glass .glass,
+html[data-theme="light"] .glass-2 {
+  box-shadow: inset 0 0 0 1px var(--color-line);
 }
-html[data-theme="light"] .glow-sm {
-  --glow: var(--color-accent);
-  box-shadow:
-    0 0 0 1px color-mix(in oklch, var(--glow) 20%, transparent),
-    0 8px 18px -16px color-mix(in oklch, var(--glow) 32%, transparent);
+html[data-theme="light"] .cp-slider::-webkit-slider-thumb {
+  background: radial-gradient(circle, var(--color-accent) 0 4.5px, #fff 5px);
 }
-html[data-theme="light"] .glow-text {
-  text-shadow: 0 1px 0 oklch(100% 0 0 / 0.55);
-}
-
-html[data-theme="light"] .hud-grid {
-  opacity: 0.55;
-  background-image:
-    linear-gradient(color-mix(in oklch, var(--color-accent) 6%, transparent) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in oklch, var(--color-accent) 6%, transparent) 1px, transparent 1px);
-}
-
-/* Light mode: NO colored acrylic field (that's a dark-HUD look) — the user wants
-   a clean white background. Keep it essentially white with only a whisper of
-   accent so it isn't sterile. */
-html[data-theme="light"] body,
 html[data-theme="light"][data-acrylic="true"] body {
   background:
-    radial-gradient(70% 60% at 8% -10%, color-mix(in oklch, var(--color-accent) 4%, transparent), transparent 60%),
-    var(--color-base);
-}
-html[data-theme="light"][data-acrylic="true"] .glass {
-  background: color-mix(in oklch, var(--color-surface) 82%, transparent);
-  box-shadow:
-    inset 0 1px 0 oklch(100% 0 0 / 0.70),
-    0 18px 42px -28px oklch(20% 0.04 285 / 0.28);
-}
-html[data-theme="light"][data-acrylic="true"] .glass-2,
-html[data-theme="light"][data-acrylic="true"] .glass .glass {
-  background: color-mix(in oklch, var(--color-surface2) 76%, transparent);
+    radial-gradient(70% 60% at 0% 0%, color-mix(in oklch, var(--color-accent) 7%, transparent), transparent 70%),
+    var(--color-chrome);
 }
 
-/* Theme-switch circular reveal (View Transitions API, driven in App.tsx). The
-   OLD theme stays put underneath while the NEW theme is clip-path-revealed as a
-   circle expanding from the toggle's click point (App.tsx animates
-   ::view-transition-new(root)). Disable the default cross-fade so the wipe is
-   crisp, and stack the new snapshot on top. Reduce-motion → instant swap. */
+/* ============================================================
+   THEME PRESETS (html[data-theme-style="…"]), layered over dark/light. graphite
+   (= @theme) and porcelain (= light block) need no overrides.
+   ============================================================ */
+
+/* 午夜 / Midnight — deep ink-blue surfaces, cool violet-blue signal. */
+html[data-theme-style="midnight"] {
+  --color-chrome: oklch(11% 0.03 268);
+  --color-base: oklch(14.5% 0.035 268);
+  --color-surface: oklch(18% 0.04 268);
+  --color-surface2: oklch(22% 0.045 268);
+  --color-surface3: oklch(26.5% 0.05 268);
+  --color-elevated: oklch(20.5% 0.045 268);
+  --color-line: oklch(85% 0.05 268 / 0.09);
+  --color-line-strong: oklch(85% 0.06 268 / 0.17);
+  --color-ink: oklch(96% 0.01 268);
+  --color-muted: oklch(76% 0.03 268);
+  --color-dim: oklch(61% 0.04 268);
+  --color-accent: oklch(72% 0.15 278);
+  --color-accent-bright: oklch(80% 0.12 278);
+  --color-on-accent: oklch(17% 0.05 278);
+}
+
+/* 终端 / Terminal — neutral near-black, phosphor green as the only signal. */
+html[data-theme-style="terminal"] {
+  --color-chrome: oklch(10.5% 0.003 160);
+  --color-base: oklch(13.5% 0.004 160);
+  --color-surface: oklch(16.5% 0.005 160);
+  --color-surface2: oklch(20.5% 0.006 160);
+  --color-surface3: oklch(25% 0.008 160);
+  --color-elevated: oklch(19% 0.006 160);
+  --color-line: oklch(100% 0 0 / 0.075);
+  --color-line-strong: oklch(85% 0.08 145 / 0.18);
+  --color-ink: oklch(95% 0.012 150);
+  --color-muted: oklch(74% 0.015 150);
+  --color-dim: oklch(59% 0.018 150);
+  --color-accent: oklch(82% 0.19 144);
+  --color-accent-bright: oklch(88% 0.17 142);
+  --color-on-accent: oklch(17% 0.04 145);
+}
+
+/* 赛博朋克 / Cyberpunk — CP2077 black·yellow·blue: blue-black surfaces with cyan
+   hairlines, broom-yellow signal. Colors carry it; no glow, no gradient type. */
+html[data-theme-style="cyberpunk"] {
+  --color-chrome: oklch(9% 0.03 245);
+  --color-base: oklch(12.5% 0.045 240);
+  --color-surface: oklch(17% 0.06 236);
+  --color-surface2: oklch(21.5% 0.065 234);
+  --color-surface3: oklch(26.5% 0.07 232);
+  --color-elevated: oklch(19.5% 0.062 235);
+  --color-line: oklch(82% 0.12 220 / 0.15);
+  --color-line-strong: oklch(80% 0.15 218 / 0.38);
+  --color-ink: oklch(96% 0.014 228);
+  --color-muted: oklch(77% 0.03 226);
+  --color-dim: oklch(62% 0.035 228);
+  --color-accent: #fee801;
+  --color-accent-bright: #fff45a;
+  --color-on-accent: oklch(17% 0.03 100);
+  --color-cyan: #54c1e6;
+  --color-vcache: #39c4b6;
+}
+html[data-theme-style="cyberpunk"] .glass {
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--color-cyan) 26%, transparent);
+}
+html[data-theme-style="cyberpunk"] .app-canvas {
+  box-shadow: inset 1px 1px 0 color-mix(in oklch, var(--color-cyan) 30%, transparent);
+}
+
+/* 砂岩 / Sandstone — warm light with a terracotta signal. */
+html[data-theme-style="sandstone"] {
+  --color-chrome: oklch(93.8% 0.016 78);
+  --color-base: oklch(97.4% 0.01 80);
+  --color-surface: oklch(99.2% 0.005 80);
+  --color-surface2: oklch(95% 0.014 78);
+  --color-surface3: oklch(91.5% 0.02 76);
+  --color-elevated: oklch(99.4% 0.004 80);
+  --color-line: oklch(30% 0.04 60 / 0.12);
+  --color-line-strong: oklch(30% 0.05 60 / 0.22);
+  --color-ink: oklch(23% 0.03 60);
+  --color-muted: oklch(40% 0.035 60);
+  --color-dim: oklch(50% 0.035 60);
+  --color-accent: oklch(52% 0.15 42);
+  --color-accent-bright: oklch(58% 0.15 46);
+  --color-on-accent: #fff;
+}
+
+/* Theme-switch circular reveal (View Transitions API, driven in App.tsx). */
 ::view-transition {
   pointer-events: none;
 }
@@ -626,240 +651,30 @@ html[data-theme="light"][data-acrylic="true"] .glass .glass {
   z-index: 1;
 }
 
-/* Light mode wants a clean white field — the big blurred accent/rose/cyan orbs in
-   the app backdrop read as colored washes on white, so fade them right down. */
-html[data-theme="light"] .app-backdrop {
-  opacity: 0.16;
-}
-
-/* Smooth the dark↔light switch: fade the page shell colors. Per-token surfaces
-   snap, but the body bg + base text crossfade so the change doesn't jar. Killed
-   under reduce-motion via the data-reduce-motion block above. */
-body {
-  transition: background-color 280ms var(--ease-out-quint), color 280ms var(--ease-out-quint);
-}
-
 /* ============================================================
-   THEME STYLES — named palette presets (co-designed with Codex), layered over
-   the dark/light base via html[data-theme-style="…"]. Placed AFTER the light
-   block so a light style (sandstone) overrides the light baseline; dark styles
-   override the @theme :root. graphite (= dark baseline) and porcelain (= light
-   baseline) need no overrides. The accent picker only drives graphite/porcelain;
-   the designed styles below own their accent (see App.tsx).
+   GPU 渲染 OFF — low-GPU mode (设置 → GPU 渲染): drop every live blur and the
+   acrylic wash so the app barely touches the graphics card while a game runs.
    ============================================================ */
-
-/* 石墨 / Graphite — TRUE neutral black. The @theme baseline is violet-tinted
-   (hue 285, chroma 0.028 → reads purple under an eyedropper), so graphite must
-   neutralize EVERY surface token to chroma 0, not just the accent. Pure black /
-   charcoal surfaces + a warm ORANGE accent (matching the reference). */
-html[data-theme-style="graphite"] {
-  --color-base: oklch(9% 0 0);
-  --color-surface: oklch(13.5% 0 0);
-  --color-surface2: oklch(18.5% 0 0);
-  --color-surface3: oklch(24% 0 0);
-  --color-elevated: oklch(16% 0 0);
-  --color-line: oklch(100% 0 0 / 0.08);
-  --color-line-strong: oklch(80% 0.07 55 / 0.22); /* faint warm (orange) edge */
-  --color-ink: oklch(96% 0 0);
-  --color-muted: oklch(72% 0 0);
-  --color-dim: oklch(55% 0 0);
-  --color-accent: oklch(70% 0.175 50);
-  --color-accent-bright: oklch(77% 0.16 55);
-}
-
-/* 赛博朋克 / Cyberpunk — CP2077 classic BLACK·YELLOW·BLUE (web-confirmed: broom
-   yellow #FCEE0A + electric cyan #02D7F2 on black). #00060e night base, blue-black
-   surfaces (hue ~235, NEVER violet), #fee801 neon-yellow primary accent, cyan
-   edges + #54c1e6 cyan / #39c4b6 teal telemetry. Black + yellow + blue, no purple. */
-html[data-theme-style="cyberpunk"] {
-  --color-base: #00060e;
-  /* Surfaces carry a strong electric-BLUE cast (chroma ~0.065-0.075, up from
-     ~0.045) so panels read clearly blue — the theme is black + yellow + BLUE, not
-     just black + yellow. The blue lives in the surfaces + cyan edges (cheap), not
-     in any blur/blend layer. */
-  --color-surface: oklch(18% 0.065 235);
-  --color-surface2: oklch(23% 0.07 233);
-  --color-surface3: oklch(29% 0.075 231);
-  --color-elevated: oklch(20.5% 0.065 234);
-  --color-line: oklch(82% 0.12 220 / 0.16);
-  --color-line-strong: oklch(80% 0.16 218 / 0.46); /* electric-blue edge */
-  --color-ink: oklch(96% 0.014 228);
-  --color-muted: oklch(74% 0.03 226);
-  --color-dim: oklch(58% 0.035 228);
-  --color-accent: #fee801;
-  --color-accent-bright: #fff45a;
-  --color-cyan: #54c1e6;
-  --color-vcache: #39c4b6;
-}
-
-/* Bright-accent dark styles use a near-black accent base, so primary buttons /
-   accent fills (which ship white text) get DARK text instead — white-on-neon is
-   illegible. Targets the gradient-accent button surface. */
-html[data-theme-style="graphite"] .grad-accent,
-html[data-theme-style="terminal"] .grad-accent,
-html[data-theme-style="cyberpunk"] .grad-accent {
-  color: oklch(16% 0.02 100);
-  text-shadow: none;
-}
-
-/* …and the same correction for every OTHER mark that sits on an accent fill
-   (selection ticks, checkbox squares) via the --color-on-accent token. The
-   .grad-accent rule above only covered buttons, so the check marks stayed white:
-   on cyberpunk (accent #fee801) a white tick on neon yellow is ~1.06:1 contrast
-   — the user genuinely could not tell a selected row from an unselected one.
-   Same near-black as .grad-accent so a button label and a tick agree.
-   Deliberately NOT registered with @property: the accent itself tweens over
-   360 ms, and a mark crossfading through mid-grey is less readable than a
-   single instant flip. Dark + light + the light theme styles keep #fff. */
-html[data-theme-style="graphite"],
-html[data-theme-style="terminal"],
-html[data-theme-style="cyberpunk"] {
-  --color-on-accent: oklch(16% 0.02 100);
-}
-
-/* ============================================================
-   赛博朋克 POLISH (co-designed with Codex) — CSS-only CP2077 flourishes, scoped
-   to the cyberpunk theme and NEVER the transparent OSD overlay (:not(.osd-window)).
-   All motion gated under prefers-reduced-motion + the in-app reduce-motion flag.
-   ============================================================ */
-
-/* CRT scanlines + scan-sweep were REMOVED: the faint full-screen 1px line pattern
-   read as "莫名其妙的线" across the whole UI, and an animated full-screen overlay is
-   a needless GPU cost. The neon card edges, corner brackets, dual-color HUD grid,
-   heading glow and yellow→cyan brand wordmark below carry the CP2077 look with no
-   line/scanline overlay at all. */
-
-/* Stronger (still faint) dual-color neon HUD grid — yellow fine grid + cyan coarse. */
-html[data-theme-style="cyberpunk"] .hud-grid {
-  opacity: 0.85;
-  background-image:
-    linear-gradient(color-mix(in oklch, var(--color-accent) 9%, transparent) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in oklch, var(--color-accent) 9%, transparent) 1px, transparent 1px),
-    linear-gradient(color-mix(in oklch, var(--color-cyan) 13%, transparent) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in oklch, var(--color-cyan) 13%, transparent) 1px, transparent 1px);
-  background-size: 40px 40px, 40px 40px, 200px 200px, 200px 200px;
-  -webkit-mask-image: radial-gradient(120% 100% at 50% 0%, #000 30%, transparent 84%);
-  mask-image: radial-gradient(120% 100% at 50% 0%, #000 30%, transparent 84%);
-}
-
-/* Neon card edges — inset cyan hairline + faint yellow outer + top sheen + soft
-   glow. Pure box-shadow + background-image, so NO size/layout change. */
-html[data-theme-style="cyberpunk"] .glass {
-  background-image:
-    linear-gradient(135deg, color-mix(in oklch, var(--color-accent) 6%, transparent), transparent 36%),
-    linear-gradient(180deg, color-mix(in oklch, var(--color-cyan) 5%, transparent), transparent 48%);
-  box-shadow:
-    inset 0 0 0 1px color-mix(in oklch, var(--color-cyan) 40%, transparent),
-    inset 0 1px 0 oklch(100% 0 0 / 0.06),
-    0 0 0 1px color-mix(in oklch, var(--color-accent) 6%, transparent),
-    0 18px 40px -26px oklch(0% 0 0 / 0.9),
-    0 0 calc(18px * var(--glow-o, 1)) color-mix(in oklch, var(--color-cyan) 12%, transparent);
-}
-
-/* Brighter neon corner brackets + restrained neon glow on headings. */
-html[data-theme-style="cyberpunk"] .hud-frame::before,
-html[data-theme-style="cyberpunk"] .hud-frame::after {
-  width: 15px;
-  height: 15px;
-  border-color: color-mix(in oklch, var(--color-accent) 72%, transparent);
-  filter: drop-shadow(0 0 5px color-mix(in oklch, var(--color-accent) 28%, transparent));
-}
-html[data-theme-style="cyberpunk"] :where(h1, h2, .hud-label) {
-  text-shadow:
-    0 0 8px color-mix(in oklch, var(--color-accent) 16%, transparent),
-    0 0 16px color-mix(in oklch, var(--color-cyan) 11%, transparent);
-}
-
-/* Brand wordmark → a yellow→cyan gradient, putting blue in the most prominent
-   spot (static gradient, no blur/blend/animation — free). The inner "Pilot" span
-   goes transparent so the whole word inherits the parent's clipped gradient. */
-html[data-theme-style="cyberpunk"] .brand-text {
-  background: linear-gradient(95deg, var(--color-accent) 28%, var(--color-cyan) 96%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  text-shadow: none;
-}
-html[data-theme-style="cyberpunk"] .brand-text > span {
-  color: transparent;
-}
-
-/* 午夜 / Midnight — deeper, bluer dark with a cool violet-blue accent. */
-html[data-theme-style="midnight"] {
-  --color-base: oklch(10.5% 0.045 270);
-  --color-surface: oklch(15.5% 0.06 270);
-  --color-surface2: oklch(20.5% 0.075 270);
-  --color-surface3: oklch(26.5% 0.085 271);
-  --color-elevated: oklch(18% 0.072 270);
-  --color-line: oklch(100% 0 0 / 0.09);
-  --color-line-strong: oklch(82% 0.08 268 / 0.24);
-  --color-ink: oklch(96.5% 0.012 268);
-  --color-muted: oklch(74% 0.035 268);
-  --color-dim: oklch(57% 0.045 268);
-  --color-accent: oklch(68% 0.2 274);
-  --color-accent-bright: oklch(78% 0.16 270);
-}
-
-/* 砂岩 / Sandstone — warm cream light surfaces + terracotta-amber accent. */
-html[data-theme-style="sandstone"] {
-  --color-base: oklch(97.4% 0.023 83);
-  --color-surface: oklch(99% 0.014 82);
-  --color-surface2: oklch(94.8% 0.032 81);
-  --color-surface3: oklch(90.5% 0.04 78);
-  --color-elevated: oklch(99.2% 0.017 82);
-  --color-line: oklch(24% 0.04 70 / 0.12);
-  --color-line-strong: oklch(28% 0.06 70 / 0.26);
-  --color-ink: oklch(22% 0.04 72);
-  --color-muted: oklch(38% 0.045 70);
-  --color-dim: oklch(51% 0.04 70);
-  --color-accent: oklch(42% 0.155 48);
-  --color-accent-bright: oklch(49% 0.17 52);
-}
-
-/* 终端 / Terminal — NEUTRAL near-black surfaces (no green wash!) with phosphor
-   green only as the accent, line-glow and ink hint. Surfaces keep chroma ≈0 so
-   the UI reads as a black terminal, not a green tint. */
-html[data-theme-style="terminal"] {
-  --color-base: oklch(12% 0.004 160);
-  --color-surface: oklch(16% 0.005 160);
-  --color-surface2: oklch(21% 0.006 160);
-  --color-surface3: oklch(27% 0.008 162);
-  --color-elevated: oklch(18.5% 0.006 160);
-  --color-line: oklch(100% 0 0 / 0.08);
-  --color-line-strong: oklch(82% 0.1 145 / 0.20);
-  --color-ink: oklch(96% 0.008 160);
-  --color-muted: oklch(72% 0.014 155);
-  --color-dim: oklch(55% 0.016 155);
-  --color-accent: oklch(82% 0.2 144);
-  --color-accent-bright: oklch(89% 0.18 142);
-}
-
-/* ============================================================
-   GPU 渲染 OFF — low-GPU rendering mode (设置 → GPU 渲染). Drops the two genuinely
-   GPU-expensive operations so CorePilot barely touches the graphics card while a
-   game runs (and as a hard escape hatch for any WebView compositor stutter):
-     1. real-time backdrop-filter blur on glass surfaces, and
-     2. the large-radius blurred ambient orbs + animated grid in the app backdrop.
-   Static colors, borders, neon edges, glows and JS (Framer) transitions are kept,
-   so the UI looks the same minus the live blur. Outside @layer for reliable wins.
-   ============================================================ */
-html[data-gpu-render="false"] .glass,
-html[data-gpu-render="false"] .glass-2,
-html[data-gpu-render="false"] .glass .glass {
+html[data-gpu-render="false"] .float,
+html[data-gpu-render="false"] .glass {
   backdrop-filter: none !important;
-  -webkit-backdrop-filter: none !important;
 }
-/* Without the live blur behind them, make acrylic surfaces opaque again so panels
-   keep contrast (background-color only → preserves any themed background-image such
-   as the cyberpunk neon card gradient). */
+html[data-gpu-render="false"] .float {
+  background-color: var(--color-elevated);
+}
+html[data-gpu-render="false"][data-acrylic="true"] body {
+  background: var(--color-chrome);
+}
+html[data-gpu-render="false"][data-acrylic="true"] .app-canvas {
+  background-color: var(--color-base);
+}
 html[data-gpu-render="false"][data-acrylic="true"] .glass {
   background-color: var(--color-surface);
 }
-html[data-gpu-render="false"][data-acrylic="true"] .glass-2,
-html[data-gpu-render="false"][data-acrylic="true"] .glass .glass {
-  background-color: var(--color-surface2);
-}
-/* Remove the big blurred color orbs + HUD grid (a continuous full-screen layer). */
-html[data-gpu-render="false"] .app-backdrop {
-  display: none;
+
+/* The in-game OSD plate keeps its monospaced face (it renders over games and
+   its window is sized from the plate). Cascadia Mono was already its offline
+   fallback before the web-font import was removed. */
+.osd-plate .nums {
+  font-family: var(--font-mono);
 }

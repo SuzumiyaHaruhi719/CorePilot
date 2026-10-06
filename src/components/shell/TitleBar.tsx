@@ -1,30 +1,42 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Cpu, Minus, Square, X } from "lucide-react";
-import { motion } from "motion/react";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { cn } from "../../lib/cn";
+import { useTf } from "../../lib/i18n";
 
 const appWindow = getCurrentWindow();
 
-interface WinButtonProps {
-  children: ReactNode;
-  onClick: () => void;
-  danger?: boolean;
-}
-
-function WinButton({ children, onClick, danger }: WinButtonProps) {
+/** Windows 11 caption button: 46px wide, full bar height, square, no motion. */
+function Caption({ children, onClick, label, close }: { children: ReactNode; onClick: () => void; label: string; close?: boolean }) {
   return (
-    <motion.button
-      whileHover={{ scale: 1.12 }}
-      whileTap={{ scale: 0.9 }}
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
       onClick={onClick}
       className={cn(
-        "no-drag grid h-7 w-7 place-items-center rounded-lg text-muted transition-colors",
-        danger ? "hover:bg-danger hover:text-white" : "hover:bg-surface3 hover:text-ink",
+        "no-drag grid h-10 w-[46px] place-items-center text-muted transition-colors duration-100",
+        "focus-visible:outline-none focus-visible:bg-surface2",
+        close ? "hover:bg-[#c42b1c] hover:text-white active:bg-[#c42b1c]/80" : "hover:bg-surface2 hover:text-ink active:bg-surface3",
       )}
     >
       {children}
-    </motion.button>
+    </button>
+  );
+}
+
+/** The CorePilot mark: a die with one core lit — "pick the core". */
+export function BrandMark({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden className="shrink-0">
+      <g stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" className="text-dim">
+        <path d="M6 1.5v2M9 1.5v2M12 1.5v2M6 14.5v2M9 14.5v2M12 14.5v2M1.5 6h2M1.5 9h2M1.5 12h2M14.5 6h2M14.5 9h2M14.5 12h2" />
+      </g>
+      <rect x="3.75" y="3.75" width="10.5" height="10.5" rx="2.25" fill="none" stroke="currentColor" strokeWidth="1.3" className="text-ink" />
+      <rect x="6.25" y="6.25" width="2.5" height="2.5" rx="0.6" fill="var(--color-accent)" />
+      <rect x="9.25" y="6.25" width="2.5" height="2.5" rx="0.6" fill="currentColor" className="text-dim" opacity="0.6" />
+      <rect x="6.25" y="9.25" width="2.5" height="2.5" rx="0.6" fill="currentColor" className="text-dim" opacity="0.6" />
+      <rect x="9.25" y="9.25" width="2.5" height="2.5" rx="0.6" fill="currentColor" className="text-dim" opacity="0.6" />
+    </svg>
   );
 }
 
@@ -33,40 +45,61 @@ interface TitleBarProps {
 }
 
 export function TitleBar({ cpuName }: TitleBarProps) {
+  const tf = useTf();
+  const [maximized, setMaximized] = useState(false);
+
+  // Track maximize state so the caption glyph matches Windows (□ vs ❐).
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let alive = true;
+    const sync = () => void appWindow.isMaximized().then((m) => alive && setMaximized(m)).catch(() => undefined);
+    sync();
+    void appWindow
+      .onResized(sync)
+      .then((f) => (alive ? (un = f) : f()))
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+      un?.();
+    };
+  }, []);
+
   return (
-    <header
-      data-tauri-drag-region
-      className="relative z-20 flex h-10 shrink-0 items-center justify-between border-b border-line px-3"
-    >
-      <div data-tauri-drag-region className="flex items-center gap-2.5">
-        <motion.div
-          initial={{ rotate: -90, opacity: 0, scale: 0.6 }}
-          animate={{ rotate: 0, opacity: 1, scale: 1 }}
-          transition={{ type: "spring", stiffness: 200, damping: 15 }}
-          className="grid h-[26px] w-[26px] place-items-center rounded-[9px] grad-accent glow-sm text-white"
-        >
-          <Cpu size={15} strokeWidth={2.4} />
-        </motion.div>
-        <span className="brand-text display text-[14px] font-bold uppercase tracking-[0.18em] text-ink glow-text">
-          Core<span className="text-accent-bright">Pilot</span>
+    <header data-tauri-drag-region className="relative z-20 flex h-10 shrink-0 items-center justify-between">
+      <div data-tauri-drag-region className="flex min-w-0 items-center gap-2.5 pl-4">
+        <BrandMark />
+        <span data-tauri-drag-region className="font-title text-[13px] font-semibold text-ink">
+          CorePilot
         </span>
         {cpuName && (
-          <span className="no-drag ml-1 hidden items-center gap-1.5 rounded-md border border-line bg-surface2 px-2 py-[3px] text-[11px] font-medium text-muted md:inline-flex">
-            <span className="h-1.5 w-1.5 rounded-full bg-ok glow-sm" style={{ ["--glow" as string]: "var(--color-ok)" }} />
+          <span data-tauri-drag-region className="ml-2 hidden min-w-0 truncate border-l border-line pl-3 text-[12px] text-dim md:block">
             {cpuName}
           </span>
         )}
       </div>
-      <div className="flex items-center gap-1">
-        <WinButton onClick={() => void appWindow.minimize()}>
-          <Minus size={15} />
-        </WinButton>
-        <WinButton onClick={() => void appWindow.toggleMaximize()}>
-          <Square size={11} />
-        </WinButton>
-        <WinButton danger onClick={() => void appWindow.close()}>
-          <X size={15} />
-        </WinButton>
+      <div className="flex items-center">
+        <Caption label={tf("最小化", "Minimize")} onClick={() => void appWindow.minimize()}>
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
+            <path d="M0 5h10" stroke="currentColor" strokeWidth="1" />
+          </svg>
+        </Caption>
+        <Caption label={maximized ? tf("还原", "Restore") : tf("最大化", "Maximize")} onClick={() => void appWindow.toggleMaximize()}>
+          {maximized ? (
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden>
+              <rect x="0.5" y="2.5" width="7" height="7" rx="1" stroke="currentColor" />
+              <path d="M2.5 2.5V1.5a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-1" stroke="currentColor" />
+            </svg>
+          ) : (
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden>
+              <rect x="0.5" y="0.5" width="9" height="9" rx="1.2" stroke="currentColor" />
+            </svg>
+          )}
+        </Caption>
+        <Caption close label={tf("关闭窗口", "Close")} onClick={() => void appWindow.close()}>
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
+            <path d="M0.5 0.5l9 9M9.5 0.5l-9 9" stroke="currentColor" strokeWidth="1" />
+          </svg>
+        </Caption>
       </div>
     </header>
   );

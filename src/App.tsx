@@ -1,10 +1,11 @@
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { useEffect, useRef, useState, type ReactElement } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
-import { NavRail } from "./components/shell/NavRail";
+import { Sidebar } from "./components/shell/Sidebar";
 import { StatusBar } from "./components/shell/StatusBar";
 import { TitleBar } from "./components/shell/TitleBar";
 import { api, type Overview } from "./lib/ipc";
+import { easeOut } from "./lib/motion";
 import { osdCategoryColorFor, osdRowColorsRgba } from "./lib/osdPalette";
 import { useSettings } from "./store/settings";
 import { useAffinityEnforcer } from "./hooks/useAffinityEnforcer";
@@ -452,15 +453,11 @@ function App() {
     };
     type VTDoc = Document & { startViewTransition?: (cb: () => void) => { ready: Promise<void> } };
     const startVT = (document as VTDoc).startViewTransition?.bind(document);
-    // The View Transition snapshots the WHOLE page. With acrylic backdrop-filter +
-    // the cyberpunk effect layers, rasterizing that snapshot is what FROZE the theme
-    // switch. Skip the VT for those heavy cases and let the cheap CSS cross-fade (the
-    // body background-color transition + the --color-accent / --color-accent-bright
-    // @property transitions on <html>) carry the recolor smoothly — the static UI is
-    // identical, only the switch animation is lighter (no full-page snapshot).
-    const heavyForViewTransition = useSettings.getState().acrylic || themeStyle === "cyberpunk";
+    // The View Transition snapshots the WHOLE page. That once FROZE the switch when
+    // panels carried live backdrop-filter blur; the instrument system has none on
+    // static surfaces (only transient menus), so every theme can take the reveal.
     // Never animate the very first paint (no theme "change" to reveal).
-    if (themeFirstRun.current || !startVT || reduceMotion || heavyForViewTransition) {
+    if (themeFirstRun.current || !startVT || reduceMotion) {
       themeFirstRun.current = false;
       apply();
       return;
@@ -536,26 +533,20 @@ function App() {
 
   return (
     <MotionConfig reducedMotion={reduceMotion ? "always" : "never"}>
-      <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-base text-ink">
-        <div aria-hidden className="app-backdrop pointer-events-none absolute inset-0 -z-10 overflow-hidden">
-          <div className="hud-grid absolute inset-0 opacity-60" />
-          <div className="absolute -left-40 -top-40 h-[480px] w-[480px] rounded-full bg-accent/20 blur-[120px]" />
-          <div className="absolute -bottom-52 -right-32 h-[460px] w-[460px] rounded-full bg-rose/12 blur-[130px]" />
-          <div className="absolute -bottom-40 left-1/3 h-[360px] w-[360px] rounded-full bg-cyan/10 blur-[130px]" />
-        </div>
-
+      <div className="relative flex h-screen w-screen flex-col overflow-hidden text-ink">
         <TitleBar cpuName={overview?.cpuName} />
 
         <div className="flex min-h-0 flex-1">
-          <NavRail />
-          <main className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
-            <AnimatePresence mode="wait">
+          <Sidebar />
+          {/* The canvas: one lighter layer with a Windows-11 rounded top-left
+              edge, sitting on the chrome (title bar + sidebar + status strip). */}
+          <main className="app-canvas relative min-h-0 min-w-0 flex-1 overflow-hidden rounded-tl-xl border-l border-t border-line bg-base">
+            <AnimatePresence mode="wait" initial={false}>
               <motion.div
                 key={tab}
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -6 }}
-                transition={{ duration: 0.2, ease: [0.33, 1, 0.68, 1] }}
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0, transition: { duration: 0.2, ease: easeOut } }}
+                exit={{ opacity: 0, transition: { duration: 0.08, ease: "linear" } }}
                 className="flex h-full min-h-0 min-w-0 flex-col"
               >
                 <Active />

@@ -1,68 +1,95 @@
-import { Activity, MemoryStick, ShieldCheck, ShieldOff } from "lucide-react";
-import { motion } from "motion/react";
+import { ShieldCheck, ShieldOff } from "lucide-react";
+import type { ReactNode } from "react";
 import { formatBytes } from "../../lib/format";
-import { useSharedMetrics } from "../../hooks/useSharedTelemetry";
+import { useSharedMetrics, useSharedSensors } from "../../hooks/useSharedTelemetry";
 import { useUiActive } from "../../hooks/useUiActive";
 import { useUi } from "../../store/ui";
-import { useSettings } from "../../store/settings";
-import { useT } from "../../lib/i18n";
+import { useTf } from "../../lib/i18n";
 import { AnimatedNumber } from "../ui/AnimatedNumber";
+
+/** A 24px usage tick under-scoring a value — the strip's only graphic. */
+function Tick({ pct, color }: { pct: number | null | undefined; color: string }) {
+  const v = Math.max(0, Math.min(100, pct ?? 0));
+  return (
+    <span className="h-[3px] w-6 overflow-hidden rounded-full bg-surface3" aria-hidden>
+      <span
+        className="block h-full origin-left rounded-full transition-transform duration-500 ease-[cubic-bezier(0.16,1,0.3,1)]"
+        style={{ transform: `scaleX(${v / 100})`, background: color }}
+      />
+    </span>
+  );
+}
+
+function Cell({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex items-center gap-2 whitespace-nowrap">
+      <span className="text-dim">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+const Sep = () => <span className="h-3 w-px bg-line" aria-hidden />;
+
+/** GPU + temperatures — only mounted while someone can see the window, so the
+ *  shared sensors poller can stop entirely when the app sits in the tray. */
+function SensorCells() {
+  const s = useSharedSensors();
+  const tf = useTf();
+  return (
+    <>
+      <Sep />
+      <Cell label="GPU">
+        <span className="nums w-9 text-right text-ink">{s?.gpuPct != null ? `${Math.round(s.gpuPct)}%` : "—"}</span>
+        <Tick pct={s?.gpuPct} color="var(--color-vcache)" />
+        {s?.gpuTemp != null && <span className="nums text-muted">{Math.round(s.gpuTemp)}°</span>}
+      </Cell>
+      {s?.cpuTemp != null && (
+        <>
+          <Sep />
+          <Cell label={tf("CPU 温度", "CPU temp")}>
+            <span className="nums text-ink">{Math.round(s.cpuTemp)}°C</span>
+          </Cell>
+        </>
+      )}
+    </>
+  );
+}
 
 export function StatusBar() {
   const metrics = useSharedMetrics();
   const optimizationEnabled = useUi((s) => s.optimizationEnabled);
-  const reduceMotion = useSettings((s) => s.reduceMotion);
   const uiActive = useUiActive((s) => s.active);
-  const t = useT();
+  const tf = useTf();
 
-  const memPct = metrics ? (metrics.memUsed / metrics.memTotal) * 100 : 0;
-
-  // The shield's breathing pulse is an INFINITE motion animation on a permanently
-  // mounted footer, so it is the one piece of UI motion that never stops on its
-  // own. Stop it whenever nobody can see it — hidden in the tray or behind a
-  // fullscreen game — for the same reason reduce-motion stops it: it is pure
-  // compositor cost with no viewer. `still` lands on exactly the same props the
-  // reduce-motion path already used, so the resting look is unchanged.
-  const still = reduceMotion || !uiActive;
+  const memPct = metrics ? (metrics.memUsed / metrics.memTotal) * 100 : null;
 
   return (
-    <footer className="relative z-10 flex h-7 shrink-0 items-center gap-5 border-t border-line px-4 text-[11.5px] text-muted">
-      <div className="flex items-center gap-1.5">
-        <Activity size={13} className="text-accent" />
-        <span>CPU</span>
-        <span className="nums w-[44px] font-semibold text-ink">
+    <footer className="relative z-10 flex h-7 shrink-0 items-center gap-3.5 border-t border-line px-4 text-[11.5px] text-muted">
+      <Cell label="CPU">
+        <span className="nums w-11 text-right text-ink">
           <AnimatedNumber value={metrics?.cpuOverall ?? 0} digits={1} suffix="%" />
         </span>
-      </div>
-      <div className="flex items-center gap-1.5">
-        <MemoryStick size={13} className="text-cyan" />
-        <span>{t("内存")}</span>
-        <span className="nums font-semibold text-ink">{metrics ? formatBytes(metrics.memUsed) : "—"}</span>
-        <span className="nums text-dim">
-          / {metrics ? formatBytes(metrics.memTotal) : "—"} · {memPct.toFixed(0)}%
-        </span>
-      </div>
+        <Tick pct={metrics?.cpuOverall} color="var(--color-accent)" />
+      </Cell>
+      {uiActive && <SensorCells />}
+      <Sep />
+      <Cell label={tf("内存", "Memory")}>
+        <span className="nums text-ink">{metrics ? formatBytes(metrics.memUsed) : "—"}</span>
+        <span className="nums text-dim">/ {metrics ? formatBytes(metrics.memTotal) : "—"}</span>
+        <Tick pct={memPct} color="var(--color-cyan)" />
+      </Cell>
+
       <div className="ml-auto flex items-center gap-1.5">
         {optimizationEnabled ? (
           <>
-            <motion.span
-              animate={still ? { opacity: 1 } : { opacity: [0.45, 1, 0.45] }}
-              transition={still ? { duration: 0 } : { duration: 2.4, repeat: Infinity, ease: "easeInOut" }}
-              // Promote to its own layer so the pulse composites instead of
-              // repainting the status bar text beside it every frame.
-              style={{ willChange: "opacity" }}
-              className="text-ok"
-            >
-              <ShieldCheck size={13} />
-            </motion.span>
-            <span className="text-ok">{t("优化已启用")}</span>
+            <ShieldCheck size={13} className="text-ok" />
+            <span className="text-ok">{tf("亲和性优化运行中", "Affinity optimization on")}</span>
           </>
         ) : (
           <>
-            <span className="text-dim">
-              <ShieldOff size={13} />
-            </span>
-            <span className="text-dim">{t("优化已停用")}</span>
+            <ShieldOff size={13} className="text-dim" />
+            <span className="text-dim">{tf("亲和性优化已停用", "Affinity optimization off")}</span>
           </>
         )}
       </div>

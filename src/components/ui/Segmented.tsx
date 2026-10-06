@@ -1,6 +1,7 @@
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
 import { useT } from "../../lib/i18n";
+import { springSmooth } from "../../lib/motion";
 
 interface Option<T extends string> {
   value: T;
@@ -24,7 +25,7 @@ export function Segmented<T extends string>({ id, value, options, onChange, wrap
     <div
       role="group"
       className={cn(
-        "no-drag rounded-lg border border-line bg-surface2 p-0.5",
+        "no-drag rounded-lg bg-surface2 p-0.5 shadow-[inset_0_0_0_1px_var(--color-line)]",
         wrap ? "flex flex-wrap gap-0.5" : "inline-flex",
       )}
     >
@@ -36,16 +37,20 @@ export function Segmented<T extends string>({ id, value, options, onChange, wrap
             type="button"
             aria-pressed={active}
             onClick={() => onChange(option.value)}
-            className="relative cursor-pointer rounded-[7px] px-3 py-1 text-[12.5px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+            className={cn(
+              "relative h-7 cursor-pointer whitespace-nowrap rounded-md px-3 text-[12.5px] transition-colors duration-150",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
+              active ? "text-ink" : "text-muted hover:text-ink",
+            )}
           >
             {active && (
               <motion.span
                 layoutId={`seg-${id}`}
-                className="absolute inset-0 rounded-[7px] border border-accent/40 bg-accent/20 glow-sm"
-                transition={{ type: "spring", stiffness: 420, damping: 30 }}
+                className="absolute inset-0 rounded-md bg-surface3 shadow-[inset_0_0_0_1px_var(--color-line-strong),0_1px_2px_oklch(0%_0_0/0.2)]"
+                transition={springSmooth}
               />
             )}
-            <span className={cn("relative z-10", active ? "text-ink" : "text-muted")}>{t(option.label)}</span>
+            <span className={cn("relative z-10", active && "font-medium")}>{t(option.label)}</span>
           </button>
         );
       })}

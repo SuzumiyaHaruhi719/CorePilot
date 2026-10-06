@@ -1,0 +1,20 @@
+<!doctype html>
+<!-- Dev-only browser preview with a mocked Tauri backend (src/dev/mockTauri.ts).
+     `npm run dev` → http://localhost:1420/preview.html?tab=cores&style=midnight
+     Not a build entry: vite build only bundles index.html. -->
+<html lang="zh-CN" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CorePilot · preview</title>
+    <style>
+      html, body, #root { margin: 0; height: 100%; background: #0b0b0c; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module">
+      await import("/src/dev/mockTauri.ts");
+      await import("/src/main.tsx");
+    </script>
+  </body>
+</html>

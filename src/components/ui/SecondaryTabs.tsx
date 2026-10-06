@@ -1,6 +1,7 @@
 import { motion } from "motion/react";
 import { cn } from "../../lib/cn";
 import { useT } from "../../lib/i18n";
+import { springSmooth } from "../../lib/motion";
 
 interface SecondaryTab<T extends string> {
   id: T;
@@ -14,6 +15,7 @@ interface SecondaryTabsProps<T extends string> {
   layoutId?: string;
 }
 
+/** Page-level sub-navigation: text tabs on a hairline, an accent rule glides under the active one. */
 export function SecondaryTabs<T extends string>({
   tabs,
   active,
@@ -22,23 +24,27 @@ export function SecondaryTabs<T extends string>({
 }: SecondaryTabsProps<T>) {
   const t = useT();
   return (
-    <div className="flex items-center gap-1 border-b border-line px-4">
+    <div role="tablist" className="flex items-center gap-5 border-b border-line px-6">
       {tabs.map((tab) => {
         const isActive = tab.id === active;
         return (
           <button
             key={tab.id}
+            role="tab"
+            aria-selected={isActive}
             onClick={() => onChange(tab.id)}
-            className="no-drag relative cursor-pointer rounded-md px-3 py-2.5 text-[12.5px] font-medium focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60"
+            className={cn(
+              "no-drag relative -mb-px cursor-pointer py-2.5 text-[13px] transition-colors duration-150",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:rounded-sm",
+              isActive ? "font-medium text-ink" : "text-muted hover:text-ink",
+            )}
           >
-            <span className={cn("relative z-10 transition-colors", isActive ? "text-ink" : "text-muted hover:text-ink")}>
-              {t(tab.label)}
-            </span>
+            {t(tab.label)}
             {isActive && (
               <motion.span
                 layoutId={layoutId}
-                className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-accent glow-sm"
-                transition={{ type: "spring", stiffness: 400, damping: 32 }}
+                className="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-accent"
+                transition={springSmooth}
               />
             )}
           </button>

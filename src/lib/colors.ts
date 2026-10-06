@@ -24,10 +24,10 @@ export function isLightTheme(): boolean {
 const STYLE_ACCENT_HUE: Record<string, number> = {
   graphite: 50, // warm orange
   cyberpunk: 101, // neon yellow
-  midnight: 274, // violet-blue
+  midnight: 278, // violet-blue
   terminal: 144, // phosphor green
-  porcelain: 235, // light blue
-  sandstone: 48, // terracotta
+  porcelain: 252, // blue
+  sandstone: 42, // terracotta
 };
 export function accentHue(): number {
   const style = typeof document !== "undefined" ? document.documentElement.dataset.themeStyle : undefined;
