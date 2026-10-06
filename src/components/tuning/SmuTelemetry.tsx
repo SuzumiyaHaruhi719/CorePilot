@@ -1,4 +1,3 @@
-
 import { useSharedSensors } from "../../hooks/useSharedTelemetry";
 import type { CpuSensor } from "../../lib/ipc";
 import { useTf } from "../../lib/i18n";

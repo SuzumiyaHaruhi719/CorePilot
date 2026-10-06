@@ -28,6 +28,7 @@ import { Toggle } from "../components/ui/Toggle";
 import { useSharedGpuOc, useSharedMetrics, useSharedSensors } from "../hooks/useSharedTelemetry";
 import { useUiActive } from "../hooks/useUiActive";
 import { cn } from "../lib/cn";
+import { easeOut } from "../lib/motion";
 import { useTf } from "../lib/i18n";
 import {
   api,
@@ -342,6 +343,9 @@ export function OsdConfig() {
     if (!box) return;
     const clamp = (v: number) => Math.min(1, Math.max(0, v));
     let latest = { x: previewCfg.freeX ?? 0, y: previewCfg.freeY ?? 0 };
+    // One overlay emit per frame at most: high-rate mice fire 125–1000
+    // pointermoves/s, and each emit is an IPC round-trip to the OSD window.
+    let raf = 0;
     const move = (ev: PointerEvent) => {
       const rect = box.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
@@ -353,11 +357,16 @@ export function OsdConfig() {
       // Live overlay follow for the global default (the standing `osd:cfg`
       // subscription only ever emits the global config). Per-game drags still
       // preview locally and commit on pointer-up.
-      if (!selectedTarget) {
-        void emit("osd:cfg", { ...globalCfg, freeX: latest.x, freeY: latest.y });
+      if (!selectedTarget && !raf) {
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          void emit("osd:cfg", { ...globalCfg, freeX: latest.x, freeY: latest.y });
+        });
       }
     };
     const detach = () => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       dragCleanupRef.current = null;
@@ -447,24 +456,23 @@ export function OsdConfig() {
   return (
     <>
       <TabHeader
-        icon={MonitorPlay}
         title="游戏内监控 OSD"
         subtitle="可定制的低占用游戏叠加层 — 适用于无边框 / 窗口化游戏，所有更改即时生效"
       />
-      <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
+      <div className="min-h-0 flex-1 overflow-auto px-6 pb-6">
+        <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+        <div className="min-w-0 space-y-4">
         {/* 显示方式 · MODE — the three overlay layers as ONE decision.
             They used to be three switches in two different cards (window
             overlay + desktop mode here, injection in its own panel below) with
             no statement of how they relate, so "which one do I need?" had no
             answer on screen. Grouped here with a 适用于 line each, then the live
             verdict underneath. */}
-        <div className="hud-frame glass hairline rounded-2xl p-4">
+        <div className="glass rounded-xl p-4">
           <div className="mb-3 flex items-center gap-2">
-            <MonitorPlay size={14} className="shrink-0 text-accent-bright" />
-            <span className="hud-label text-[10.5px] text-dim">
-              {tf("显示方式 · MODE", "MODE")}
+            <span className="text-[13px] font-semibold text-ink">
+              {tf("显示方式", "Mode")}
             </span>
-            <span className="h-px flex-1 bg-line/50" />
           </div>
           <div className="mb-3 text-[11.5px] leading-relaxed text-dim">
             {tf(
@@ -526,7 +534,7 @@ export function OsdConfig() {
           {/* The overlay-window error outranks the status line: if the window
               itself failed to open, nothing below it is meaningful. */}
           {overlayErr ? (
-            <div className="mt-3 flex items-center gap-1.5 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2.5 text-[12px] text-danger">
+            <div className="mt-3 flex items-center gap-1.5 rounded-lg bg-danger/10 ring-1 ring-inset ring-danger/25 px-3 py-2.5 text-[12px] text-danger">
               <AlertTriangle size={13} className="shrink-0" /> {overlayErr}
             </div>
           ) : (
@@ -540,113 +548,15 @@ export function OsdConfig() {
             />
           )}
 
-          {/* Live preview = a short, centered mini-monitor at the display aspect
-              ratio (fixed height so it always fits the panel above the fold). */}
-          <div className="mb-2 mt-4 flex items-center justify-center gap-2">
-            <span className="h-px w-8 bg-line/60" />
-            <span className="hud-label flex items-center gap-1.5 text-[10px] text-dim">
-              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ok" />
-              {tf("实时预览 · LIVE PREVIEW", "LIVE PREVIEW")}
-            </span>
-            <span className="h-px w-8 bg-line/60" />
-          </div>
-          <div
-            className="hud-frame relative mx-auto overflow-hidden rounded-xl border border-line-strong glow-sm"
-            style={{ height: 170, width: 170 * screenAspect, maxWidth: "100%" }}
-          >
-            <div
-              ref={previewRef}
-              className="absolute inset-0 flex p-2"
-              style={{
-                background:
-                  "radial-gradient(120% 140% at 20% 0%, oklch(38% 0.08 250) 0%, oklch(16% 0.03 265) 60%), repeating-linear-gradient(135deg, oklch(20% 0.02 265) 0 14px, oklch(22% 0.02 265) 14px 28px)",
-                alignItems:
-                  previewCfg.position === "free"
-                    ? undefined
-                    : previewCfg.position.startsWith("t")
-                      ? "flex-start"
-                      : "flex-end",
-                justifyContent:
-                  previewCfg.position === "free"
-                    ? undefined
-                    : previewCfg.position === "tc" || previewCfg.position === "bc"
-                      ? "center"
-                      : previewCfg.position.endsWith("l")
-                        ? "flex-start"
-                        : "flex-end",
-              }}
-            >
-              {previewCfg.position === "free" ? (
-                <div
-                  className="absolute cursor-grab touch-none active:cursor-grabbing"
-                  style={freePosStyle(
-                    dragPos?.x ?? previewCfg.freeX,
-                    dragPos?.y ?? previewCfg.freeY,
-                  )}
-                  onPointerDown={onFreeDragStart}
-                >
-                  <OsdPlate
-                    metrics={previewCfg.metrics}
-                    style={previewCfg.style}
-                    scale={previewCfg.scale * previewScale}
-                    opacity={previewCfg.opacity}
-                    rounded={previewCfg.rounded}
-                    data={data}
-                    taskbar={false}
-                    tbColorsEnabled={previewCfg.tbColorsEnabled}
-                    tbBg={previewCfg.tbBg}
-                    tbLabel={previewCfg.tbLabel}
-                    tbSafe={previewCfg.tbSafe}
-                    tbWarn={previewCfg.tbWarn}
-                    tbCrit={previewCfg.tbCrit}
-                    tbWarnLoad={previewCfg.tbWarnLoad}
-                    tbCritLoad={previewCfg.tbCritLoad}
-                    tbWarnTemp={previewCfg.tbWarnTemp}
-                    tbCritTemp={previewCfg.tbCritTemp}
-                  />
-                </div>
-              ) : (
-                <OsdPlate
-                  metrics={previewCfg.metrics}
-                  style={previewCfg.style}
-                  scale={previewCfg.scale * previewScale}
-                  opacity={previewCfg.opacity}
-                  rounded={previewCfg.rounded}
-                  data={data}
-                  taskbar={false}
-                  tbColorsEnabled={previewCfg.tbColorsEnabled}
-                  tbBg={previewCfg.tbBg}
-                  tbLabel={previewCfg.tbLabel}
-                  tbSafe={previewCfg.tbSafe}
-                  tbWarn={previewCfg.tbWarn}
-                  tbCrit={previewCfg.tbCrit}
-                  tbWarnLoad={previewCfg.tbWarnLoad}
-                  tbCritLoad={previewCfg.tbCritLoad}
-                  tbWarnTemp={previewCfg.tbWarnTemp}
-                  tbCritTemp={previewCfg.tbCritTemp}
-                />
-              )}
-            </div>
-            <span className="pointer-events-none absolute right-2 top-2 rounded bg-black/40 px-1.5 py-0.5 text-[10px] text-white/60">
-              {editingOverride
-                ? tf(`预览 · ${selectedTarget?.name}`, `Preview · ${selectedTarget?.name}`)
-                : tf("预览 · 默认", "Preview · default")}
-            </span>
-            {previewCfg.position === "free" && (
-              <span className="pointer-events-none absolute left-2 top-2 rounded bg-accent/25 px-1.5 py-0.5 text-[10px] text-white/85">
-                {tf("拖动叠加层自由摆放", "Drag the plate to place it freely")}
-              </span>
-            )}
-          </div>
         </div>
 
         {/* In-frame injection overlay (true fullscreen) + anti-cheat-safe hybrid */}
         <InjectionOverlaySection />
 
         {/* Auto-discovered installed-game library (read-only) */}
-        <div className="glass hairline rounded-2xl p-4">
+        <div className="glass rounded-xl p-4">
           <div className="mb-2 flex items-center gap-2">
-            <Gamepad2 size={15} className="text-accent-bright" />
+            <Gamepad2 size={15} className="text-dim" />
             <span className="text-[13.5px] font-semibold text-ink">已识别的游戏库</span>
             <span className="text-[11px] text-dim">{tf(`Steam · Epic · GOG · 共 ${gameLibrary.length} 款`, `Steam · Epic · GOG · ${gameLibrary.length} games`)}</span>
           </div>
@@ -654,29 +564,26 @@ export function OsdConfig() {
             自动扫描各启动器安装目录;运行其中任意一款都会被判定为游戏(无需手动加白名单)。
           </div>
           {libState === "loading" ? (
-            <div className="flex items-center justify-center gap-2 rounded-lg border border-dashed border-line/70 px-3 py-3 text-[12px] text-dim">
+            <div className="flex items-center justify-center gap-2 px-3 py-4 text-[12.5px] text-muted">
               <Loader2 size={13} className="animate-spin" /> {tf("正在扫描已安装游戏…", "Scanning installed games…")}
             </div>
           ) : libState === "error" ? (
-            <div className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-danger/40 px-3 py-3 text-[12px] text-danger">
+            <div className="flex items-center justify-center gap-1.5 px-3 py-4 text-[12.5px] text-danger">
               <AlertTriangle size={13} /> {tf("扫描游戏库失败", "Couldn't scan the game library")}
             </div>
           ) : gameLibrary.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-line/70 px-3 py-3 text-center text-[12px] text-dim">
+            <div className="px-3 py-4 text-center text-[12.5px] text-muted">
               未扫描到已安装游戏（未安装 Steam/Epic/GOG，或装在非默认位置）。
             </div>
           ) : (
             <div className="max-h-44 space-y-1 overflow-y-auto pr-1">
               {gameLibrary.map((g) => (
-                <div
-                  key={`${g.source}:${g.path}`}
-                  className="flex items-center gap-2 rounded-lg border border-line bg-surface2 px-3 py-1.5 text-[12px]"
-                >
+                <div key={`${g.source}:${g.path}`} className="flex items-center gap-2 border-b border-line/60 px-1 py-1.5 text-[12.5px] last:border-0">
                   <MonitorPlay size={12} className="shrink-0 text-dim" />
                   <span className="flex-1 truncate text-muted" title={g.path}>
                     {g.name}
                   </span>
-                  <span className="shrink-0 rounded bg-surface3 px-1.5 py-0.5 text-[10px] text-dim">
+                  <span className="shrink-0 rounded bg-surface3 px-1.5 text-[11px] leading-5 text-dim">
                     {g.source}
                   </span>
                 </div>
@@ -686,9 +593,9 @@ export function OsdConfig() {
         </div>
 
         {/* Per-game white / black list */}
-        <div className="glass hairline rounded-2xl p-4">
+        <div className="glass rounded-xl p-4">
           <div className="mb-3 flex items-center gap-2">
-            <Gamepad2 size={15} className="text-accent-bright" />
+            <Gamepad2 size={15} className="text-dim" />
             <span className="text-[13.5px] font-semibold text-ink">游戏名单 / 白·黑名单</span>
           </div>
           <div className="mb-3 text-[11.5px] leading-relaxed text-dim">
@@ -704,13 +611,13 @@ export function OsdConfig() {
                 if (e.key === "Enter") submitAdd();
               }}
               placeholder="可执行文件名，如 cyberpunk2077.exe"
-              className="no-drag w-72 min-w-0 flex-1 rounded-lg border border-line bg-surface2 px-3 py-1.5 text-[12.5px] text-ink outline-none transition-colors focus:border-accent/50"
+              className="field no-drag w-72 min-w-0 flex-1"
             />
             <button
               onClick={submitAdd}
               disabled={!addName.trim()}
               className={cn(
-                "no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40",
+                "no-drag flex h-[30px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md bg-surface2 px-2.5 text-[12px] text-ink shadow-[inset_0_0_0_1px_var(--color-line)] transition-colors hover:bg-surface3 disabled:cursor-not-allowed disabled:opacity-40",
                 FOCUS_RING,
               )}
             >
@@ -719,7 +626,7 @@ export function OsdConfig() {
             <button
               onClick={() => void openProcessPicker()}
               className={cn(
-                "no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink",
+                "no-drag flex h-[30px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md bg-surface2 px-2.5 text-[12px] text-ink shadow-[inset_0_0_0_1px_var(--color-line)] transition-colors hover:bg-surface3",
                 FOCUS_RING,
               )}
             >
@@ -728,7 +635,7 @@ export function OsdConfig() {
             <button
               onClick={() => void pickFromFile()}
               className={cn(
-                "no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-[12px] text-muted transition-colors hover:bg-surface3 hover:text-ink",
+                "no-drag flex h-[30px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md bg-surface2 px-2.5 text-[12px] text-ink shadow-[inset_0_0_0_1px_var(--color-line)] transition-colors hover:bg-surface3",
                 FOCUS_RING,
               )}
             >
@@ -738,11 +645,11 @@ export function OsdConfig() {
 
           {/* Entry list */}
           {targets.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-line/70 px-3 py-4 text-center text-[12px] text-dim">
+            <div className="px-3 py-5 text-center text-[12.5px] text-muted">
               暂无游戏 — 在此添加，或在任务管理器中右键进程 → “添加游戏内覆盖”。
             </div>
           ) : (
-            <div className="space-y-1.5">
+            <div className="space-y-0.5">
               {targets.map((t) => {
                 const isSel = t.name === selected;
                 const hasOverride = t.config !== undefined;
@@ -750,8 +657,8 @@ export function OsdConfig() {
                   <div
                     key={t.name}
                     className={cn(
-                      "no-drag flex items-center gap-2 rounded-lg border px-3 py-2 text-[12.5px] transition-colors",
-                      isSel ? "border-accent/40 bg-accent/10" : "border-line bg-surface2",
+                      "no-drag flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-[12.5px] transition-colors duration-150",
+                      isSel ? "bg-accent/10" : "hover:bg-surface2/60",
                     )}
                   >
                     <button
@@ -769,7 +676,7 @@ export function OsdConfig() {
                         {t.name}
                       </span>
                       {hasOverride && (
-                        <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent-bright">
+                        <span className="rounded bg-accent/14 px-1.5 text-[11px] font-medium leading-5 text-accent">
                           自定义
                         </span>
                       )}
@@ -805,7 +712,7 @@ export function OsdConfig() {
 
           {/* Per-game override controls */}
           {selectedTarget && (
-            <div className="mt-3 rounded-xl border border-accent/30 bg-accent/5 p-3">
+            <div className="mt-3 rounded-lg bg-accent/[0.06] p-3 ring-1 ring-inset ring-accent/25">
               <div className="mb-2 flex items-center justify-between gap-3">
                 <span className="text-[12.5px] font-semibold text-ink">
                   {tf(`“${selectedTarget.name}” 的叠加设置`, `Overlay settings for “${selectedTarget.name}”`)}
@@ -814,7 +721,7 @@ export function OsdConfig() {
                   onClick={() => updateTargetConfig(selectedTarget.name, undefined)}
                   disabled={selectedTarget.config === undefined}
                   className={cn(
-                    "no-drag flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45",
+                    "no-drag flex h-7 cursor-pointer items-center gap-1.5 rounded-md bg-surface2 px-2.5 text-[12px] text-ink shadow-[inset_0_0_0_1px_var(--color-line)] transition-colors hover:bg-surface3 disabled:cursor-not-allowed disabled:opacity-45",
                     FOCUS_RING,
                   )}
                 >
@@ -843,14 +750,14 @@ export function OsdConfig() {
         <TaskbarMonitorPanel />
 
         {/* Monitoring content */}
-        <div className="glass hairline rounded-2xl p-4">
+        <div className="glass rounded-xl p-4">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2">
-              <MonitorPlay size={14} className="shrink-0 text-accent-bright" />
-              <span className="hud-label truncate text-[10.5px] text-dim">
-                {tf("监控内容 · CONTENT", "CONTENT")}{editingOverride ? ` · ${selectedTarget?.name}` : ""}
+              <MonitorPlay size={14} className="shrink-0 text-dim" />
+              <span className="truncate text-[13px] font-semibold text-ink">
+                {tf("监控内容", "Content")}{editingOverride ? ` · ${selectedTarget?.name}` : ""}
               </span>
-              <span className="rounded bg-surface2 px-1.5 py-0.5 text-[10px] text-dim">
+              <span className="rounded bg-surface3 px-1.5 text-[11px] leading-5 text-dim">
                 {tf("已选", "Selected")} <span className="nums text-muted">{previewCfg.metrics.length}</span>
               </span>
             </div>
@@ -858,36 +765,29 @@ export function OsdConfig() {
               onClick={() => applyPatch({ metrics: [] })}
               disabled={previewCfg.metrics.length === 0}
               className={cn(
-                "no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40",
+                "no-drag flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-[12px] text-muted transition-colors hover:bg-surface2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40",
                 FOCUS_RING,
               )}
             >
               <RotateCcw size={12} /> {tf("全部清空", "Clear all")}
             </button>
           </div>
-          <div className="mb-3 flex flex-wrap gap-1.5">
-            {OSD_CATEGORIES.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => setCat(c.id)}
-                className={cn(
-                  "no-drag cursor-pointer rounded-lg px-3 py-1.5 text-[12.5px] font-medium transition-colors",
-                  FOCUS_RING,
-                  cat === c.id ? "bg-accent/15 text-accent-bright glow-sm" : "text-dim hover:bg-surface3 hover:text-ink",
-                )}
-              >
-                {c.label}
-              </button>
-            ))}
+          <div className="mb-3">
+            <Segmented
+              id="osd-cat"
+              value={cat}
+              onChange={(v) => setCat(v as typeof cat)}
+              options={OSD_CATEGORIES.map((c) => ({ value: c.id, label: c.label }))}
+              wrap
+            />
           </div>
           <AnimatePresence mode="wait" initial={false}>
             <motion.div
               key={cat}
-              className="grid gap-2 sm:grid-cols-2"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.2, ease: [0.33, 1, 0.68, 1] }}
+              className="grid gap-x-2 gap-y-0.5 sm:grid-cols-2"
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0, transition: { duration: 0.18, ease: easeOut } }}
+              exit={{ opacity: 0, transition: { duration: 0.08 } }}
             >
               {OSD_METRICS.filter((m) => m.cat === cat).map((m) => {
                 const on = previewCfg.metrics.includes(m.key);
@@ -897,30 +797,132 @@ export function OsdConfig() {
                     disabled={!m.supported}
                     onClick={() => toggleMetric(m.key)}
                     className={cn(
-                      "no-drag flex items-center gap-2.5 rounded-lg border px-3 py-2 text-left text-[12.5px] transition-colors",
+                      "no-drag flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[12.5px] transition-colors duration-100",
                       FOCUS_RING,
                       !m.supported
-                        ? "cursor-not-allowed border-line/60 text-dim opacity-55"
+                        ? "cursor-not-allowed text-dim opacity-55"
                         : on
-                          ? "cursor-pointer border-accent/40 bg-accent/10 text-ink"
-                          : "cursor-pointer border-line bg-surface2 text-muted hover:bg-surface3 hover:text-ink",
+                          ? "cursor-pointer bg-accent/10 text-ink"
+                          : "cursor-pointer text-muted hover:bg-surface2 hover:text-ink",
                     )}
                   >
                     <span
                       className={cn(
-                        "grid h-4 w-4 shrink-0 place-items-center rounded border transition-colors",
-                        on && m.supported ? "border-accent bg-accent" : "border-line-strong",
+                        "grid h-4 w-4 shrink-0 place-items-center rounded-[4px] transition-colors",
+                        on && m.supported ? "bg-accent" : "shadow-[inset_0_0_0_1.5px_var(--color-dim)]",
                       )}
                     >
-                      {on && m.supported && <span className="h-2 w-2 rounded-[2px] bg-white" />}
+                      {/* on-accent, not white: unreadable on the bright-accent themes. */}
+                      {on && m.supported && <span className="h-2 w-2 rounded-[2px] bg-on-accent" />}
                     </span>
                     <span className="flex-1">{m.label}</span>
-                    {!m.supported && <span className="text-[10.5px] text-dim">需 PresentMon</span>}
+                    {!m.supported && <span className="text-[11.5px] text-dim">需 PresentMon</span>}
                   </button>
                 );
               })}
             </motion.div>
           </AnimatePresence>
+        </div>
+        </div>
+
+        {/* Live preview — sticky beside the settings so every change is visible
+            where it is made (stacks above them on narrower windows). */}
+        <aside className="xl:sticky xl:top-0 xl:order-last">
+          <div className="glass rounded-xl p-4">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <span className="text-[13px] font-semibold text-ink">{tf("实时预览", "Live preview")}</span>
+              <span className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-dim">
+                <span className="live-dot shrink-0 text-ok" />
+                <span className="truncate">
+                  {editingOverride ? selectedTarget?.name : tf("全局默认", "Global default")}
+                </span>
+              </span>
+            </div>
+            <div
+              className="relative w-full overflow-hidden rounded-lg shadow-[inset_0_0_0_1px_var(--color-line-strong)]"
+              style={{ aspectRatio: screenAspect }}
+            >
+              <div
+                ref={previewRef}
+                className="absolute inset-0 flex p-2"
+                style={{
+                  background:
+                    "radial-gradient(120% 140% at 20% 0%, oklch(38% 0.08 250) 0%, oklch(16% 0.03 265) 60%), repeating-linear-gradient(135deg, oklch(20% 0.02 265) 0 14px, oklch(22% 0.02 265) 14px 28px)",
+                  alignItems:
+                    previewCfg.position === "free"
+                      ? undefined
+                      : previewCfg.position.startsWith("t")
+                        ? "flex-start"
+                        : "flex-end",
+                  justifyContent:
+                    previewCfg.position === "free"
+                      ? undefined
+                      : previewCfg.position === "tc" || previewCfg.position === "bc"
+                        ? "center"
+                        : previewCfg.position.endsWith("l")
+                          ? "flex-start"
+                          : "flex-end",
+                }}
+              >
+                {previewCfg.position === "free" ? (
+                  <div
+                    className="absolute cursor-grab touch-none active:cursor-grabbing"
+                    style={freePosStyle(
+                      dragPos?.x ?? previewCfg.freeX,
+                      dragPos?.y ?? previewCfg.freeY,
+                    )}
+                    onPointerDown={onFreeDragStart}
+                  >
+                    <OsdPlate
+                      metrics={previewCfg.metrics}
+                      style={previewCfg.style}
+                      scale={previewCfg.scale * previewScale}
+                      opacity={previewCfg.opacity}
+                      rounded={previewCfg.rounded}
+                      data={data}
+                      taskbar={false}
+                      tbColorsEnabled={previewCfg.tbColorsEnabled}
+                      tbBg={previewCfg.tbBg}
+                      tbLabel={previewCfg.tbLabel}
+                      tbSafe={previewCfg.tbSafe}
+                      tbWarn={previewCfg.tbWarn}
+                      tbCrit={previewCfg.tbCrit}
+                      tbWarnLoad={previewCfg.tbWarnLoad}
+                      tbCritLoad={previewCfg.tbCritLoad}
+                      tbWarnTemp={previewCfg.tbWarnTemp}
+                      tbCritTemp={previewCfg.tbCritTemp}
+                    />
+                  </div>
+                ) : (
+                  <OsdPlate
+                    metrics={previewCfg.metrics}
+                    style={previewCfg.style}
+                    scale={previewCfg.scale * previewScale}
+                    opacity={previewCfg.opacity}
+                    rounded={previewCfg.rounded}
+                    data={data}
+                    taskbar={false}
+                    tbColorsEnabled={previewCfg.tbColorsEnabled}
+                    tbBg={previewCfg.tbBg}
+                    tbLabel={previewCfg.tbLabel}
+                    tbSafe={previewCfg.tbSafe}
+                    tbWarn={previewCfg.tbWarn}
+                    tbCrit={previewCfg.tbCrit}
+                    tbWarnLoad={previewCfg.tbWarnLoad}
+                    tbCritLoad={previewCfg.tbCritLoad}
+                    tbWarnTemp={previewCfg.tbWarnTemp}
+                    tbCritTemp={previewCfg.tbCritTemp}
+                  />
+                )}
+              </div>
+              {previewCfg.position === "free" && (
+                <span className="pointer-events-none absolute bottom-2 left-2 rounded bg-black/45 px-1.5 py-0.5 text-[11px] text-white/85">
+                  {tf("拖动叠加层自由摆放", "Drag the plate to place it freely")}
+                </span>
+              )}
+            </div>
+          </div>
+        </aside>
         </div>
       </div>
 
@@ -939,7 +941,7 @@ export function OsdConfig() {
             className="w-full rounded-lg border border-line bg-surface2 py-2 pl-9 pr-3 text-[12.5px] text-ink outline-none transition-colors focus:border-accent/50"
           />
         </div>
-        <div className="hairline max-h-[320px] overflow-auto rounded-xl border border-line bg-surface2/40">
+        <div className="hairline max-h-[320px] overflow-auto rounded-lg bg-surface2/60">
           {procLoading ? (
             <div className="px-3 py-6 text-center text-[12px] text-dim">正在读取进程…</div>
           ) : procErr ? (
@@ -969,7 +971,7 @@ export function OsdConfig() {
                       <span className="truncate text-[11px] text-dim">{p.description}</span>
                     )}
                     {already && (
-                      <span className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent-bright">
+                      <span className="shrink-0 rounded bg-accent/14 px-1.5 text-[11px] font-medium leading-5 text-accent">
                         已添加
                       </span>
                     )}
@@ -999,16 +1001,16 @@ interface ModeRowProps {
  *  layers so they read as alternatives to weigh, not as unrelated features. */
 function ModeRow({ icon: Icon, title, desc, applies, checked, onChange }: ModeRowProps) {
   return (
-    <div className="flex items-start justify-between gap-3 border-t border-line/60 py-2.5 first:border-t-0 first:pt-0">
+    <div className="flex items-start justify-between gap-4 border-t border-line py-3 first:border-t-0 first:pt-0">
       <div className="flex min-w-0 items-start gap-2">
         <Icon
           size={14}
-          className={cn("mt-0.5 shrink-0 transition-colors", checked ? "text-accent-bright" : "text-dim")}
+          className={cn("mt-0.5 shrink-0 transition-colors", checked ? "text-accent" : "text-dim")}
         />
         <div className="min-w-0">
           <div className="text-[13.5px] font-medium text-ink">{title}</div>
-          <div className="text-[12px] leading-relaxed text-dim">{desc}</div>
-          <div className="mt-0.5 text-[11px] leading-relaxed text-dim/80">{applies}</div>
+          <div className="text-[12px] leading-relaxed text-muted">{desc}</div>
+          <div className="mt-0.5 text-[11.5px] leading-relaxed text-dim">{applies}</div>
         </div>
       </div>
       <div className="no-drag shrink-0 pt-0.5">
@@ -1040,9 +1042,7 @@ function OverlayStatusLine({ vis, detecting, position, desktopMode }: OverlaySta
   const tf = useTf();
   if (detecting) {
     return (
-      <div className="mt-3 rounded-lg border border-line bg-surface2 px-3 py-2.5 text-[12px] text-dim">
-        {tf("正在检测前台窗口…", "Detecting the foreground window…")}
-      </div>
+      <div className="skeleton mt-3 h-10 rounded-lg" aria-label={tf("正在检测前台窗口…", "Detecting the foreground window…")} />
     );
   }
   // `exe` is null when the foreground window can't be resolved (a shell surface,
@@ -1088,15 +1088,15 @@ function OverlayStatusLine({ vis, detecting, position, desktopMode }: OverlaySta
   }
 
   const tone = vis.shown
-    ? "border-ok/40 bg-ok/10 text-ok"
+    ? "ring-ok/25 bg-ok/10 text-ok"
     : vis.kind === "hidden-master-off"
       ? // The user switched it off themselves — state it, don't alarm.
-        "border-line bg-surface2 text-muted"
-      : "border-warn/40 bg-warn/10 text-warn";
+        "ring-line bg-surface2 text-muted"
+      : "ring-warn/25 bg-warn/10 text-warn";
 
   return (
     <div className="mt-3">
-      <div className={cn("flex items-center gap-2 rounded-lg border px-3 py-2.5 text-[12.5px]", tone)}>
+      <div className={cn("flex items-center gap-2 rounded-lg px-3 py-2.5 text-[12.5px] ring-1 ring-inset", tone)}>
         {vis.shown ? (
           <Eye size={14} className="shrink-0" />
         ) : (
@@ -1143,21 +1143,20 @@ function InjectionOverlaySection() {
   const status = useOverlayStatus((s) => s.status);
 
   return (
-    <div className="glass hairline rounded-2xl p-4">
+    <div className="glass rounded-xl p-4">
       <div className="mb-3 flex items-center gap-2">
-        <Syringe size={15} className="shrink-0 text-accent-bright" />
-        <span className="hud-label text-[10.5px] text-dim">
-          {tf("注入详情 · INJECTION", "INJECTION")}
+        <Syringe size={15} className="shrink-0 text-dim" />
+        <span className="text-[13px] font-semibold text-ink">
+          {tf("注入详情", "Injection")}
         </span>
         <span
           className={cn(
-            "rounded px-1.5 py-0.5 text-[10px]",
-            enabled ? "bg-accent/15 text-accent-bright" : "bg-surface3 text-dim",
+            "rounded px-1.5 text-[11px] font-medium leading-5",
+            enabled ? "bg-accent/14 text-accent" : "bg-surface3 text-dim",
           )}
         >
           {enabled ? tf("已开启", "On") : tf("已关闭", "Off")}
         </span>
-        <span className="h-px flex-1 bg-line/50" />
       </div>
 
       {/* Anti-cheat safety note — always visible so the guarantee is explicit. */}
@@ -1222,7 +1221,7 @@ function InjectionStatusLine({ enabled, status }: InjectionStatusLineProps) {
         ? "border-warn/40 bg-warn/10 text-warn"
         : "border-line bg-surface2 text-muted";
   return (
-    <div className={cn("flex items-center gap-2 rounded-lg border px-3 py-2.5 text-[12.5px]", tone)}>
+    <div className={cn("flex items-center gap-2 rounded-lg px-3 py-2.5 text-[12.5px] ring-1 ring-inset", tone)}>
       {status.mode === "inject" ? (
         <Syringe size={14} className="shrink-0" />
       ) : status.mode === "window" ? (
@@ -1232,7 +1231,7 @@ function InjectionStatusLine({ enabled, status }: InjectionStatusLineProps) {
       )}
       <span className="flex-1">{reason}</span>
       {status.target.pid !== 0 && (
-        <span className="shrink-0 rounded bg-surface3 px-1.5 py-0.5 text-[10.5px] text-muted opacity-80">
+        <span className="shrink-0 rounded bg-surface3 px-1.5 py-0.5 text-[11.5px] text-muted opacity-80">
           PID {status.target.pid}
         </span>
       )}
@@ -1258,13 +1257,12 @@ const OsdAppearanceControls = memo(function OsdAppearanceControls({
 }: OsdAppearanceControlsProps) {
   const tf = useTf();
   return (
-    <div className="glass hairline rounded-2xl p-4">
+    <div className="glass rounded-xl p-4">
       <div className="mb-3 flex items-center gap-2">
-        <Palette size={14} className="text-accent-bright" />
-        <span className="hud-label text-[10.5px] text-dim">
-          {tf("样式 · 位置 · STYLE", "STYLE")}
+        <Palette size={14} className="text-dim" />
+        <span className="text-[13px] font-semibold text-ink">
+          {tf("样式 · 位置", "Style")}
         </span>
-        <span className="h-px flex-1 bg-line/50" />
       </div>
       <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
       <Row label={tf("布局样式", "Layout")}>
@@ -1440,7 +1438,7 @@ const TaskbarMonitorPanel = memo(function TaskbarMonitorPanel() {
   const clearTbMetrics = useCallback(() => update({ tbMetrics: [] }), [update]);
 
   return (
-    <div className="glass hairline rounded-2xl p-4">
+    <div className="glass rounded-xl p-4">
       {/* Foldable header: chevron + title toggles the whole body; the enable
           toggle stays visible while collapsed. */}
       <div className="flex items-center gap-2">
@@ -1457,12 +1455,12 @@ const TaskbarMonitorPanel = memo(function TaskbarMonitorPanel() {
             size={14}
             className={cn("shrink-0 text-dim transition-transform", open && "rotate-90")}
           />
-          <MonitorPlay size={14} className="shrink-0 text-accent-bright" />
-          <span className="hud-label text-[10.5px] text-dim">
-            {tf("任务栏监视器 · TASKBAR MONITOR", "TASKBAR MONITOR")}
+          <MonitorPlay size={14} className="shrink-0 text-dim" />
+          <span className="text-[13px] font-semibold text-ink">
+            {tf("任务栏监视器", "Taskbar monitor")}
           </span>
           {tbEnabled && (
-            <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent-bright">
+            <span className="rounded bg-accent/14 px-1.5 text-[11px] font-medium leading-5 text-accent">
               {tf("已开启", "On")}
             </span>
           )}
@@ -1515,10 +1513,9 @@ const TaskbarMonitorPanel = memo(function TaskbarMonitorPanel() {
 
           {/* 2. Custom Layout panel */}
           <div className="mb-3 mt-4 flex items-center gap-2 border-t border-line/60 pt-3">
-            <span className="hud-label text-[10.5px] text-dim">
-              {tf("自定义布局 · CUSTOM LAYOUT", "CUSTOM LAYOUT")}
+            <span className="text-[13px] font-semibold text-ink">
+              {tf("自定义布局", "Custom layout")}
             </span>
-            <span className="h-px flex-1 bg-line/50" />
           </div>
           <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
             <Row label={tf("启用自定义布局", "Custom Layout")}>
@@ -1562,9 +1559,8 @@ const TaskbarMonitorPanel = memo(function TaskbarMonitorPanel() {
 
           {/* 4. Colors panel */}
           <div className="mb-3 mt-4 flex items-center gap-2 border-t border-line/60 pt-3">
-            <Palette size={14} className="text-accent-bright" />
-            <span className="hud-label text-[10.5px] text-dim">{tf("配色 · COLORS", "COLORS")}</span>
-            <span className="h-px flex-1 bg-line/50" />
+            <Palette size={14} className="text-dim" />
+            <span className="text-[13px] font-semibold text-ink">{tf("配色", "Colors")}</span>
           </div>
           <div className="mb-3 flex items-center justify-between gap-3">
             <span className="text-[12.5px] text-muted">{tf("启用配色", "Enable colors")}</span>
@@ -1666,12 +1662,12 @@ const TaskbarMetricsPicker = memo(function TaskbarMetricsPicker({
     <div className="mt-4 border-t border-line/60 pt-3">
       <div className="mb-3 flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <MonitorPlay size={14} className="shrink-0 text-accent-bright" />
-          <span className="hud-label truncate text-[10.5px] text-dim">
-            {tf("监控内容 · CONTENT", "CONTENT")}
+          <MonitorPlay size={14} className="shrink-0 text-dim" />
+          <span className="truncate text-[13px] font-semibold text-ink">
+            {tf("监控内容", "Content")}
           </span>
-          <span className="rounded bg-surface2 px-1.5 py-0.5 text-[10px] text-dim">
-            {tf("已选", "Selected")}{" "}
+          <span className="rounded bg-surface2 px-1.5 py-0.5 text-[11px] text-dim">
+            {tf("已选", "Selected")}{""}
             <span className="nums text-muted">{metrics.length}</span>
           </span>
         </div>
@@ -1679,7 +1675,7 @@ const TaskbarMetricsPicker = memo(function TaskbarMetricsPicker({
           onClick={onClear}
           disabled={metrics.length === 0}
           className={cn(
-            "no-drag flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:bg-surface3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40",
+            "no-drag flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-[12px] text-muted transition-colors hover:bg-surface2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40",
             FOCUS_RING,
           )}
         >
