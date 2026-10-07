@@ -25,6 +25,7 @@ pub mod process;
 pub mod process_icon;
 pub mod sampler;
 pub mod sensors;
+pub mod sidecar;
 pub mod serde_u64;
 pub mod smu;
 pub mod state;
@@ -440,6 +441,7 @@ pub fn run() {
             commands::smu_apply_limit,
             commands::smu_set_scalar,
             commands::smu_force_stock,
+            commands::cpu_sensors,
         ]);
     let app = builder
         .build(tauri::generate_context!())

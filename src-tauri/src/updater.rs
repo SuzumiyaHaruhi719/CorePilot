@@ -76,14 +76,11 @@ const BACKUP_SUFFIX: &str = "old";
 /// check spinning — it reports a failure and the user moves on.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// How long to wait for the sidecar to die before giving up and continuing.
+/// How long the sidecar gets to run its own fan reset after its stdin closes,
+/// before `TerminateProcess`. Sized to cover sensord's worst realistic `Gate`
+/// hold — a full LibreHardwareMonitor close+reopen on the stale-bank path —
+/// without making a tray quit feel stuck.
 const SIDECAR_EXIT_WAIT: Duration = Duration::from_secs(3);
-
-/// How long to let the sidecar exit on its own after its stdin is closed, before
-/// falling back to `TerminateProcess`. Sized to cover sensord's worst realistic
-/// `Gate` hold — a full LibreHardwareMonitor close+reopen on the stale-bank path
-/// — without making a tray quit feel stuck.
-const SIDECAR_EOF_WAIT: Duration = Duration::from_secs(2);
 
 /// Shown whenever the in-app path can't finish, so there is always a way out.
 const RELEASES_URL: &str = "https://github.com/SuzumiyaHaruhi719/CorePilot/releases/latest";
@@ -290,42 +287,16 @@ pub fn shutdown_teardown() {
     if SHUTDOWN_TORN_DOWN.swap(true, Ordering::AcqRel) {
         return;
     }
-    // Restore hardware before the sidecar dies — and make sure it actually gets
-    // to RUN that restore.
-    //
-    // The failure this prevents: `autoall` is only QUEUED on sensord's stdin.
-    // sensord can be holding its `Gate` far longer than a fixed short sleep —
-    // the stale-bank reopen path holds it across a whole LibreHardwareMonitor
-    // close+reopen (hundreds of ms to seconds) and then RE-PINS the fan at its
-    // last PWM. `TerminateProcess` runs none of sensord's four ResetTouched
-    // routes, so sleeping 200 ms and killing lost that race and left the
-    // Nuvoton pinned at the last software PWM (fans stuck at e.g. 25%) with
-    // CorePilot gone and the BIOS NOT back in control, until a cold boot.
-    // So: send `autoall`, then drop the ChildStdin (`fan::clear`) — closing the
-    // write end makes sensord's CommandLoop hit EOF and run ResetTouched under
-    // Gate on its way out — then give it a real budget to exit and only
-    // terminate a sidecar that is still alive afterwards.
-    let queued = crate::fan::send_command("autoall");
-    crate::fan::clear();
-    if let Some(pid) = crate::sensors::sidecar_pid() {
-        if queued {
-            let deadline = Instant::now() + SIDECAR_EOF_WAIT;
-            // Stop waiting once the reader thread has reaped it and released the
-            // PID (`sidecar_pid() != pid`): Windows recycles PIDs fast, so a bare
-            // `pid_alive` could otherwise describe an unrelated new process.
-            while Instant::now() < deadline
-                && crate::sensors::sidecar_pid() == Some(pid)
-                && crate::fps::pid_alive(pid)
-            {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        }
-        if crate::sensors::sidecar_pid() == Some(pid) && crate::fps::pid_alive(pid) {
-            if let Err(e) = crate::process::kill(pid) {
-                tracing::warn!("shutdown: could not stop sensord (pid {pid}): {e}");
-            }
-        }
-    }
+    // Hand the hardware back before the sidecar dies, and let it actually RUN
+    // that restore: `graceful_stop` queues `autoall`, closes stdin (sensord's
+    // CommandLoop then resets every touched control under its Gate on the way
+    // out) and only terminates a sidecar still alive after the grace window.
+    // The old sleep-200-ms-then-kill lost that race against a long Gate hold and
+    // left the Nuvoton pinned at the last software PWM until a cold boot.
+    // Headers whose hand-back was already lost to a sidecar crash are parked at
+    // 100 % first instead (see `fan::park_dirty_for_exit`).
+    crate::fan::park_dirty_for_exit();
+    crate::sidecar::graceful_stop(SIDECAR_EXIT_WAIT);
     crate::overlay_inject::write_disabled();
     if let Err(e) = ferrisetw::trace::stop_trace_by_name(crate::fps::FPS_SESSION_NAME) {
         tracing::debug!("shutdown: FPS trace already stopped or unavailable: {e:?}");
@@ -342,14 +313,6 @@ fn teardown() {
     // Explicit, because `shutdown_teardown` no longer flushes (see above) and the
     // update path may never reach `RunEvent::Exit` in a usable state.
     crate::persist::flush();
-    // The updater has a longer budget than normal process exit because it is
-    // about to replace the sidecar image on disk.
-    if let Some(pid) = crate::sensors::sidecar_pid() {
-        let deadline = Instant::now() + SIDECAR_EXIT_WAIT;
-        while crate::fps::pid_alive(pid) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
 }
 
 // =============================================================================

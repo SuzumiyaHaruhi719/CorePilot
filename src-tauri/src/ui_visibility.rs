@@ -90,7 +90,7 @@ pub fn set_main_hidden(hidden: bool) {
     // the `IsIconic` term) and would stay true.
     OCCLUDED.store(hidden, Ordering::Relaxed);
     if MAIN_HIDDEN.swap(hidden, Ordering::Relaxed) != hidden {
-        crate::sensors::refresh_sidecar_interval();
+        crate::sidecar::refresh_interval();
     }
 }
 
@@ -110,7 +110,7 @@ pub fn note_focus(focused: bool) {
     if focused {
         MAIN_HIDDEN.store(false, Ordering::Relaxed);
         OCCLUDED.store(false, Ordering::Relaxed);
-        crate::sensors::refresh_sidecar_interval();
+        crate::sidecar::refresh_interval();
     }
 }
 
@@ -190,7 +190,7 @@ fn compute_occluded() -> bool {
         // forever while the user stares at a visible, frozen window. The window
         // is provably on screen here, so the flag is a lie — clear it.
         if MAIN_HIDDEN.swap(false, Ordering::Relaxed) {
-            crate::sensors::refresh_sidecar_interval();
+            crate::sidecar::refresh_interval();
         }
 
         let fg = GetForegroundWindow();
@@ -253,7 +253,7 @@ pub fn start() {
             OCCLUDED.store(occluded, Ordering::Relaxed);
             // Cheap and edge-triggered inside: only actually writes to the
             // sidecar when the chosen interval changes.
-            crate::sensors::refresh_sidecar_interval();
+            crate::sidecar::refresh_interval();
             std::thread::sleep(TICK);
         });
     if let Err(e) = spawned {

@@ -2,9 +2,9 @@
 //!
 //! The single `sensord` sidecar (LibreHardwareMonitor) is the actuator: it
 //! streams fan RPM / board temperatures / fan-control (PWM) state on stdout and
-//! accepts `set <id> <pct>` / `auto <id>` commands on stdin. `sensors.rs` owns
-//! that process; it hands us the child's stdin via [`register_sidecar_stdin`]
-//! and feeds every stdout line to [`ingest_line`].
+//! accepts `set <id> <pct>` / `auto <id>` commands on stdin. `crate::sidecar`
+//! owns that process; it feeds every parsed stdout line to [`ingest`] and
+//! carries our commands (never blocking the caller).
 //!
 //! This module keeps the latest snapshot (for the UI), the per-fan configuration
 //! pushed from the frontend, and a background engine that — once per ~2 s — turns
@@ -16,9 +16,7 @@
 //! Everything degrades gracefully: with no sidecar, no controllable header, or no
 //! temperature reading, the relevant step simply no-ops and nothing is fabricated.
 
-use std::collections::HashMap;
-use std::io::Write;
-use std::process::ChildStdin;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -43,9 +41,25 @@ struct Raw {
 
 static SNAP: Lazy<Mutex<Raw>> = Lazy::new(|| Mutex::new(Raw::default()));
 
-/// The sidecar's stdin, for sending fan commands. `None` until the sidecar is
-/// spawned (or after it dies and a write fails).
-static SIDECAR_STDIN: Lazy<Mutex<Option<ChildStdin>>> = Lazy::new(|| Mutex::new(None));
+/// Headers whose BIOS hand-back was lost: a sensord process died WITHOUT its own
+/// reset while we drove them (crash, or a hang the watchdog had to terminate).
+/// LibreHardwareMonitor restores only the defaults the SAME process saved, so a
+/// fresh sidecar's `auto` is a no-op and the first `set` records the pinned
+/// state as "default" — the fan would stay at the last software duty (e.g. 25 %)
+/// while temps climb, with every `auto` reporting success. These stay under a
+/// safe software curve until reboot, which is the only thing that resets the
+/// chip's mode registers.
+static DIRTY: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+/// Built-in curve (against the CPU temperature) for a dirty header the user left
+/// on auto — the BIOS curve we can no longer hand it back to. 100 % without a
+/// reading.
+const FAILSAFE_CURVE: [CurvePoint; 4] = [
+    CurvePoint { temp_c: 40.0, duty: 35.0 },
+    CurvePoint { temp_c: 60.0, duty: 55.0 },
+    CurvePoint { temp_c: 75.0, duty: 80.0 },
+    CurvePoint { temp_c: 85.0, duty: 100.0 },
+];
 
 /// Per-fan configuration last pushed from the frontend.
 static FAN_CONFIG: Lazy<Mutex<Vec<FanChannelConfig>>> = Lazy::new(|| Mutex::new(Vec::new()));
@@ -75,7 +89,7 @@ static INGEST_GENERATION: AtomicU64 = AtomicU64::new(u64::MAX);
 pub(crate) fn exclusive_begin() -> bool {
     let was = CALIBRATING.swap(true, Ordering::SeqCst);
     if !was {
-        let _ = send("interval 1000");
+        crate::sidecar::refresh_interval();
     }
     !was
 }
@@ -92,7 +106,7 @@ pub(crate) fn exclusive_active() -> bool {
 /// (mirrors the tail of `fan_calibrate`).
 pub(crate) fn exclusive_end() {
     CALIBRATING.store(false, Ordering::SeqCst);
-    let _ = send("interval 1400");
+    crate::sidecar::refresh_interval();
     LAST.lock().clear();
     CURVE_DUTY.lock().clear();
     apply_once();
@@ -182,6 +196,9 @@ pub struct FanState {
     pub supported: bool,
     pub channels: Vec<FanChannel>,
     pub temps: Vec<FanTempSource>,
+    /// Control ids that can't be handed back to the BIOS until reboot (see
+    /// [`DIRTY`]); CorePilot keeps them on a safe curve. Usually empty.
+    pub dirty_headers: Vec<String>,
 }
 
 /// One point of a fan curve: at `temp_c` °C, run at `duty` %.
@@ -234,32 +251,43 @@ pub struct FanChannelConfig {
     pub curve2: Vec<CurvePoint>,
 }
 
-// --- wiring from sensors.rs (the sidecar owner) --------------------------------
+// --- wiring from crate::sidecar (the sidecar owner) ----------------------------
 
-/// Store the sidecar's stdin handle so the engine can send commands.
-pub fn register_sidecar_stdin(stdin: ChildStdin) {
-    *SIDECAR_STDIN.lock() = Some(stdin);
-}
-
-/// Clear the snapshot when the sidecar exits (UI shows fans as unavailable
-/// rather than stale values). The stdin handle is dropped too.
-pub fn clear() {
+/// The sidecar process exited. Clear the snapshot (the UI shows fans as
+/// unavailable rather than stale values). `clean` = it ran its own fan reset on
+/// the way out; otherwise every header we were driving is now [`DIRTY`].
+pub(crate) fn sidecar_gone(clean: bool) {
     *SNAP.lock() = Raw::default();
-    *SIDECAR_STDIN.lock() = None;
     SIDECAR_GENERATION.fetch_add(1, Ordering::SeqCst);
+    if !clean {
+        let driven: Vec<String> = LAST
+            .lock()
+            .iter()
+            .filter(|(_, (mode, _))| mode != "auto")
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !driven.is_empty() {
+            tracing::warn!(?driven, "sensord died without its fan reset; headers kept on a fail-safe curve until reboot");
+            DIRTY.lock().extend(driven);
+        }
+    }
 }
 
-/// Parse one sidecar JSON line and update the snapshot. Unknown shapes are
-/// ignored; the existing CPU/GPU fields are handled separately in `sensors.rs`.
-pub fn ingest_line(line: &str) {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return;
+/// App exit: dirty headers can't be returned to the BIOS, and `autoall` (or
+/// sensord's own EOF reset) would put back the PINNED state the new process
+/// saved as "default". Park them at 100 % and make sensord forget them so they
+/// stay there, safe, until reboot.
+pub(crate) fn park_dirty_for_exit() {
+    for id in DIRTY.lock().iter() {
+        if send_set(id, 100.0) {
+            let _ = send(&format!("forget {id}"));
+        }
     }
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-        return;
-    };
+}
 
+/// Update the snapshot from one sidecar line (parsed once by `crate::sidecar`).
+/// Lines without fan arrays are ignored; CPU/GPU fields are `sensors`' business.
+pub(crate) fn ingest(json: &serde_json::Value) {
     let num = |v: &serde_json::Value, key: &str| -> Option<f32> {
         let n = v.get(key)?;
         if n.is_null() {
@@ -344,30 +372,8 @@ fn is_valid_control_id(id: &str) -> bool {
         .all(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '/' | '_' | '.' | ':' | '-'))
 }
 
-/// Send a raw line to the sidecar stdin (used by the SMU tuning bridge for
-/// `smu …` commands). Returns false if no sidecar is connected. The fan engine
-/// itself uses the private `send` below.
-pub fn send_command(cmd: &str) -> bool {
-    let mut guard = SIDECAR_STDIN.lock();
-    let Some(stdin) = guard.as_mut() else {
-        return false;
-    };
-    let line = format!("{cmd}\n");
-    stdin.write_all(line.as_bytes()).is_ok() && stdin.flush().is_ok()
-}
-
-/// Write a single line command to the sidecar; drop the handle on failure.
 fn send(cmd: &str) -> bool {
-    let mut guard = SIDECAR_STDIN.lock();
-    let Some(stdin) = guard.as_mut() else {
-        return false;
-    };
-    let line = format!("{cmd}\n");
-    if stdin.write_all(line.as_bytes()).is_err() || stdin.flush().is_err() {
-        *guard = None; // sidecar gone — stop trying until re-registered
-        return false;
-    }
-    true
+    crate::sidecar::send(cmd)
 }
 
 pub(crate) fn send_set(id: &str, pct: f32) -> bool {
@@ -486,15 +492,21 @@ fn apply_once() {
         return;
     }
     let cfgs = FAN_CONFIG.lock().clone();
-    if cfgs.is_empty() {
+    let dirty = DIRTY.lock().clone();
+    if cfgs.is_empty() && dirty.is_empty() {
         return;
     }
 
     // Snapshot temps by id for curve sources.
     let temps: HashMap<String, f32> = temps_by_id();
+    let failsafe = failsafe_duty(&temps);
 
     let mut last = LAST.lock();
     let mut curve_duty = CURVE_DUTY.lock();
+    // A dirty header with no config of its own still needs managing.
+    for id in dirty.iter().filter(|id| !cfgs.iter().any(|c| &c.control_id == *id)) {
+        drive_failsafe(id, failsafe, &mut last);
+    }
     for c in &cfgs {
         let floor = c.min_duty.clamp(0.0, 100.0);
         match c.mode.as_str() {
@@ -523,6 +535,13 @@ fn apply_once() {
                     .as_ref()
                     .and_then(|src| temps.get(src).copied());
                 let Some(t) = reading else {
+                    curve_duty.remove(&c.control_id);
+                    if dirty.contains(&c.control_id) {
+                        // No BIOS to fall back to: run hot-safe instead.
+                        let peak = c.curve.iter().map(|p| p.duty).fold(failsafe, f32::max);
+                        drive_failsafe(&c.control_id, peak.clamp(floor, 100.0), &mut last);
+                        continue;
+                    }
                     let already_auto = last
                         .get(&c.control_id)
                         .map(|(m, _)| m == "auto")
@@ -578,6 +597,10 @@ fn apply_once() {
                     last.insert(c.control_id.clone(), ("curve".to_string(), di));
                 }
             }
+            _ if dirty.contains(&c.control_id) => {
+                curve_duty.remove(&c.control_id);
+                drive_failsafe(&c.control_id, failsafe.max(floor), &mut last);
+            }
             _ => {
                 // auto: hand back to BIOS, but only once per transition.
                 let already_auto = last
@@ -596,6 +619,27 @@ fn apply_once() {
     }
 }
 
+/// Duty for a dirty header with no usable curve: [`FAILSAFE_CURVE`] at the CPU
+/// temperature, 100 % when there is no reading.
+fn failsafe_duty(temps: &HashMap<String, f32>) -> f32 {
+    resolve_source_ids()
+        .0
+        .and_then(|id| temps.get(&id).copied())
+        .map_or(100.0, |t| interp(&FAILSAFE_CURVE, t))
+}
+
+/// Drive `id` at `duty`, re-sending only when it moved ≥2 % (same hysteresis as
+/// the curve path).
+fn drive_failsafe(id: &str, duty: f32, last: &mut HashMap<String, (String, i32)>) {
+    let di = duty.round() as i32;
+    let unchanged = last
+        .get(id)
+        .is_some_and(|(mode, prev)| mode == "failsafe" && (di - prev).abs() < 2);
+    if !unchanged && send_set(id, duty) {
+        last.insert(id.to_string(), ("failsafe".to_string(), di));
+    }
+}
+
 /// Start the background fan engine (idempotent). Applies the active config every
 /// ~2 s. Does nothing meaningful until the frontend pushes a config.
 pub fn start_engine() {
@@ -605,7 +649,7 @@ pub fn start_engine() {
     // Make sure the LHM sidecar is running so fan/temp data flows even if the
     // user opens the Fan page before ever visiting Monitor (which is the only
     // other thing that spawns the sidecar).
-    crate::sensors::ensure_sidecar();
+    crate::sidecar::ensure();
     std::thread::Builder::new()
         .name("fan-engine".into())
         .spawn(|| loop {
@@ -674,11 +718,14 @@ fn build_state() -> FanState {
         });
     }
 
+    let mut dirty_headers: Vec<String> = DIRTY.lock().iter().cloned().collect();
+    dirty_headers.sort();
     FanState {
         available: raw.got_any,
         supported,
         channels,
         temps,
+        dirty_headers,
     }
 }
 
@@ -694,7 +741,7 @@ fn build_state() -> FanState {
 pub async fn fan_info() -> FanState {
     crate::commands::run_blocking_default("fan_info", || {
         // Guarantee the sidecar is up the moment the Fan page asks for data.
-        crate::sensors::ensure_sidecar();
+        crate::sidecar::ensure();
         build_state()
     })
     .await
@@ -979,7 +1026,7 @@ pub async fn fan_calibrate(
     app: tauri::AppHandle,
     control_ids: Vec<String>,
 ) -> crate::error::CoreResult<Vec<FanCalibration>> {
-    crate::sensors::ensure_sidecar();
+    crate::sidecar::ensure();
 
     let controllable = controllable_ids();
     let mut targets: Vec<String> = if control_ids.is_empty() {

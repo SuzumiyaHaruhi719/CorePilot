@@ -317,6 +317,7 @@ pub fn run_tune(io: &mut dyn TuneIo, raw: &AutoTuneParams) -> AutoTuneOutcome {
         Ok(p) => p,
         Err(e) => {
             return AutoTuneOutcome::Aborted(AbortInfo {
+                emergency: false,
                 phase: "precheck".into(),
                 reason_zh: format!("参数无效:{e}"),
                 reason_en: format!("invalid parameters: {e}"),
@@ -350,6 +351,7 @@ pub fn run_tune(io: &mut dyn TuneIo, raw: &AutoTuneParams) -> AutoTuneOutcome {
             t.io.stop_cpu_load();
             t.io.stop_gpu_load();
             AutoTuneOutcome::Aborted(AbortInfo {
+                emergency: a.emergency,
                 phase: a.phase.into(),
                 reason_zh: a.reason_zh,
                 reason_en: a.reason_en,
@@ -1062,6 +1064,10 @@ fn now_wall_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// How long an emergency abort holds every fan at 100 % before the previous
+/// config is restored.
+const EMERGENCY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Run the full auto-tune. Takes engine exclusivity for the whole duration;
 /// restores the previous fan config on abort, leaves the synthesized curves
 /// to be applied by the frontend on success (spec §6).
@@ -1070,7 +1076,7 @@ pub async fn fan_autotune_start(
     app: tauri::AppHandle,
     params: io::AutoTuneParams,
 ) -> crate::error::CoreResult<io::AutoTuneResult> {
-    crate::sensors::ensure_sidecar();
+    crate::sidecar::ensure();
     if !crate::fan::exclusive_begin() {
         return Err(crate::error::CoreError::from(
             "已有校准/调优在运行".to_string(),
@@ -1103,8 +1109,23 @@ pub async fn fan_autotune_start(
             Ok(*result)
         }
         Ok(io::AutoTuneOutcome::Aborted(info)) => {
-            crate::fan::config_restore(snapshot);
-            crate::fan::exclusive_end();
+            if info.emergency {
+                // The tune just drove every fan to 100 % because temperatures ran
+                // away. Restoring the old config right now undid that within
+                // microseconds; hold it (exclusivity keeps the engine paused) for
+                // a cool-down first.
+                std::thread::Builder::new()
+                    .name("fan-autotune-cooldown".into())
+                    .spawn(move || {
+                        std::thread::sleep(EMERGENCY_COOLDOWN);
+                        crate::fan::config_restore(snapshot);
+                        crate::fan::exclusive_end();
+                    })
+                    .ok();
+            } else {
+                crate::fan::config_restore(snapshot);
+                crate::fan::exclusive_end();
+            }
             use tauri::Emitter;
             let _ = app.emit("fan-autotune-aborted", info.clone());
             Err(crate::error::CoreError::from(format!(

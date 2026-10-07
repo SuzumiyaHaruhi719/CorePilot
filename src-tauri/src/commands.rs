@@ -373,36 +373,47 @@ pub fn smu_status() -> crate::smu::SmuStatus {
     crate::smu::status()
 }
 
-/// Apply a per-core Curve Optimizer margin (clamped ±50 in the host). Live
-/// override; never auto-reverted.
+/// The SMU writes below each wait (≤3 s) for sensord's reply to that exact
+/// request, so they run on the blocking pool. All are live overrides; never
+/// auto-reverted.
+///
+/// Per-core Curve Optimizer margin (±50, enforced in sensord).
 #[tauri::command]
-pub fn smu_apply_co(ccd: i32, core: i32, margin: i32) -> bool {
-    crate::smu::apply_co(ccd, core, margin)
+pub async fn smu_apply_co(ccd: i32, core: i32, margin: i32) -> crate::smu::SmuApplyResult {
+    run_blocking_default("smu_apply_co", move || crate::smu::apply_co(ccd, core, margin)).await
 }
 
-/// Apply an all-core Curve Optimizer margin. Live override; never auto-reverted.
+/// All-core Curve Optimizer margin.
 #[tauri::command]
-pub fn smu_apply_co_all(margin: i32) -> bool {
-    crate::smu::apply_co_all(margin)
+pub async fn smu_apply_co_all(margin: i32) -> crate::smu::SmuApplyResult {
+    run_blocking_default("smu_apply_co_all", move || crate::smu::apply_co_all(margin)).await
 }
 
-/// Set a PBO limit. `kind` ∈ {ppt, tdc, edc}; `value` W (PPT) or A (TDC/EDC).
+/// PBO limit. `kind` ∈ {ppt, tdc, edc}; `value` W (PPT) or A (TDC/EDC).
 #[tauri::command]
-pub fn smu_apply_limit(kind: String, value: f64) -> bool {
-    crate::smu::apply_limit(&kind, value)
+pub async fn smu_apply_limit(kind: String, value: f64) -> crate::smu::SmuApplyResult {
+    run_blocking_default("smu_apply_limit", move || crate::smu::apply_limit(&kind, value)).await
 }
 
-/// Set the PBO scalar (1×–10×).
+/// PBO scalar (1×–10×).
 #[tauri::command]
-pub fn smu_set_scalar(scalar: i32) -> bool {
-    crate::smu::set_scalar(scalar)
+pub async fn smu_set_scalar(scalar: i32) -> crate::smu::SmuApplyResult {
+    run_blocking_default("smu_set_scalar", move || crate::smu::set_scalar(scalar)).await
 }
 
 /// Explicit "force stock": all-core CO = 0. Overrides BIOS Curve-Optimizer for
 /// this boot (reboot restores the BIOS undervolt). User-initiated only.
 #[tauri::command]
-pub fn smu_force_stock() -> bool {
-    crate::smu::force_stock_co()
+pub async fn smu_force_stock() -> crate::smu::SmuApplyResult {
+    run_blocking_default("smu_force_stock", crate::smu::force_stock_co).await
+}
+
+/// The deep CPU sensor list (per-core clocks, CCD temps, voltages, TDC/EDC…)
+/// from the sidecar. Split out of `get_sensors`, which every 1 Hz poller pays
+/// for, because only the SMU telemetry view reads it.
+#[tauri::command]
+pub fn cpu_sensors() -> Vec<crate::sensors::CpuSensor> {
+    crate::sensors::cpu_sensors()
 }
 
 /// Reveal a file in Windows Explorer (opens its folder and selects it). Used by
