@@ -32,12 +32,15 @@ pub struct GameEntry {
 struct Cache {
     at: Option<Instant>,
     games: Vec<GameEntry>,
+    /// A rescan is running; others keep using the previous list meanwhile.
+    scanning: bool,
 }
 
 static CACHE: Lazy<Mutex<Cache>> = Lazy::new(|| {
     Mutex::new(Cache {
         at: None,
         games: Vec::new(),
+        scanning: false,
     })
 });
 
@@ -45,16 +48,37 @@ static CACHE: Lazy<Mutex<Cache>> = Lazy::new(|| {
 const REFRESH: Duration = Duration::from_secs(300);
 
 /// (Re)build the cache if it's missing or older than [`REFRESH`]. Scans OUTSIDE
-/// the lock so a slow disk/registry walk never stalls the OSD poll; a concurrent
-/// double-scan is harmless (idempotent, last writer wins).
+/// the lock so a slow disk/registry walk never stalls the OSD poll. Single
+/// flight once a list exists: every caller that hit the expiry used to run its
+/// own full scan (`reg.exe` + manifest walks) — the recorder at 5 Hz plus the
+/// OSD at 1 Hz, 24/7. Only the very first scan may run concurrently, so no
+/// caller ever sees an empty library just because another is scanning.
 fn ensure_fresh() {
-    let stale = match CACHE.lock() {
-        Ok(c) => c.at.map(|t| t.elapsed() > REFRESH).unwrap_or(true),
+    let claimed = match CACHE.lock() {
+        Ok(mut c) => {
+            let stale = c.at.map(|t| t.elapsed() > REFRESH).unwrap_or(true);
+            if !stale || (c.scanning && c.at.is_some()) {
+                return;
+            }
+            c.scanning = true;
+            true
+        }
         Err(_) => false,
     };
-    if !stale {
+    if !claimed {
         return;
     }
+    // Clears `scanning` even if a scan panics (callers catch_unwind), so the
+    // library can't freeze at a stale list.
+    struct Release;
+    impl Drop for Release {
+        fn drop(&mut self) {
+            if let Ok(mut c) = CACHE.lock() {
+                c.scanning = false;
+            }
+        }
+    }
+    let _release = Release;
     let mut games = scan_steam();
     games.extend(scan_epic());
     games.extend(scan_gog());
