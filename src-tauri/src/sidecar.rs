@@ -484,4 +484,28 @@ mod tests {
         assert!(sh.next_spawn_at.is_some());
         assert_eq!(sh.failures, 12);
     }
+
+    /// Real round trip against the shipped sensord: spawn, first lines, an SMU
+    /// write correlated by id (out of range, so sensord refuses it before the
+    /// SMU), then the graceful stop. Ignored: it needs
+    /// `binaries/sensord-x86_64-pc-windows-msvc.exe` copied next to the test
+    /// binary as `target/debug/deps/sensord.exe`, and spawns a real process.
+    #[test]
+    #[ignore]
+    fn real_sidecar_round_trip() {
+        ensure();
+        std::thread::sleep(Duration::from_secs(4));
+        assert_eq!(SHARED.lock().state, State::Live, "sensord did not start");
+        assert!(LINES.load(Ordering::Relaxed) > 0, "no lines from sensord");
+        let refused = crate::smu::apply_limit("ppt", 10.0);
+        assert!(!refused.ok);
+        assert!(refused.detail.starts_with("out of range"), "{}", refused.detail);
+        let pid = SHARED.lock().pid;
+        let t = Instant::now();
+        graceful_stop(Duration::from_secs(3));
+        assert!(t.elapsed() < Duration::from_secs(3), "stop fell back to terminate");
+        assert!(!crate::fps::pid_alive(pid), "sensord still running");
+        ensure();
+        assert_eq!(SHARED.lock().state, State::Stopped, "respawned after stop");
+    }
 }
