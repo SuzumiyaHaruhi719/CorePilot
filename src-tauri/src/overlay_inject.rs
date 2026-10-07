@@ -1,42 +1,35 @@
-//! In-game overlay **injector + metrics sampler + SAFE hybrid decision**.
+//! In-game overlay **injector + metrics sampler + SAFE injection decision**.
 //!
-//! This is the glue that turns CorePilot's overlay pieces into a working
-//! MSI-Afterburner/RTSS-style in-frame OSD, while never risking a ban:
+//! The in-frame OSD (MSI-Afterburner/RTSS-style) without ever risking a ban:
 //!
 //! * [`OsdShared`] (the writer mapping) is created **once at startup** and kept
 //!   alive for the whole app lifetime ([`start_sampler`]). The injected DLL opens
 //!   the same named block; if our mapping were ever dropped the block would be
-//!   torn down underneath the game and the overlay would go blank. So a single
-//!   long-lived writer is mandatory — never per-attach.
-//! * A background thread (~3 Hz) samples every metric *only while a target is
-//!   attached* and publishes it under the seqlock with `enabled = 1`. When nothing
-//!   is attached it writes `enabled = 0` and idles, so the DLL (if still resident
-//!   in some process) draws nothing.
-//! * [`overlay_attach`] runs the **hybrid decision**: classify the target, and
-//!   inject `corepilot_overlay.dll` only when it is hookable AND anti-cheat-free.
-//!   Anything guarded by anti-cheat (or an unsupported API) falls back to the
-//!   keep-alive WebView2 window overlay — we NEVER inject there. The anti-cheat
-//!   check is re-run immediately before the actual injection as a hard gate.
+//!   torn down underneath the game and the overlay would go blank.
+//! * One background thread (~3 Hz) publishes metrics for the target under the
+//!   seqlock, and (~1 Hz) owns the **injection decision**. It used to live in a
+//!   webview poll — which freezes whenever a GPU-heavy game holds the foreground
+//!   (the same freeze that moved the perf recorder into Rust) and raced itself
+//!   into double injections. Now the frontend only pushes a flat config
+//!   ([`overlay_config`]: on/off, allowlist, layout) and this thread injects iff
+//!   the foreground app is a detected game, its exe is ALLOWLISTED by the user,
+//!   it is native 64-bit, and no anti-cheat is present (module scan + running
+//!   kernel anti-cheat services). Everything else gets the window overlay. The
+//!   anti-cheat check is repeated immediately before `LoadLibraryW`.
+//! * Injection is never undone from outside: an external `FreeLibrary` left
+//!   hudhook's Present hooks and window subclass pointing into unmapped memory,
+//!   crashing the game on its next frame. Retargeting is enough — the resident
+//!   DLL draws nothing unless the block names its own PID — and it unloads with
+//!   the game.
 //!
 //! Injection uses our own [`crate::inject`] (CreateRemoteThread + LoadLibraryW) —
 //! the published `dll-syringe` crate cannot build on this project's stable
-//! toolchain (it needs nightly `MaybeUninit` APIs / crate-root `#![feature]`), so
-//! we implement the exact mechanism it wraps directly on the `windows` crate.
-//! Attach is **idempotent**: the frontend polls and re-issues attach for the same
-//! foreground PID, so we track which PID currently has the DLL injected and only
-//! `LoadLibraryW` when that PID changes — a repeat attach for the resident PID
-//! just refreshes the layout flags through the shared block (no re-injection, so
-//! the module never accumulates). Detach NEVER unloads the DLL: an external
-//! `FreeLibrary` left hudhook's Present hooks and window subclass pointing into
-//! unmapped memory, crashing the game on its next frame (every alt-tab). Detach
-//! only retargets the shared block; the resident DLL draws nothing unless the
-//! block names its own PID, so it goes inert and unloads with the game.
-//! The state shared with the sampler — the sampler target PID, the injected PID,
-//! and the layout flags — lives behind a small mutex (flags in an atomic).
+//! toolchain (it needs nightly `MaybeUninit` APIs / crate-root `#![feature]`).
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use corepilot_osd_ipc::{anchor, row, show, OsdShared};
 use once_cell::sync::Lazy;
@@ -80,16 +73,9 @@ struct OverlayState {
     /// PID the **sampler** currently publishes metrics for (None = idle, write
     /// `enabled = 0`). Cleared when the game exits so we stop sampling a dead PID.
     target_pid: Option<u32>,
-    /// PID that currently has `corepilot_overlay.dll` **injected**, if any.
-    ///
-    /// This is deliberately separate from `target_pid`: `target_pid` answers "what
-    /// should the sampler publish?" while `injected_pid` answers "is the DLL
-    /// already resident here?". Tracking it makes [`overlay_attach`] idempotent —
-    /// the frontend polls and re-issues attach for the *same* PID, and without this
-    /// we would `LoadLibraryW` on every poll, leaking/accumulating the module. We
-    /// only run the real injection when the target PID is not already this value,
-    /// and [`overlay_detach`] clears it so a later re-attach re-checks residency.
-    injected_pid: Option<u32>,
+    /// Exe of `target_pid`, so an allowlist edit can drop a target that is no
+    /// longer allowed.
+    target_exe: Option<String>,
 }
 
 // SAFETY: `OsdShared` holds a raw pointer (so it is `!Send`/`!Sync` by default),
@@ -103,14 +89,37 @@ static STATE: Lazy<Mutex<OverlayState>> = Lazy::new(|| {
     Mutex::new(OverlayState {
         writer: None,
         target_pid: None,
-        injected_pid: None,
+        target_exe: None,
     })
 });
 
+/// What the frontend pushed via [`overlay_config`].
+struct OverlayConfig {
+    enabled: bool,
+    /// Lowercased exe file names the user allowed injection into.
+    allow: HashSet<String>,
+}
+
+static CONFIG: Lazy<Mutex<OverlayConfig>> = Lazy::new(|| {
+    Mutex::new(OverlayConfig {
+        enabled: false,
+        allow: HashSet::new(),
+    })
+});
+
+/// Allowlist bounds (it arrives over IPC).
+const MAX_ALLOW: usize = 256;
+const MAX_EXE_LEN: usize = 260;
+
+/// After a failed injection, leave that PID alone this long (no retry storm).
+const INJECT_RETRY_AFTER: Duration = Duration::from_secs(30);
+/// Decide every Nth sampler tick (~1 Hz at the 333 ms tick).
+const DECIDE_EVERY: u32 = 3;
+
 /// Layout flags the sampler stamps into the block (which metric rows to draw).
 /// An atomic so the frontend can retarget the layout without taking the state
-/// lock. Defaults to the all-on set; [`overlay_attach`] updates it from the
-/// caller-supplied flags (derived from the user's OSD metric selection).
+/// lock. Defaults to the all-on set; [`overlay_config`] updates it from the
+/// user's OSD metric selection.
 static LAYOUT_FLAGS: AtomicU32 = AtomicU32::new(DEFAULT_LAYOUT_FLAGS);
 
 /// Per-row OSD colors (packed 0xRRGGBBAA, indexed by the IPC `row` order) the
@@ -165,7 +174,10 @@ impl Default for OverlayStatus {
             pid: 0,
             api: GraphicsApi::Unknown,
             anticheat: false,
+            blocked_by: None,
             game: false,
+            exe: None,
+            allowed: false,
             native: false,
             injectable: false,
         };
@@ -313,7 +325,7 @@ fn publish_metrics(writer: &OsdShared, pid: u32, flags: u32, row_colors: [u32; r
 /// safe to call once from `lib.rs` `setup`. The `OsdShared` writer is created on
 /// the sampler thread and stored in [`STATE`] so the mapping outlives every
 /// attach/detach for the whole app lifetime.
-pub fn start_sampler() {
+pub fn start_sampler(app: AppHandle) {
     if SAMPLER_STARTED.swap(true, Ordering::SeqCst) {
         return; // already running
     }
@@ -334,7 +346,13 @@ pub fn start_sampler() {
                 }
             }
 
+            let mut tick: u32 = 0;
+            let mut failed: Option<(u32, Instant)> = None;
             loop {
+                tick = tick.wrapping_add(1);
+                if tick % DECIDE_EVERY == 0 {
+                    decide(&app, &mut failed);
+                }
                 // Snapshot the current target while holding the lock briefly; do
                 // the (slower) sampling outside the lock so attach/detach/status
                 // never block on a metric read.
@@ -392,18 +410,48 @@ fn push_layout_flags() {
     }
 }
 
-/// Clear the sampler target iff it still equals `pid` (avoids racing a fresh
-/// attach that happened while we were sampling the old one). Also clears the
-/// injected-PID tracking when it matches: this is called when the target PID's
-/// process has exited, so the resident DLL is gone with it and a later attach to
-/// the same (recycled) PID must inject again rather than be skipped as idempotent.
+/// Clear the sampler target iff it still equals `pid` (the game exited).
 fn clear_target_if(pid: u32) {
     let mut st = STATE.lock();
     if st.target_pid == Some(pid) {
         st.target_pid = None;
+        st.target_exe = None;
     }
-    if st.injected_pid == Some(pid) {
-        st.injected_pid = None;
+}
+
+/// Whether `exe` (lowercased file name) is on the user's injection allowlist.
+pub(crate) fn is_allowed(exe: &str) -> bool {
+    CONFIG.lock().allow.contains(exe)
+}
+
+/// The ~1 Hz injection decision (see the module docs). Never unloads anything.
+fn decide(app: &AppHandle, failed: &mut Option<(u32, Instant)>) {
+    if !CONFIG.lock().enabled {
+        return;
+    }
+    let pid = crate::fps::foreground_pid_public();
+    if pid == 0 || STATE.lock().target_pid == Some(pid) {
+        return;
+    }
+    if failed.is_some_and(|(p, at)| p == pid && at.elapsed() < INJECT_RETRY_AFTER) {
+        return;
+    }
+    let target = classify_target(pid);
+    if !target.injectable {
+        return;
+    }
+    match inject_dll(app, pid) {
+        Ok(()) => {
+            tracing::info!(pid, exe = ?target.exe, "overlay injected");
+            let mut st = STATE.lock();
+            st.target_pid = Some(pid);
+            st.target_exe = target.exe;
+            *failed = None;
+        }
+        Err(e) => {
+            tracing::warn!(pid, exe = ?target.exe, "overlay injection failed: {e}");
+            *failed = Some((pid, Instant::now()));
+        }
     }
 }
 
@@ -444,9 +492,20 @@ fn reason_for(target: &OverlayTarget, mode: OverlayMode) -> (String, String) {
             let a = api_label(target.api);
             (format!("✅ 可注入（{a}）"), format!("✅ Injectable ({a})"))
         }
+        OverlayMode::Window if target.blocked_by.is_some() => {
+            let v = target.blocked_by.as_deref().unwrap_or_default();
+            (
+                format!("⚠️ {v} 内核反作弊正在运行，已禁用注入，改用窗口叠加（避免封号）"),
+                format!("⚠️ {v} kernel anti-cheat is running; injection disabled, using window overlay"),
+            )
+        }
         OverlayMode::Window if target.anticheat => (
             "⚠️ 检测到反作弊，已自动改用窗口叠加（避免封号）".into(),
             "⚠️ Anti-cheat detected; using window overlay to avoid a ban".into(),
+        ),
+        OverlayMode::Window if !target.allowed => (
+            "未加入游戏内叠加白名单，使用窗口叠加".into(),
+            "Not on the in-game overlay allowlist; using window overlay".into(),
         ),
         OverlayMode::Window if !target.native => (
             "⚠️ 32 位游戏暂不支持注入，已改用窗口叠加".into(),
@@ -509,6 +568,9 @@ fn inject_dll(app: &AppHandle, pid: u32) -> Result<(), String> {
     if is_anticheat_protected(pid) {
         return Err("检测到反作弊保护，已拒绝注入（避免封号）".to_string());
     }
+    if let Some(vendor) = crate::overlay::kernel_anticheat_running() {
+        return Err(format!("检测到 {vendor} 内核反作弊正在运行，已拒绝注入（避免封号）"));
+    }
     if pid == std::process::id() || !crate::overlay::is_native(pid) {
         return Err("目标不是 64 位游戏进程，已拒绝注入".to_string());
     }
@@ -519,108 +581,6 @@ fn inject_dll(app: &AppHandle, pid: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// **Hybrid attach.** Classify `pid`; if injectable, inject the in-frame DLL and
-/// start the sampler writing for it. If anti-cheat-protected OR an unsupported
-/// API, DO NOT inject — show the keep-alive window overlay instead and return a
-/// status explaining why.
-/// Async + blocking-pool: a cold attach classifies the target (module walk) and
-/// injects via `CreateRemoteThread` — well past the 100 ms budget for the main
-/// thread. The hot path (same-PID flags refresh) stays cheap either way.
-#[tauri::command]
-pub async fn overlay_attach(
-    app: AppHandle,
-    pid: u32,
-    layout_flags: Option<u32>,
-) -> Result<OverlayStatus, String> {
-    crate::commands::run_blocking_err("overlay_attach", move || {
-        overlay_attach_blocking(app, pid, layout_flags)
-    })
-    .await
-}
-
-fn overlay_attach_blocking(
-    app: AppHandle,
-    pid: u32,
-    layout_flags: Option<u32>,
-) -> Result<OverlayStatus, String> {
-    let target = classify_target(pid);
-    let mode = mode_for(&target);
-
-    // Apply the caller's layout selection (which metric rows to draw) if given.
-    if let Some(flags) = layout_flags {
-        LAYOUT_FLAGS.store(flags, Ordering::Relaxed);
-    }
-
-    match mode {
-        OverlayMode::Inject => {
-            // IDEMPOTENCY: the frontend polls the foreground app and re-issues
-            // attach for the *same* PID to keep the layout current. Injecting on
-            // every such call would `LoadLibraryW` repeatedly and leave the module
-            // accumulating/resident. So inject only when this PID isn't already the
-            // injected one; otherwise this is a cheap "update layout flags" path —
-            // we push the new flags through the existing shared block (which the
-            // overlay reads) and the sampler keeps publishing, no re-injection.
-            let already_injected = STATE.lock().injected_pid == Some(pid);
-            if !already_injected {
-                inject_dll(&app, pid)?;
-                // Record the resident PID so subsequent attaches for it are no-ops.
-                STATE.lock().injected_pid = Some(pid);
-            } else {
-                // Flags-only update: stamp the latest layout into the shared block
-                // now so it takes effect without waiting for the next sampler tick.
-                push_layout_flags();
-            }
-            // Sampler (re)publishes for this PID on its next tick either way.
-            STATE.lock().target_pid = Some(pid);
-            Ok(OverlayStatus {
-                // Distinct from the probe's "可注入": the DLL is now injected and
-                // drawing in the game's own frame (so it follows the game window).
-                reason: format!("✅ 已注入（{}）", api_label(target.api)),
-                reason_zh: format!("✅ 已注入（{}）", api_label(target.api)),
-                reason_en: format!("✅ Injected ({})", api_label(target.api)),
-                target,
-                mode,
-                attached: true,
-            })
-        }
-        OverlayMode::Window => {
-            // Anti-cheat or unsupported API: the window overlay is the safe path.
-            let h = app.clone();
-            let _ = app.run_on_main_thread(move || {
-                let _ = crate::osd::osd_set_visible(h, true);
-            });
-            let (reason_zh, reason_en) = reason_for(&target, mode);
-            Ok(OverlayStatus {
-                reason: reason_zh.clone(),
-                reason_zh,
-                reason_en,
-                target,
-                mode,
-                attached: false,
-            })
-        }
-        OverlayMode::None => {
-            let (reason_zh, reason_en) = reason_for(&target, mode);
-            Ok(OverlayStatus {
-                reason: reason_zh.clone(),
-                reason_zh,
-                reason_en,
-                target,
-                mode,
-                attached: false,
-            })
-        }
-    }
-}
-
-/// Detach the injected overlay from `pid`: clear the target so the sampler stops
-/// publishing for it (`enabled = 0`). The DLL stays loaded but inert — see the
-/// module docs for why it is never unloaded from outside. Idempotent.
-#[tauri::command]
-pub async fn overlay_detach(_app: AppHandle, pid: u32) -> Result<(), String> {
-    crate::commands::run_blocking_err("overlay_detach", move || overlay_detach_blocking(pid)).await
-}
-
 /// Whether `corepilot_overlay.dll` may still be mapped into some running game.
 /// Injection is never undone from outside, so this stays true for the session
 /// once anything was injected; the updater then renames the file aside (legal
@@ -629,10 +589,40 @@ pub(crate) fn dll_maybe_mapped() -> bool {
     INJECTED_EVER.load(Ordering::SeqCst)
 }
 
-fn overlay_detach_blocking(pid: u32) -> Result<(), String> {
-    clear_target_if(pid);
-    write_disabled();
-    Ok(())
+/// Lowercased bare exe file names only; anything else is dropped.
+fn sanitize_allow(allow: &[String]) -> HashSet<String> {
+    allow
+        .iter()
+        .map(|e| e.trim().to_ascii_lowercase())
+        .filter(|e| e.len() <= MAX_EXE_LEN && e.ends_with(".exe") && !e.contains(['\\', '/']))
+        .take(MAX_ALLOW)
+        .collect()
+}
+
+/// Push the overlay config (iron rule 6: flat args into a Rust static). `allow`
+/// is the user's per-game allowlist — exe file names, matched case-insensitively.
+/// Turning injection off, or removing the current game from the list, stops
+/// publishing for it at once; the resident DLL goes inert.
+#[tauri::command]
+pub fn overlay_config(enabled: bool, allow: Vec<String>, layout_flags: Option<u32>) {
+    let allow = sanitize_allow(&allow);
+    if let Some(f) = layout_flags {
+        LAYOUT_FLAGS.store(f, Ordering::Relaxed);
+        push_layout_flags();
+    }
+    let drop_target = {
+        let st = STATE.lock();
+        st.target_pid.is_some()
+            && (!enabled || !st.target_exe.as_ref().is_some_and(|e| allow.contains(e)))
+    };
+    *CONFIG.lock() = OverlayConfig { enabled, allow };
+    if drop_target {
+        let mut st = STATE.lock();
+        st.target_pid = None;
+        st.target_exe = None;
+        drop(st);
+        write_disabled();
+    }
 }
 
 /// Push the per-theme OSD row-color palette (packed 0xRRGGBBAA, indexed by the IPC
@@ -662,7 +652,8 @@ pub fn overlay_set_palette(row_colors: Vec<u32>) -> Result<(), String> {
 
 /// Report the overlay status for a specific `pid`, or — when `pid` is `None` — for
 /// the current foreground app (via [`crate::fps::foreground_pid_public`]). Lets the
-/// UI explain what's happening ("injectable (DX12)" / "anti-cheat → window" / …).
+/// UI explain what's happening ("injected (DX12)" / "anti-cheat → window" /
+/// "not allowlisted → window" / …). Read-only: injection is [`decide`]'s job.
 #[tauri::command]
 pub async fn overlay_status(pid: Option<u32>) -> OverlayStatus {
     crate::commands::run_blocking_default("overlay_status", move || {
@@ -670,7 +661,12 @@ pub async fn overlay_status(pid: Option<u32>) -> OverlayStatus {
         let target = classify_target(resolved_pid);
         let mode = mode_for(&target);
         let attached = STATE.lock().target_pid == Some(resolved_pid) && resolved_pid != 0;
-        let (reason_zh, reason_en) = reason_for(&target, mode);
+        let (reason_zh, reason_en) = if attached {
+            let a = api_label(target.api);
+            (format!("✅ 已注入（{a}）"), format!("✅ Injected ({a})"))
+        } else {
+            reason_for(&target, mode)
+        };
         OverlayStatus {
             reason: reason_zh.clone(),
             reason_zh,
@@ -681,4 +677,35 @@ pub async fn overlay_status(pid: Option<u32>) -> OverlayStatus {
         }
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allowlist_keeps_only_bare_exe_names() {
+        let got = sanitize_allow(&[
+            " Cyberpunk2077.EXE ".into(),
+            r"C:\Games\x.exe".into(),
+            "../evil.exe".into(),
+            "notes.txt".into(),
+            "eldenring.exe".into(),
+        ]);
+        let mut got: Vec<_> = got.into_iter().collect();
+        got.sort();
+        assert_eq!(got, ["cyberpunk2077.exe", "eldenring.exe"]);
+    }
+
+    /// Fail closed: nothing is allowed until the user allows it.
+    #[test]
+    fn nothing_is_allowed_by_default() {
+        assert!(!is_allowed("cyberpunk2077.exe"));
+    }
+
+    #[test]
+    fn kernel_anticheat_probe_runs() {
+        // Real SCM query; must not panic. Prints what this machine has running.
+        println!("kernel AC running: {:?}", crate::overlay::kernel_anticheat_running());
+    }
 }

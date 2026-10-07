@@ -195,23 +195,95 @@ pub fn is_native(pid: u32) -> bool {
     }
 }
 
+/// Kernel-mode anti-cheat services/drivers (SCM names). These have no module in
+/// the game process — the module scan can't see them — and they watch the
+/// whole system, so while one is RUNNING nothing gets injected anywhere.
+/// Ceiling: a vendor not on this list is invisible here; the per-exe allowlist
+/// is the primary gate, this is the extra refusal on top.
+const KERNEL_ANTICHEAT_SERVICES: &[(&str, &str)] = &[
+    ("vgk", "Riot Vanguard"),
+    ("vgc", "Riot Vanguard"),
+    ("mhyprot2", "miHoYo mhyprot"),
+    ("mhyprot3", "miHoYo mhyprot"),
+    ("EasyAntiCheat", "EasyAntiCheat"),
+    ("EasyAntiCheat_EOS", "EasyAntiCheat"),
+    ("BEService", "BattlEye"),
+    ("BEDaisy", "BattlEye"),
+    ("FACEIT", "FACEIT"),
+    ("ESEADriver2", "ESEA"),
+    ("npggsvc", "nProtect GameGuard"),
+    ("xhunter1", "XIGNCODE3"),
+];
+
+/// How long a kernel-AC probe result is reused (an SCM query per service).
+const KERNEL_AC_TTL: Duration = Duration::from_secs(30);
+static KERNEL_AC: Lazy<Mutex<Option<(Instant, Option<&'static str>)>>> = Lazy::new(|| Mutex::new(None));
+
+/// The vendor name of a running kernel anti-cheat, if any.
+pub fn kernel_anticheat_running() -> Option<&'static str> {
+    let mut cache = KERNEL_AC.lock();
+    if let Some((at, hit)) = *cache {
+        if at.elapsed() < KERNEL_AC_TTL {
+            return hit;
+        }
+    }
+    let hit = probe_kernel_anticheat();
+    *cache = Some((Instant::now(), hit));
+    hit
+}
+
+fn probe_kernel_anticheat() -> Option<&'static str> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT,
+        SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_STATUS,
+    };
+    unsafe {
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT).ok()?;
+        let mut hit = None;
+        for (name, vendor) in KERNEL_ANTICHEAT_SERVICES {
+            let Ok(svc) = OpenServiceW(scm, &HSTRING::from(*name), SERVICE_QUERY_STATUS) else {
+                continue; // not installed
+            };
+            let mut status = SERVICE_STATUS::default();
+            let running =
+                QueryServiceStatus(svc, &mut status).is_ok() && status.dwCurrentState == SERVICE_RUNNING;
+            let _ = CloseServiceHandle(svc);
+            if running {
+                hit = Some(*vendor);
+                break;
+            }
+        }
+        let _ = CloseServiceHandle(scm);
+        hit
+    }
+}
+
 /// Whether a process is a safe, hookable overlay target right now: the
-/// foreground GAME, rendering with a hookable API, native bitness, and no
-/// anti-cheat. Surfaced to the UI so the user is told *why* the overlay can't
-/// attach to a given app.
+/// foreground GAME, on the user's allowlist, rendering with a hookable API,
+/// native bitness, and no anti-cheat. Surfaced to the UI so the user is told
+/// *why* the overlay can't attach to a given app.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlayTarget {
     pub pid: u32,
     pub api: GraphicsApi,
+    /// An anti-cheat module is loaded in the target, OR a kernel anti-cheat is
+    /// running system-wide (then `blockedBy` names it).
     pub anticheat: bool,
+    pub blocked_by: Option<String>,
     /// The foreground game detector (`fps::foreground_info_now`) says this PID
     /// is a game. Without it every D3D-using app — explorer, a browser,
     /// CorePilot itself — looked injectable.
     pub game: bool,
+    /// Lowercased exe name of the target (when it is the foreground app).
+    pub exe: Option<String>,
+    /// The exe is on the user's injection allowlist (`overlay_config`). Fail
+    /// closed: anything else gets the window overlay.
+    pub allowed: bool,
     /// Native 64-bit process (see [`is_native`]).
     pub native: bool,
-    /// True iff `game && native && api.is_hookable() && !anticheat`.
+    /// True iff `game && allowed && native && api.is_hookable() && !anticheat`.
     pub injectable: bool,
 }
 
@@ -232,7 +304,10 @@ pub fn classify_target(pid: u32) -> OverlayTarget {
             pid,
             api: GraphicsApi::Unknown,
             anticheat: false,
+            blocked_by: None,
             game: false,
+            exe: None,
+            allowed: false,
             native: false,
             injectable: false,
         };
@@ -255,13 +330,21 @@ pub fn classify_target(pid: u32) -> OverlayTarget {
         facts
     });
     let fg = crate::fps::foreground_info_now();
-    let game = pid != std::process::id() && fg.pid == pid && fg.is_game;
+    let is_fg = fg.pid == pid;
+    let game = pid != std::process::id() && is_fg && fg.is_game;
+    let exe = if is_fg { fg.exe } else { None };
+    let allowed = exe.as_deref().is_some_and(crate::overlay_inject::is_allowed);
+    let blocked_by = kernel_anticheat_running().map(str::to_string);
+    let anticheat = facts.anticheat || blocked_by.is_some();
     OverlayTarget {
         pid,
         api: facts.api,
-        anticheat: facts.anticheat,
+        anticheat,
+        blocked_by,
         game,
+        exe,
+        allowed,
         native: facts.native,
-        injectable: game && facts.native && facts.api.is_hookable() && !facts.anticheat,
+        injectable: game && allowed && facts.native && facts.api.is_hookable() && !anticheat,
     }
 }
