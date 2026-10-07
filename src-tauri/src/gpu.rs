@@ -163,6 +163,72 @@ const FAN_SPEED_FLOOR: u32 = 20;
 
 /// Factory thermal target captured on first read, restored by reset.
 static DEFAULT_TEMP_LIMIT: Lazy<Mutex<Option<u32>>> = Lazy::new(|| Mutex::new(None));
+
+/// A manual GPU fan speed is in effect (set by apply, cleared by reset). NVML
+/// keeps it after CorePilot exits — the GPU fan then stays fixed under game
+/// load with nothing managing it until the driver reloads — so exit hands it
+/// back to the driver curve, like the motherboard fans.
+static MANUAL_FAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record the factory thermal target, once. The value live at first read is
+/// only the factory one on the first CorePilot run of a boot: after a restart
+/// within the same boot (self-update, crash) it is whatever the user applied,
+/// and "reset to stock" then restored THAT. So the first capture is persisted
+/// with the boot time and reused for the rest of the boot.
+fn capture_default_temp(live_c: u32) {
+    let mut def = DEFAULT_TEMP_LIMIT.lock();
+    if def.is_some() {
+        return;
+    }
+    *def = Some(boot_default_temp(live_c));
+}
+
+fn boot_default_temp(live_c: u32) -> u32 {
+    let Some(path) = std::env::var_os("APPDATA").map(|d| {
+        std::path::PathBuf::from(d)
+            .join("com.corepilot.app")
+            .join("gpu-boot-defaults.json")
+    }) else {
+        return live_c;
+    };
+    // Boot time in unix seconds; `GetTickCount64` drift and the call's own
+    // latency stay far inside the 60 s tolerance.
+    let now_s = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let boot_s = now_s.saturating_sub(
+        unsafe { windows::Win32::System::SystemInformation::GetTickCount64() } / 1000,
+    );
+    let saved = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    if let Some(v) = saved {
+        let same_boot = v["boot"].as_u64().is_some_and(|b| b.abs_diff(boot_s) <= 60);
+        if let (true, Some(c)) = (same_boot, v["tempLimitC"].as_u64()) {
+            return c as u32;
+        }
+    }
+    let body = serde_json::json!({ "boot": boot_s, "tempLimitC": live_c });
+    if let Err(e) = crate::persist::write_atomic_bytes(&path, body.to_string().as_bytes()) {
+        tracing::debug!("could not record the boot's GPU defaults: {e}");
+    }
+    live_c
+}
+
+/// Exit: return a manual GPU fan to the driver's automatic curve.
+pub(crate) fn restore_auto_fan_on_exit() {
+    if !MANUAL_FAN.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let restored = with_device(|device| {
+        let n = device.num_fans().unwrap_or(0);
+        (0..n)
+            .filter(|&i| device.set_default_fan_speed(i).is_ok())
+            .count()
+    });
+    tracing::info!(?restored, "exit: GPU fans handed back to the driver curve");
+}
 /// Cached one-time probe: is the GPU_MAX threshold settable on this GPU?
 static TEMP_LIMIT_SETTABLE: Lazy<Mutex<Option<bool>>> = Lazy::new(|| Mutex::new(None));
 
@@ -548,12 +614,7 @@ fn build_gpu_info() -> GpuOcInfo {
             info.temp_limit_c = cur;
             info.temp_limit_min_c = st.acoustic_min.unwrap_or(TEMP_LIMIT_FLOOR);
             info.temp_limit_max_c = st.acoustic_max.unwrap_or(90);
-            {
-                let mut def = DEFAULT_TEMP_LIMIT.lock();
-                if def.is_none() {
-                    *def = Some(cur);
-                }
-            }
+            capture_default_temp(cur);
             let cached = *TEMP_LIMIT_SETTABLE.lock();
             let settable = match cached {
                 Some(v) => v,
@@ -675,7 +736,9 @@ pub fn gpu_oc_apply_impl(settings: GpuOcSettings) -> Result<(), String> {
                         }
                     }
                     // Only count fan control as failed if no fan accepted the value.
-                    if !any_ok {
+                    if any_ok {
+                        MANUAL_FAN.store(true, std::sync::atomic::Ordering::SeqCst);
+                    } else {
                         failures.push(format!("fan speed: {}", fan_errs.join("; ")));
                     }
                 }
@@ -694,10 +757,7 @@ pub fn gpu_oc_apply_impl(settings: GpuOcSettings) -> Result<(), String> {
             // value). Read the live current threshold and store it once.
             if DEFAULT_TEMP_LIMIT.lock().is_none() {
                 if let Ok(cur) = device.temperature_threshold(TemperatureThreshold::AcousticCurr) {
-                    let mut def = DEFAULT_TEMP_LIMIT.lock();
-                    if def.is_none() {
-                        *def = Some(cur);
-                    }
+                    capture_default_temp(cur);
                 }
             }
             let lo = device
@@ -790,7 +850,9 @@ pub fn gpu_oc_reset_impl() -> Result<(), String> {
                         Err(e) => fan_errs.push(format!("fan {idx}: {e}")),
                     }
                 }
-                if !any_ok {
+                if any_ok {
+                    MANUAL_FAN.store(false, std::sync::atomic::Ordering::SeqCst);
+                } else {
                     failures.push(format!("reset fans: {}", fan_errs.join("; ")));
                 }
             }

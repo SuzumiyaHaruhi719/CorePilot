@@ -49,25 +49,43 @@ impl GpuLoad {
         let adapter = pick_adapter()?;
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = Arc::clone(&stop);
+        // …and report the device/shader build back too. It used to fail silently
+        // inside the thread while `start` had already returned Ok, so the fan
+        // auto-tune characterized an IDLE GPU as full load and synthesized a
+        // curve too weak for real GPU heat.
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
         let handle = std::thread::Builder::new()
             .name("gpu-load".into())
             .spawn(move || {
-                if let Ok((_device, ctx)) = build_pipeline(&adapter) {
-                    while !stop2.load(Ordering::Relaxed) {
-                        unsafe {
-                            ctx.Dispatch(4096, 1, 1);
-                            ctx.Flush();
-                        }
-                        // Brief yield so the queue stays deep but we can stop fast.
-                        std::thread::sleep(std::time::Duration::from_millis(2));
+                let (_device, ctx) = match build_pipeline(&adapter) {
+                    Ok(p) => {
+                        let _ = ready_tx.send(Ok(()));
+                        p
                     }
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                        return;
+                    }
+                };
+                while !stop2.load(Ordering::Relaxed) {
+                    unsafe {
+                        ctx.Dispatch(4096, 1, 1);
+                        ctx.Flush();
+                    }
+                    // Brief yield so the queue stays deep but we can stop fast.
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                 }
             })
             .map_err(|e| format!("spawn gpu-load thread: {e}"))?;
-        Ok(Self {
+        let load = Self {
             stop,
             handle: Some(handle),
-        })
+        };
+        match ready_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(())) => Ok(load),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err("GPU load pipeline did not come up".into()),
+        }
     }
 }
 

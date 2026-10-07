@@ -297,6 +297,7 @@ pub fn shutdown_teardown() {
     // 100 % first instead (see `fan::park_dirty_for_exit`).
     crate::fan::park_dirty_for_exit();
     crate::sidecar::graceful_stop(SIDECAR_EXIT_WAIT);
+    crate::gpu::restore_auto_fan_on_exit();
     crate::overlay_inject::write_disabled();
     crate::fps::stop_capture();
     // NO `persist::flush()` here: this body is behind the once-guard, and the
