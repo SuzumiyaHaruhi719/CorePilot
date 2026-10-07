@@ -64,6 +64,13 @@ pub struct OsdRenderLoop {
     /// a CorePilot crash while the mapping handle remains open in the game.
     last_seq: Option<u32>,
     last_seq_change_tick: u64,
+    /// Rows built for the block at `rows_seq`. Every publish bumps the seqlock
+    /// value, so the same seq means the same text: rows are rebuilt ~3×/s, not
+    /// formatted and allocated on every frame of the game's render thread.
+    rows: Vec<Row>,
+    rows_seq: Option<u32>,
+    /// Tick of the last attempt to open the mapping while CorePilot is absent.
+    last_open_try: u64,
 }
 
 impl OsdRenderLoop {
@@ -80,6 +87,9 @@ impl OsdRenderLoop {
             // Initialising this on construction gives a newly discovered block
             // a normal five-second grace period on its first observed sequence.
             last_seq_change_tick: tick_count_ms(),
+            rows: Vec::new(),
+            rows_seq: None,
+            last_open_try: 0,
         }
     }
 
@@ -87,9 +97,13 @@ impl OsdRenderLoop {
     /// CorePilot creates the mapping. Returns `None` while it is still absent.
     fn reader(&mut self) -> Option<&OsdShared> {
         if self.reader.0.is_none() {
-            // `open()` fails (mapping absent) when CorePilot isn't running; we
-            // simply try again next frame. No logging per-frame to avoid spam.
-            self.reader.0 = OsdShared::open().ok();
+            // `open()` fails (mapping absent) when CorePilot isn't running. Retry
+            // once a second, not every frame (an OpenFileMappingW per frame).
+            let now = tick_count_ms();
+            if now.wrapping_sub(self.last_open_try) >= 1_000 || self.last_open_try == 0 {
+                self.last_open_try = now.max(1);
+                self.reader.0 = OsdShared::open().ok();
+            }
         }
         self.reader.0.as_ref()
     }
@@ -151,7 +165,11 @@ impl hudhook::ImguiRenderLoop for OsdRenderLoop {
         // skipped frame of OSD, and the next frame retries cleanly.
         let _ = catch_unwind(AssertUnwindSafe(|| {
             if let Some(block) = self.snapshot_if_active() {
-                draw_overlay(ui, &block);
+                if self.rows_seq != Some(block.seq) {
+                    self.rows = build_rows(&block);
+                    self.rows_seq = Some(block.seq);
+                }
+                draw_overlay(ui, &block, &self.rows);
             }
         }));
     }
@@ -303,7 +321,7 @@ fn row_color(block: &OsdSharedBlock, kind: Option<usize>) -> [f32; 4] {
 
 /// Draw the single OSD window for this frame. Called only when the block is
 /// active. Never panics on its own inputs (all values pre-validated/sanitised).
-fn draw_overlay(ui: &Ui, block: &OsdSharedBlock) {
+fn draw_overlay(ui: &Ui, block: &OsdSharedBlock, rows: &[Row]) {
     let display = ui.io().display_size;
     let (pos, pivot) = anchored_position(block, display);
 
@@ -332,7 +350,7 @@ fn draw_overlay(ui: &Ui, block: &OsdSharedBlock) {
 
             // Each row in its own themed color (yellow FPS, cyan/blue GPU, …),
             // falling back to the flat color for unset slots / the custom line.
-            for r in build_rows(block) {
+            for r in rows {
                 ui.text_colored(row_color(block, r.kind), &r.text);
             }
         });
@@ -428,6 +446,9 @@ mod tests {
             self_pid: 1,
             last_seq: None,
             last_seq_change_tick: 0,
+            rows: Vec::new(),
+            rows_seq: None,
+            last_open_try: 0,
         };
         assert!(loop_state.sequence_is_fresh(8, 100));
         assert!(loop_state.sequence_is_fresh(8, 5_100));
@@ -443,6 +464,9 @@ mod tests {
             self_pid: 1,
             last_seq: None,
             last_seq_change_tick: 0,
+            rows: Vec::new(),
+            rows_seq: None,
+            last_open_try: 0,
         };
         assert!(loop_state.sequence_is_fresh(3, u64::MAX));
         assert!(loop_state.sequence_is_fresh(3, 0));
