@@ -10,14 +10,14 @@ Tauri v2 (Rust backend, React/zustand frontend, WebView2) system utility: task m
 4. **zustand stores: never bump `version` without a `migrate`** — zustand silently discards persisted state on mismatch (wiped data once).
 5. **No per-PID "is a game" decisions from GLOBAL signals.** `SHQueryUserNotificationState` is session-global; using it per-app misdetected every presenting app while a game ran. Detection lives in `fps.rs::foreground_info_now` (library path check + ≥20 fps + window-covers-monitor); junk sessions are filtered at finalize in `perf_recorder.rs::should_keep`.
 6. **Frontend↔backend config flows one way:** frontend pushes flat args (`perf_recorder_config`, `tbmon_config`) into a Rust static; Rust never parses the store. Keep new features on this pattern.
-7. **Chinese-first UI**: user-visible strings are `tf(zh, en)` (or dict entries) — see `src/lib/i18n.ts`.
+7. **Chinese-first UI**: user-visible strings are `t(zh, en)` via `useT()` (or `tf()` outside React) — see `src/lib/store.ts`.
 
 ## Build / verify
 
 - Build: `npx tauri build` — **never bare `cargo build`** (bakes the dev URL → ERR_CONNECTION_REFUSED). App must be closed first (exe lock).
 - Compile-check while the app runs: `cargo check` + `cargo test --lib` in `src-tauri/`, `npx tsc --noEmit` at root.
 - WebView2 screenshots come out black unless the window is visible; CJK in the Windows terminal displays as mojibake — verify bytes, not display.
-- UI work without the backend: `npx vite` → `http://localhost:1420/preview.html?tab=<TabId>&style=<preset>&lang=en&still=1` (mocked IPC in `src/dev/mockTauri.ts`, never bundled). Visual rules: `DESIGN.md`; product intent: `PRODUCT.md`.
+- UI work without the backend: `npx vite` → `http://localhost:1420/` (`?osd` = the OSD window page). Mocked IPC in `src/dev/mock.ts` (DEV-only, tree-shaken from builds); in dev the stores are on `window.__cp` (`__cp.useLive.setState({ page: "disk" })`). Visual rules: `DESIGN.md`; product intent: `PRODUCT.md`.
 
 ## Map (where things live)
 
@@ -29,7 +29,7 @@ Tauri v2 (Rust backend, React/zustand frontend, WebView2) system utility: task m
 - `osd.rs` — corner OSD webview window: keep-alive + GDI-recycle guard, click-through/toolwindow style re-assert, close-guarded in `lib.rs`.
 - `overlay_inject.rs` — in-game DLL injection OSD; `taskbar_mon.rs` — native taskbar plate (double-buffered paint, debounced fullscreen hide).
 - `fan.rs`/`fan_autotune/` — fan engine + closed-loop tuning; `smu.rs` + `sensord/` (C#) — SMU/PawnIO sidecar (clean-room, **no GPL code in tree**).
-- Frontend: `src/store/*` (zustand, persisted via `src/lib/persist.ts`), `src/lib/ipc.ts` (typed `api`), `src/hooks/usePerfRecorder.ts` (session persist + report).
+- Frontend: `src/lib/ipc.ts` (typed `api` + `on()` events — the whole IPC surface), `src/lib/store.ts` (zustand; persisted keys `cp.settings` / `cp.profiles` via persist_get/set; `useT()` i18n), `src/lib/boot.ts` (the ONE telemetry poller, visibility gate, one-way config pushes, affinity enforcer, `perf://session` save), `src/lib/migrate.ts` (one-time import of legacy `corepilot-*` keys), `src/osd/Osd.tsx` (OSD window: visibility, bounds, overlay attach/detach), `src/pages/*`, `src/ui/*` (Shell, kit, Chart).
 
 ## Perf-work constraint
 

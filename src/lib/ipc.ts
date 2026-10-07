@@ -1,1085 +1,245 @@
+// Typed surface over the Rust IPC. Every command name / arg shape here mirrors
+// a `#[tauri::command]` in src-tauri; Tauri maps camelCase keys to snake_case.
 import { invoke } from "@tauri-apps/api/core";
-import type { PerfSample, PerfSummary } from "./perf";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-/** Reject a promise if it hasn't settled within `ms`, so a hung backend invoke
- *  can never permanently latch a poller's in-flight guard (which would make a
- *  reading disappear forever). Clears its timer when the wrapped promise settles. */
-export function withTimeout<T>(p: Promise<T>, ms = 6000): Promise<T> {
-  let t: ReturnType<typeof setTimeout>;
-  const timeout = new Promise<T>((_, reject) => {
-    t = setTimeout(() => reject(new Error("invoke timeout")), ms);
-  });
-  return Promise.race([p, timeout]).finally(() => clearTimeout(t)) as Promise<T>;
-}
-
-export interface Overview {
-  cpuName: string;
-  physicalCores: number;
-  logicalCpus: number;
-  ramTotal: number;
-  os: string;
-  vcacheCcd: number | null;
-  detection: string;
-}
-
-export interface LogicalCpu {
-  id: number;
-  group: number;
-  coreId: number;
-  ccdId: number;
-  isVcache: boolean;
-  /** Windows efficiency class (higher = more performant); 0 on homogeneous CPUs. */
-  efficiencyClass: number;
-  smtSibling: number | null;
-}
-
-export interface Ccd {
-  ccdId: number;
-  isVcache: boolean;
-  l3Bytes: number;
-  logicalCpus: number[];
-  /** Affinity mask over logical CPUs. `bigint` so all 64 bits are exact; the
-   *  backend sends it as a decimal string (see `serde_u64`). */
-  mask: bigint;
-  /** Cluster nature: "vcache" | "freq" | "standard" | "pcore" | "ecore". */
-  kind: string;
-  /** Display label, e.g. "3D V-Cache", "频率核心", "CCD", "性能核", "能效核". */
-  label: string;
-}
-
-export interface CpuTopology {
-  logicalCount: number;
-  physicalCores: number;
-  smt: boolean;
-  /** True when clusters were split by efficiency class (Intel P/E hybrid). */
-  hybrid: boolean;
-  ccds: Ccd[];
-  logical: LogicalCpu[];
-  vcacheCcd: number | null;
-  detection: string;
-}
-
-export interface ProcInfo {
-  pid: number;
-  name: string;
-  cpu: number;
-  mem: number;
-  threads: number;
-  gpu: number;
-  /** Per-process GPU memory (VRAM) in bytes, or null/absent when unavailable. */
-  gpuMem?: number | null;
-  power: number;
-  /** CPU affinity mask (allowed logical CPUs); 0 if inaccessible. `bigint` so
-   *  all 64 bits are exact; the backend sends it as a decimal string. */
-  affinity: bigint;
-  /** Process owner account (e.g. "SYSTEM", "Thomas"). */
-  user?: string | null;
-  /** Open handle count. */
-  handles?: number;
-  /** Total CPU time in seconds (kernel + user). */
-  cpuTime?: number;
-  /** "64位" | "32位". */
-  platform?: string | null;
-  /** Dominant GPU engine for this process, e.g. "3D" / "Video Encode" / "Compute". */
-  gpuEngine?: string | null;
-  /** Which GPU adapter the process is using, e.g. "NVIDIA GeForce RTX 4090". */
-  gpuAdapter?: string | null;
-  /** Friendly file description (e.g. "Google Chrome") — the name Task Manager shows. */
-  description?: string | null;
-  /** Whether the process's CPU affinity can be set (false for protected/system processes). */
-  settable?: boolean;
-  /** Parent process PID (0 when unresolved). Used to collapse children under their app. */
-  parentPid?: number;
-  /** Full path to the executable (e.g. "C:\\…\\chrome.exe"); used for the per-exe icon. */
-  exePath?: string | null;
-  /**
-   * Synthetic placeholder for a group member that has been added but is not
-   * currently running. Front-end only — never sent by the backend. Such rows
-   * have no real pid (a stable negative id) and no live metrics.
-   */
-  offline?: boolean;
-}
-
-export interface Metrics {
-  cpuOverall: number;
-  perCore: number[];
-  memUsed: number;
-  memTotal: number;
-}
-
-export interface AffinityInfo {
-  /** Process affinity mask. `bigint`; arrives from the backend as a decimal string. */
-  procMask: bigint;
-  /** System affinity mask. `bigint`; arrives from the backend as a decimal string. */
-  sysMask: bigint;
-}
-
-export interface MemDetail {
-  total: number;
-  avail: number;
-  used: number;
-  loadPct: number;
-}
-
-export interface CleanResult {
-  bytes: number;
-  files: number;
-}
-
-/** One deep SMU/CPU sensor (per-core clock, CCD temp, VDDCR/SoC voltage, package
- *  power, TDC/EDC, …). `kind` is the LHM SensorType. Read-only telemetry. */
-export interface CpuSensor {
-  name: string;
-  kind: string;
-  value: number | null;
-}
-
+// ---------------------------------------------------------------- types
+export interface LogicalCpu { id: number; group: number; coreId: number; ccdId: number; isVcache: boolean; efficiencyClass: number; smtSibling: number | null }
+export interface Ccd { ccdId: number; isVcache: boolean; l3Bytes: number; logicalCpus: number[]; mask: string; kind: "vcache" | "freq" | "standard" | "pcore" | "ecore"; label: string }
+export interface Topology { logicalCount: number; physicalCores: number; smt: boolean; hybrid: boolean; ccds: Ccd[]; logical: LogicalCpu[]; vcacheCcd: number | null; detection: string }
+export interface Overview { cpuName: string; physicalCores: number; logicalCpus: number; ramTotal: number; os: string; vcacheCcd: number | null; detection: string }
+export interface Metrics { cpuOverall: number; perCore: number[]; memUsed: number; memTotal: number }
+export interface CpuSensor { name: string; kind: string; value: number | null }
 export interface Sensors {
-  gpuPct: number | null;
-  gpuName: string | null;
-  vramUsed: number | null;
-  vramTotal: number | null;
-  diskPct: number | null;
-  diskRead: number | null;
-  diskWrite: number | null;
-  netUp: number | null;
-  netDown: number | null;
-  cpuPower: number | null;
-  gpuPower: number | null;
-  cpuTemp: number | null;
-  gpuTemp: number | null;
-  /** Live CPU clock in MHz (base × % processor performance); null if unavailable. */
-  cpuClock: number | null;
-  /** Deep SMU/CPU sensors (per-core clocks, CCD temps, voltages, TDC/EDC…); empty
-   *  if no hardware-sensor driver (PawnIO) is available. */
-  cpuSensors: CpuSensor[];
+  gpuPct: number | null; gpuName: string | null; vramUsed: number | null; vramTotal: number | null
+  diskPct: number | null; diskRead: number | null; diskWrite: number | null; netUp: number | null; netDown: number | null
+  cpuPower: number | null; gpuPower: number | null; cpuTemp: number | null; gpuTemp: number | null; cpuClock: number | null
 }
-
-export interface GpuOcInfo {
-  available: boolean;
-  name: string;
-  driverVersion: string;
-  graphicsClock: number;
-  memClock: number;
-  smClock: number;
-  temperature: number;
-  powerUsageW: number;
-  powerLimitW: number;
-  powerLimitMinW: number;
-  powerLimitMaxW: number;
-  fanSpeedPct: number;
-  utilizationGpu: number;
-  utilizationMem: number;
-  memUsedBytes: number;
-  memTotalBytes: number;
-  maxGraphicsClockMhz: number;
-  tempLimitC: number;
-  tempLimitMinC: number;
-  tempLimitMaxC: number;
-  supportsPowerLimit: boolean;
-  supportsLockedClocks: boolean;
-  supportsFanControl: boolean;
-  supportsTempLimit: boolean;
-  /** NVAPI clock-offset overclocking available (Afterburner-style +/- MHz). */
-  supportsClockOffset: boolean;
-  coreOffsetMinMhz: number;
-  coreOffsetMaxMhz: number;
-  memOffsetMinMhz: number;
-  memOffsetMaxMhz: number;
+export interface Proc {
+  pid: number; name: string; cpu: number; mem: number; threads: number; gpu: number; gpuMem: number | null; power: number
+  affinity: string; user: string | null; handles: number; cpuTime: number; platform: string | null; gpuEngine: string | null
+  gpuAdapter: string | null; description: string | null; settable: boolean; parentPid: number; exePath: string | null
 }
-
-export interface GpuOcSettings {
-  powerLimitW?: number;
-  coreClockMinMhz?: number;
-  coreClockMaxMhz?: number;
-  memClockMinMhz?: number;
-  memClockMaxMhz?: number;
-  fanSpeedPct?: number;
-  tempLimitC?: number;
-  /** Core clock offset in MHz (NVAPI). */
-  coreOffsetMhz?: number;
-  /** Memory clock offset in MHz (NVAPI). */
-  memOffsetMhz?: number;
-}
-
-/** One controllable fan header (a Super-I/O fan-control channel) + its RPM. */
-export interface FanChannel {
-  id: string;
-  name: string;
-  /** Owning hardware, e.g. "Nuvoton NCT6798D". */
-  hw: string;
-  /** Current duty %, or null when unread. */
-  pct: number | null;
-  /** True when this header accepts software PWM writes on this board. */
-  controllable: boolean;
-  /** Best-matched fan RPM, or null. */
-  rpm: number | null;
-  rpmName: string | null;
-}
-
-/** A temperature sensor usable as a fan-curve source. */
-export interface FanTempSource {
-  id: string;
-  name: string;
-  c: number | null;
-}
-
-/** Live motherboard fan state. */
-export interface FanInfo {
-  /** The sidecar produced fan/control data at least once. */
-  available: boolean;
-  /** At least one header is software-controllable on this board. */
-  supported: boolean;
-  channels: FanChannel[];
-  temps: FanTempSource[];
-}
-
-export type FanMode = "auto" | "manual" | "curve";
-
-/** One point of a fan curve: at `tempC` °C, run at `duty` %. */
-export interface FanCurvePoint {
-  tempC: number;
-  duty: number;
-}
-
-/** Per-fan configuration pushed to the backend engine. */
-export interface FanChannelConfig {
-  controlId: string;
-  mode: FanMode;
-  manualPct?: number;
-  tempSourceId?: string | null;
-  curve?: FanCurvePoint[];
-  minDuty?: number;
-  /** Curve-mode ramp-up smoothing: 0 = Smooth, 100 = Immediate (instant). */
-  spinUpPct?: number;
-  /** Curve-mode ramp-down smoothing: 0 = Smooth, 100 = Immediate (instant). */
-  spinDownPct?: number;
-  /** Optional SECOND temp source + curve (GPU assist); duty = max(curve, curve2). */
-  tempSourceId2?: string | null;
-  curve2?: FanCurvePoint[];
-}
-
-/** One measured (duty %, RPM) sample from an AI calibration sweep. */
-export interface CalibPoint {
-  duty: number;
-  rpm: number;
-}
-
-/** Per-fan AI-calibration result (FanXpert-style auto tuning). */
-export interface FanCalibration {
-  controlId: string;
-  name: string;
-  /** Lowest duty at which the fan reliably spins (its quietest stable speed). */
-  minStartDuty: number;
-  maxRpm: number;
-  /** Lowest duty whose RPM already reaches ~97% of max. */
-  saturationDuty: number;
-  points: CalibPoint[];
-  /** True when the header never produced any RPM during the sweep. */
-  disconnected: boolean;
-}
-
-/** Live progress event (`fan-calib-progress`) emitted after each sweep step. */
-export interface FanCalibProgress {
-  controlId: string;
-  name: string;
-  fanIndex: number;
-  fanTotal: number;
-  duty: number;
-  rpm: number | null;
-}
-
-// --- fan auto-tune (spec: docs/superpowers/specs/2026-06-10-fan-autotune-design.md) ---
-
-export type FanGroup = "cpu" | "case";
-
-export interface AutoTuneParams {
-  targetTempC: number;
-  targetGpuTempC: number;
-  quietFloorPct: number;
-  noiseCeilPct: number;
-  groups: Record<string, FanGroup>;
-  reuseCalibration?: FanCalibration[] | null;
-  /** Settings toggle: tune even with background load (precheck warns instead of aborting). */
-  allowBackgroundLoad?: boolean;
-}
-
-export interface ThermalModel {
-  alpha: number;
-  tOff: number;
-  rInf: number;
-  kC: number;
-  kX: number;
-  rmse: number;
-  conservativeShift: number;
-}
-
-export interface GpuModel {
-  tOffG: number;
-  rG: number;
-  kG: number;
-  rmse: number;
-  conservativeShift: number;
-}
-
-export interface TuneWarning {
-  kind: string;
-  messageZh: string;
-  messageEn: string;
-  achievableC?: number | null;
-}
-
-export interface WPoint {
-  tempC: number;
-  wCpu: number;
-  wCase: number;
-}
-
-export interface TunedFanCurve {
-  controlId: string;
-  group: FanGroup;
-  curve: FanCurvePoint[];
-  curve2: FanCurvePoint[];
-  minDuty: number;
-  spinUpPct: number;
-  spinDownPct: number;
-}
-
-export interface AutoTuneProgress {
-  phase: string;
-  step: number;
-  stepTotal: number;
-  cpuTemp?: number | null;
-  cpuPower?: number | null;
-  gpuTemp?: number | null;
-  gpuPower?: number | null;
-  wCpu?: number | null;
-  wCase?: number | null;
-  etaS?: number | null;
-  note?: string | null;
-}
-
-export interface TuneGridPoint {
-  wCpu: number;
-  wCase: number;
-  tSs: number;
-  pAvg: number;
-  saturated: boolean;
-  skipped: boolean;
-}
-
-export interface TuneGpuGridPoint {
-  wCase: number;
-  tGpuSs: number;
-  pGpuAvg: number;
-  tCpu: number;
-}
-
-export interface TuneBaseline {
-  tIdle: number;
-  pIdle: number;
-  tGpuIdle?: number | null;
-  pGpuIdle?: number | null;
-}
-
-export interface TuneValidation {
-  tV: number;
-  iterations: number;
-  oscillationFixed: boolean;
-  converged: boolean;
-  combinedTCpu?: number | null;
-  combinedTGpu?: number | null;
-}
-
-export interface AutoTuneResult {
-  params: AutoTuneParams;
-  calibrations: FanCalibration[];
-  baseline: TuneBaseline;
-  grid: TuneGridPoint[];
-  gpuGrid: TuneGpuGridPoint[];
-  model: ThermalModel;
-  modelGpu?: GpuModel | null;
-  pDesign: number;
-  pDesignGpu?: number | null;
-  effectiveTarget: number;
-  effectiveTargetGpu?: number | null;
-  gpuCpuCouplingC?: number | null;
-  wPoints: WPoint[];
-  gpuWPoints?: [number, number][] | null;
-  curves: TunedFanCurve[];
-  cpuSourceId?: string | null;
-  gpuSourceId?: string | null;
-  validation: TuneValidation;
-  warnings: TuneWarning[];
-  finishedAtMs: number;
-}
-
-export interface ResynthRequest {
-  params: AutoTuneParams;
-  model: ThermalModel;
-  modelGpu?: GpuModel | null;
-  calibrations: FanCalibration[];
-  pDesign: number;
-  pDesignGpu?: number | null;
-}
-
-export interface ResynthResponse {
-  curves: TunedFanCurve[];
-  wPoints: WPoint[];
-  gpuWPoints?: [number, number][] | null;
-  effectiveTarget: number;
-  effectiveTargetGpu?: number | null;
-  warnings: TuneWarning[];
-}
-
-export interface PassiveConfig {
-  enabled: boolean;
-  params: AutoTuneParams;
-  model: ThermalModel;
-  modelGpu?: GpuModel | null;
-  calibrations: FanCalibration[];
-  pDesign: number;
-  pDesignGpu?: number | null;
-}
-
-export interface PassiveStatus {
-  enabled: boolean;
-  cpuSamples: number;
-  gpuSamples: number;
-  accumulatedCpuC: number;
-  accumulatedGpuC: number;
-}
-
-/** Payload of the `fan-autotune-passive` event. */
-export interface PassiveAdjustment {
-  axis: "cpu" | "gpu";
-  deltaC: number;
-  medianResidualC: number;
-  curves: TunedFanCurve[];
-}
-
-/** Payload of the `fan-autotune-aborted` event. */
-export interface AutoTuneAbortInfo {
-  phase: string;
-  reasonZh: string;
-  reasonEn: string;
-}
-
-export interface ServiceItem {
-  name: string;
-  display: string;
-  status: string;
-  startType: string;
-  pid?: number;
-  description?: string;
-  group?: string;
-}
-
-export interface StartupItem {
-  name: string;
-  command: string;
-  location: string;
-  enabled: boolean;
-}
-
-/** Result of a single network diagnostic or repair step. */
-export interface NetCheck {
-  id: string;
-  label: string;
-  ok: boolean;
-  detail: string;
-}
-
-/** Windows priority classes. */
-export const PRIORITY = {
-  idle: 0x40,
-  belowNormal: 0x4000,
-  normal: 0x20,
-  aboveNormal: 0x8000,
-  high: 0x80,
-  realtime: 0x100,
-} as const;
-
-/**
- * Raw wire shapes: u64 affinity masks cross the IPC boundary as decimal strings
- * (a JS number can't hold > 2^53 exactly). The `api` layer parses those strings
- * into `bigint` so the rest of the app never sees the string form.
- */
-type RawCcd = Omit<Ccd, "mask"> & { mask: string };
-type RawCpuTopology = Omit<CpuTopology, "ccds"> & { ccds: RawCcd[] };
-type RawProcInfo = Omit<ProcInfo, "affinity"> & { affinity: string };
-interface RawAffinityInfo {
-  procMask: string;
-  sysMask: string;
-}
-
-/** SMU tuning status from the sidecar (Curve Optimizer / PBO write host). */
-export interface SmuStatus {
-  /** PawnIO ring-0 driver installed on the machine. */
-  pawnIo: boolean;
-  /** RyzenSMU module loaded → SMU writes possible. */
-  loaded: boolean;
-  version: number;
-  versionStr: string;
-  /** Detail text of the last apply reply (error/success). */
-  lastReply: string | null;
-  lastReplyOk: boolean;
-}
-
-/**
- * One fixed/removable volume for the Disk Analyzer picker (Zone A). Mirrors the
- * Rust `disk_scan::VolumeInfo` (camelCase). `total`/`free` are bytes; the picker
- * derives `used = total - free`. `supported` false → greyed/disabled row.
- */
-export interface VolumeInfo {
-  /** Stable scan key — volume GUID path (`\\?\Volume{guid}\`) or the drive root. */
-  scanId: string;
-  /** Friendly display root, e.g. "C:\\". */
-  root: string;
-  /** Drive letter without separator, e.g. "C:". */
-  letter: string;
-  /** Volume label (may be empty). */
-  label: string;
-  /** File system, e.g. "NTFS" (may be empty). */
-  fileSystem: string;
-  /** "fixed" | "removable" | "remote" | "cdrom" | "ramdisk" | "unknown". */
-  driveType: string;
-  /** Total size in bytes (0 when unavailable). */
-  total: number;
-  /** Free bytes (0 when unavailable). */
-  free: number;
-  /** True when the volume can be scanned (has size info + a filesystem). */
-  supported: boolean;
-}
-
-/**
- * Scalar progress for one disk scan. Mirrors the Rust `disk_scan::ScanProgress`
- * (camelCase) — the `disk-scan://progress` event payload AND the
- * `disk_scan_status` return. Never carries the tree (pulled via `disk_tree` in
- * Phase 2). `status`: "scanning" | "done" | "cancelled" | "error".
- */
+export interface MemDetail { total: number; avail: number; used: number; loadPct: number }
+export interface CleanResult { bytes: number; files: number }
+export interface Service { name: string; display: string; status: "running" | "stopped" | "paused" | "other"; startType: string; pid: number; description: string; group: string }
+export interface StartupItem { name: string; command: string; location: "hkcu_run" | "hklm_run" | "startup_folder"; enabled: boolean }
+export interface NetCheck { id: string; label: string; ok: boolean; detail: string }
+export interface Volume { scanId: string; root: string; letter: string; label: string; fileSystem: string; driveType: string; total: number; free: number; supported: boolean }
+export interface TreeNode { id: number; parent: number; name: string; logicalSize: number; allocSize: number; fileCount: number; flags: number; hasMore: boolean; path: string | null }
+export interface TreeView { scanId: string; generation: number; focusPath: string; nodes: TreeNode[]; truncated: boolean }
+export interface ItemRow { path: string; name: string; logicalSize: number; allocSize: number; fileCount: number; flags: number }
 export interface ScanProgress {
-  scanId: string;
-  root: string;
-  status: "scanning" | "done" | "cancelled" | "error";
-  filesSeen: number;
-  dirsSeen: number;
-  bytesAlloc: number;
-  bytesLogical: number;
-  skipped: number;
-  nodeCount: number;
-  /** Bumped on each published snapshot — the frontend pulls a tree on a new gen. */
-  generation: number;
-  /** True once the node cap stopped descent (truncation banner). */
-  truncated: boolean;
-  /** True when a sustained I/O-error streak tripped the drive-disconnect
-   *  transition (spec §2.5.5 / §7) — the UI shows a dedicated disconnect surface. */
-  disconnected: boolean;
-  /** The directory currently being walked (display path; empty when idle/done).
-   *  Surfaced in the progress chip so a slow (e.g. antivirus-throttled) scan looks
-   *  visibly working rather than hung (spec §7). */
-  currentPath: string;
-  elapsedMs: number;
-  error: string | null;
+  scanId: string; root: string; status: "scanning" | "done" | "cancelled" | "error"; filesSeen: number; dirsSeen: number
+  bytesAlloc: number; bytesLogical: number; skipped: number; nodeCount: number; generation: number; truncated: boolean
+  disconnected: boolean; currentPath: string; elapsedMs: number; error: string | null
+}
+export const FLAG = { DIR: 1, REPARSE: 2, DENIED: 4, HIDDEN: 8, SYSTEM: 16, HARDLINK: 32, AGGREGATED: 64 } as const
+
+export interface GpuInfo {
+  available: boolean; name: string; driverVersion: string; graphicsClock: number; memClock: number; smClock: number; temperature: number
+  powerUsageW: number; powerLimitW: number; powerLimitMinW: number; powerLimitMaxW: number; fanSpeedPct: number
+  utilizationGpu: number; utilizationMem: number; memUsedBytes: number; memTotalBytes: number; maxGraphicsClockMhz: number
+  tempLimitC: number; tempLimitMinC: number; tempLimitMaxC: number
+  supportsPowerLimit: boolean; supportsLockedClocks: boolean; supportsFanControl: boolean; supportsTempLimit: boolean; supportsClockOffset: boolean
+  coreOffsetMinMhz: number; coreOffsetMaxMhz: number; memOffsetMinMhz: number; memOffsetMaxMhz: number
+}
+export interface GpuOc {
+  powerLimitW?: number | null; coreClockMinMhz?: number | null; coreClockMaxMhz?: number | null; memClockMinMhz?: number | null
+  memClockMaxMhz?: number | null; fanSpeedPct?: number | null; tempLimitC?: number | null; coreOffsetMhz?: number | null; memOffsetMhz?: number | null
+}
+export interface GpuGuard { blocked: boolean; reason: "" | "unclean_shutdown" | "display_driver_fault" | "recent_fault"; detail: string }
+export interface SmuStatus { pawnIo: boolean; loaded: boolean; version: number; versionStr: string; lastReply: string | null; lastReplyOk: boolean; supported?: boolean; unsupportedReason?: string | null }
+/** SMU writes resolve after the SMU answered (≤3 s). Older backends returned a bare bool. */
+export type SmuReply = { ok: boolean; detail: string } | boolean
+
+export interface FanChannel { id: string; name: string; hw: string; pct: number | null; controllable: boolean; rpm: number | null; rpmName: string | null }
+export interface FanTemp { id: string; name: string; c: number | null }
+export interface FanState { available: boolean; supported: boolean; channels: FanChannel[]; temps: FanTemp[]; dirtyHeaders?: string[] }
+export interface CurvePoint { tempC: number; duty: number }
+export type FanMode = "auto" | "manual" | "curve"
+export interface FanConfig {
+  controlId: string; mode: FanMode; manualPct: number; tempSourceId: string | null; curve: CurvePoint[]
+  minDuty: number; spinUpPct: number; spinDownPct: number; tempSourceId2: string | null; curve2: CurvePoint[]
+}
+export interface FanCalibration { controlId: string; name: string; minStartDuty: number; maxRpm: number; saturationDuty: number; points: { duty: number; rpm: number }[]; disconnected: boolean }
+export interface CalibProgress { controlId: string; name: string; fanIndex: number; fanTotal: number; duty: number; rpm: number | null }
+export interface TuneParams {
+  targetTempC: number; targetGpuTempC: number; quietFloorPct: number; noiseCeilPct: number
+  groups: Record<string, "cpu" | "case">; reuseCalibration?: FanCalibration[] | null; allowBackgroundLoad: boolean
+}
+export interface TuneProgress {
+  phase: string; step: number; stepTotal: number; cpuTemp: number | null; cpuPower: number | null; gpuTemp: number | null
+  gpuPower: number | null; wCpu: number | null; wCase: number | null; etaS: number | null; note: string | null
+}
+export interface TunedCurve { controlId: string; group: "cpu" | "case"; curve: CurvePoint[]; curve2: CurvePoint[]; minDuty: number; spinUpPct: number; spinDownPct: number }
+export interface TuneWarning { kind: string; messageZh: string; messageEn: string; achievableC: number | null }
+// Model blobs round-trip opaquely (resynth / passive learning take them back).
+export type Opaque = Record<string, unknown>
+export interface TuneResult {
+  params: TuneParams; calibrations: FanCalibration[]; baseline: { tIdle: number; pIdle: number; tGpuIdle: number | null; pGpuIdle: number | null }
+  model: Opaque; modelGpu: Opaque | null; pDesign: number; pDesignGpu: number | null
+  effectiveTarget: number; effectiveTargetGpu: number | null; curves: TunedCurve[]; cpuSourceId: string | null; gpuSourceId: string | null
+  validation: { tV: number; iterations: number; oscillationFixed: boolean; converged: boolean; combinedTCpu: number | null; combinedTGpu: number | null }
+  warnings: TuneWarning[]; finishedAtMs: number
+  [k: string]: unknown
+}
+export interface TuneAbort { phase: string; reasonZh: string; reasonEn: string }
+export interface PassiveStatus { enabled: boolean; cpuSamples: number; gpuSamples: number; accumulatedCpuC: number; accumulatedGpuC: number }
+export interface PassiveAdjustment { axis: "cpu" | "gpu"; deltaC: number; medianResidualC: number; curves: TunedCurve[] }
+
+export interface FpsStats { fps: number | null; frametimeMs: number | null; low1: number | null; low01: number | null }
+export interface Foreground { exe: string | null; pid: number; isGame: boolean }
+export interface GameEntry { name: string; path: string; source: string }
+export interface OverlayStatus {
+  target: { pid: number; api: string; anticheat: boolean; blockedBy: string | null; game: boolean; exe: string | null; allowed: boolean; native: boolean; injectable: boolean }
+  mode: "inject" | "window" | "none"; reason: string; reasonZh: string; reasonEn: string; attached: boolean
+}
+export interface PerfSample {
+  t: number; fps: number | null; frametimeMs: number | null; cpuLoad: number | null; cpuTemp: number | null; cpuPower: number | null
+  cpuClock: number | null; gpuLoad: number | null; gpuTemp: number | null; gpuPower: number | null; gpuClock: number | null
+  vramLoad: number | null; memLoad: number | null; gpuFan: number | null; diskRead: number | null; diskWrite: number | null
+  netDown: number | null; netUp: number | null; [k: string]: number | null
+}
+export interface PerfSummary {
+  avgFps: number | null; minFps: number | null; maxFps: number | null; low1: number | null; low01: number | null; avgFrametimeMs: number | null
+  avgCpuLoad: number | null; avgCpuTemp: number | null; maxCpuTemp: number | null; avgCpuPower: number | null; maxCpuPower: number | null
+  avgCpuClock: number | null; avgGpuLoad: number | null; avgGpuTemp: number | null; maxGpuTemp: number | null; avgGpuPower: number | null
+  maxGpuPower: number | null; avgGpuClock: number | null; avgVramLoad: number | null; maxVramLoad: number | null; avgMemLoad: number | null
+  energyWh: number | null; co2Kg: number | null
+}
+export interface SessionMeta { exe: string; path: string | null; startedAt: number; endedAt: number; durationSec: number; cpuName: string | null; gpuName: string | null }
+export interface Session { id: string; meta: SessionMeta; summary: PerfSummary; samples: PerfSample[] }
+
+export interface UpdateInfo {
+  available: boolean; currentVersion: string; latestVersion: string | null; notes: string | null; pubDate: string | null
+  flavor: "installer" | "portable"; gameForeground: boolean; blockers: { id: string; severity: "block" | "warn"; message: string }[]; releasesUrl: string
 }
 
-/**
- * One node of a bounded `disk_tree` LOD slice. Mirrors the Rust
- * `disk_scan::TreeNode` (camelCase). Indices (`id`/`parent`) are LOCAL to the
- * slice (NOT arena NodeIds); `nodes[0]` is the focus root (`parent === id`).
- * Byte sizes are plain numbers (a disk can't hold > 2^53 bytes ≈ 9 PB), matching
- * the `ScanProgress` precedent. The Phase 3 treemap layout re-nests these via
- * `parent` + size-desc sibling order.
- */
-export interface TreeNode {
-  /** Local index within `TreeView.nodes` (0 === the focus root). */
-  id: number;
-  /** Local index of the parent within this slice (self for the focus root). */
-  parent: number;
-  /** Display name (path component or synthetic aggregate label). */
-  name: string;
-  logicalSize: number;
-  allocSize: number;
-  fileCount: number;
-  /** Bit flags: IS_DIR(1) | REPARSE(2) | DENIED(4) | HIDDEN(8) | SYSTEM(16) | HARDLINK(32) | AGGREGATED(64). */
-  flags: number;
-  /** True when this directory has children the slice did not expand (LOD
-   *  collapsed by depth/min-bytes/max-nodes) → render as a drillable container. */
-  hasMore: boolean;
-  /** Absolute path — present for the focus root + directory containers (so a
-   *  drill can re-`diskTree` on it); null for ordinary leaves. */
-  path: string | null;
+export interface TbConfig {
+  enabled: boolean; singleLine: boolean; barPosition: "left" | "right"; offset: number; customLayout: boolean; size: number; bold: boolean
+  itemSpace: number; innerSpace: number; padding: number; colorsEnabled: boolean; bg: string; label: string; safe: string; warn: string; crit: string
+  themeFps: string; themeCpu: string; themeGpu: string; themeMem: string; themeDisk: string; themeNet: string
+  warnLoad: number; critLoad: number; warnTemp: number; critTemp: number; metrics: string[]
 }
 
-/**
- * A bounded LOD slice of a scan tree for one focused container. Mirrors the Rust
- * `disk_scan::TreeView` (camelCase) — the workhorse the treemap pulls via
- * `diskTree`. The backend does the LOD slicing so a huge tree never crosses IPC
- * whole; re-pull on a new `generation` (from the progress event), and drill by
- * re-calling with a child's `path` as `focusPath`.
- */
-export interface TreeView {
-  scanId: string;
-  /** Snapshot generation this slice came from (re-pull when it advances). */
-  generation: number;
-  /** Absolute path of the focus root (the disk root when `focusPath` was null). */
-  focusPath: string;
-  /** Flat slice nodes; `nodes[0]` is the focus root. */
-  nodes: TreeNode[];
-  /** True when LOD collapsed at least one subtree (some `hasMore` is set). */
-  truncated: boolean;
-}
-
-/**
- * One row of the "what's eating my space" flat list (`diskTopItems`). Mirrors the
- * Rust `disk_scan::ItemRow` (camelCase). Top-N largest items in the focused
- * (sub)tree by allocation size.
- */
-export interface ItemRow {
-  /** Absolute path of the item. */
-  path: string;
-  /** Leaf/aggregate name (last path component). */
-  name: string;
-  logicalSize: number;
-  allocSize: number;
-  fileCount: number;
-  flags: number;
-}
-
-/** Disk-Analyzer node flag bits (mirror `disk_scan.rs` FLAG_* constants). */
-export const DISK_FLAG = {
-  isDir: 1 << 0,
-  reparse: 1 << 1,
-  denied: 1 << 2,
-  hidden: 1 << 3,
-  system: 1 << 4,
-  hardlink: 1 << 5,
-  aggregated: 1 << 6,
-} as const;
+// ---------------------------------------------------------------- commands
+const call = <T,>(cmd: string, args?: Record<string, unknown>) => invoke<T>(cmd, args)
 
 export const api = {
-  getOverview: () => invoke<Overview>("get_overview"),
-  /** Startup directive from COREPILOT_STARTUP (null when unset) — e.g. "disk" to
-   *  open the Disk Analyzer + auto-scan the system drive (automated verification). */
-  startupDirective: () => invoke<string | null>("startup_directive"),
-  /** Enumerate fixed + removable volumes for the Disk Analyzer picker (Zone A). */
-  diskListVolumes: () => invoke<VolumeInfo[]>("disk_list_volumes"),
-  /** Start scanning each disk on its own dedicated thread; returns the keys. O(1). */
-  diskScanStart: (scanIds: string[]) => invoke<string[]>("disk_scan_start", { scanIds }),
-  /** Flip the per-disk cancel atomic; the walk drains promptly. O(1). */
-  diskScanCancel: (scanId: string) => invoke<void>("disk_scan_cancel", { scanId }),
-  /** Cold read of a scan's progress atomics (the event is the live channel). O(1). */
-  diskScanStatus: (scanId: string) => invoke<ScanProgress>("disk_scan_status", { scanId }),
-  /**
-   * Pull a bounded LOD slice of a scan's published tree (the treemap workhorse).
-   * Backend clones the snapshot `Arc` + slices it off the IPC thread, so a huge
-   * tree never crosses whole. `focusPath` null/empty → the disk root; pass a
-   * child's `path` to drill. `depthLimit`/`minBytes`/`maxNodes` are the LOD knobs
-   * (omit to use backend defaults: depth 4, all sizes, 4096 nodes).
-   */
-  diskTree: (
-    scanId: string,
-    focusPath?: string | null,
-    opts?: { depthLimit?: number; minBytes?: number; maxNodes?: number },
-  ) =>
-    invoke<TreeView>("disk_tree", {
-      scanId,
-      focusPath: focusPath ?? null,
-      depthLimit: opts?.depthLimit ?? null,
-      minBytes: opts?.minBytes ?? null,
-      maxNodes: opts?.maxNodes ?? null,
-    }),
-  /** Top-N largest items in the focused (sub)tree by alloc size (the "what's
-   *  eating my space" flat list). `focusPath` null → whole disk; `n` defaults to 20. */
-  diskTopItems: (scanId: string, focusPath?: string | null, n?: number) =>
-    invoke<ItemRow[]>("disk_top_items", { scanId, focusPath: focusPath ?? null, n: n ?? null }),
-  getTopology: async (): Promise<CpuTopology> => {
-    const raw = await invoke<RawCpuTopology>("get_topology");
-    return {
-      ...raw,
-      ccds: raw.ccds.map((ccd) => ({ ...ccd, mask: BigInt(ccd.mask) })),
-    };
-  },
-  listProcesses: async (): Promise<ProcInfo[]> => {
-    const raw = await invoke<RawProcInfo[]>("list_processes");
-    return raw.map((p) => ({ ...p, affinity: BigInt(p.affinity) }));
-  },
-  processIcon: (exePath: string) => invoke<string | null>("process_icon", { exePath }),
-  /** Open a native .exe file picker; returns chosen files' lowercased base names. */
-  pickExeFiles: () => invoke<string[]>("pick_exe_files"),
-  gpuEngines: () => invoke<Record<string, number>>("gpu_engine_loads"),
-  getMetrics: () => invoke<Metrics>("get_metrics"),
-  setAffinity: (pid: number, mask: bigint) =>
-    invoke<void>("set_affinity", { pid, mask: mask.toString() }),
-  getProcessAffinity: async (pid: number): Promise<AffinityInfo> => {
-    const raw = await invoke<RawAffinityInfo>("get_process_affinity", { pid });
-    return { procMask: BigInt(raw.procMask), sysMask: BigInt(raw.sysMask) };
-  },
-  setPriority: (pid: number, priorityClass: number) =>
-    invoke<void>("set_priority", { pid, class: priorityClass }),
-  getMemoryDetail: () => invoke<MemDetail>("get_memory_detail"),
-  freeWorkingSets: () => invoke<void>("free_working_sets"),
-  purgeStandby: () => invoke<void>("purge_standby"),
-  cleanTemp: () => invoke<CleanResult>("clean_temp"),
-  flushDns: () => invoke<void>("flush_dns"),
-  endTask: (pid: number) => invoke<void>("end_task", { pid }),
-  /** Kill + relaunch the same executable (the only action offered for
-   *  SYSTEM/service-account processes — they can be restarted, never just ended). */
-  restartTask: (pid: number) => invoke<void>("restart_task", { pid }),
-  getSensors: () => invoke<Sensors>("get_sensors"),
-  // SMU tuning (Curve Optimizer / PBO) — forwarded to the sensord sidecar.
-  smuStatus: () => invoke<SmuStatus>("smu_status"),
-  smuApplyCo: (ccd: number, core: number, margin: number) =>
-    invoke<boolean>("smu_apply_co", { ccd, core, margin }),
-  smuApplyCoAll: (margin: number) => invoke<boolean>("smu_apply_co_all", { margin }),
-  smuApplyLimit: (kind: "ppt" | "tdc" | "edc", value: number) =>
-    invoke<boolean>("smu_apply_limit", { kind, value }),
-  smuSetScalar: (scalar: number) => invoke<boolean>("smu_set_scalar", { scalar }),
-  /** Explicit "force stock": all-core CO = 0 (overrides BIOS for this boot). */
-  smuForceStock: () => invoke<boolean>("smu_force_stock"),
-  /** Reveal a file in Windows Explorer (open its folder + select it). */
-  revealInExplorer: (path: string) => invoke<void>("reveal_in_explorer", { path }),
-  /** Dump the full session log to Downloads/<folderName>/; returns the folder path. */
-  exportDebugLogs: (folderName: string) => invoke<string>("export_debug_logs", { folderName }),
-  getPowerPlan: () => invoke<string>("get_power_plan"),
-  setPowerPlan: (plan: string) => invoke<void>("set_power_plan", { plan }),
-  listServices: () => invoke<ServiceItem[]>("list_services"),
-  controlService: (name: string, action: "start" | "stop" | "restart") =>
-    invoke<void>("control_service", { name, action }),
-  listStartup: () => invoke<StartupItem[]>("list_startup"),
-  setStartupEnabled: (name: string, location: string, enabled: boolean) =>
-    invoke<void>("set_startup_enabled", { name, location, enabled }),
-  networkDiagnose: (en: boolean) => invoke<NetCheck[]>("network_diagnose", { en }),
-  networkRepair: (actions: string[], en: boolean) => invoke<NetCheck[]>("network_repair", { actions, en }),
-  gpuOcInfo: () => invoke<GpuOcInfo>("gpu_oc_info"),
-  gpuOcApply: (settings: GpuOcSettings) => invoke<void>("gpu_oc_apply", { settings }),
-  gpuOcReset: () => invoke<void>("gpu_oc_reset"),
-  /** "Did the machine just die with the overclock armed?" — gates ONLY the
-   *  automatic startup re-apply; the manual apply path never calls this. */
-  gpuOcStartupCheck: () => invoke<GpuOcStartupCheck>("gpu_oc_startup_check"),
-  /** Live motherboard fan headers + temperature sources. */
-  fanInfo: () => invoke<FanInfo>("fan_info"),
-  /** Push the per-fan configuration (mode/curve) to the backend fan engine. */
-  fanSetConfig: (configs: FanChannelConfig[]) => invoke<void>("fan_set_config", { configs }),
-  /** AI-calibrate the given controllable headers (or all when empty): sweep PWM,
-   *  measure RPM, and return each fan's start/stop/saturation envelope. Emits
-   *  `fan-calib-progress` events during the (multi-second) sweep. */
-  fanCalibrate: (controlIds: string[]) => invoke<FanCalibration[]>("fan_calibrate", { controlIds }),
-  /** Run the closed-loop auto-tune: measure this machine's thermal response under
-   *  built-in load and synthesize per-fan curves. Emits `fan-autotune-progress`. */
-  fanAutotuneStart: (params: AutoTuneParams) => invoke<AutoTuneResult>("fan_autotune_start", { params }),
-  fanAutotuneAbort: () => invoke<boolean>("fan_autotune_abort"),
-  fanAutotuneResynth: (req: ResynthRequest) => invoke<ResynthResponse>("fan_autotune_resynth", { req }),
-  fanPassiveConfigure: (config: PassiveConfig | null) => invoke<void>("fan_passive_configure", { config }),
-  fanPassiveStatus: () => invoke<PassiveStatus>("fan_passive_status"),
-  /** Apply a reversible system optimization tweak by id (深度优化). Returns a JSON
-   *  snapshot of the pre-apply state; persist it and pass it back to `tweakRevert`
-   *  to restore the EXACT prior values (empty string when nothing was captured). */
-  tweakApply: (id: string) => invoke<string>("tweak_apply", { id }),
-  /** Revert an optimization tweak. Pass the `snapshot` returned by `tweakApply` to
-   *  restore the exact prior state; an empty/missing snapshot reverts to Windows'
-   *  documented default. */
-  tweakRevert: (id: string, snapshot: string) =>
-    invoke<void>("tweak_revert", { id, snapshot }),
-  /** Create a System Restore point before applying tweaks. */
-  createRestorePoint: () => invoke<void>("create_restore_point"),
-  osdSetVisible: (visible: boolean) => invoke<void>("osd_set_visible", { visible }),
-  osdSetBounds: (x: number, y: number, w: number, h: number) =>
-    invoke<void>("osd_set_bounds", { x, y, w, h }),
-  /** 1 Hz liveness beat from the OSD page. The Rust-side GDI/keep-alive guard
-   *  reloads — then rebuilds — an overlay window whose page stops beating for
-   *  180 s: wry installs no WebView2 ProcessFailed handler, so a crashed OSD
-   *  renderer otherwise leaves a live transparent window showing nothing. */
-  osdHeartbeat: () => invoke<void>("osd_heartbeat"),
-  /**
-   * Push the taskbar-monitor config to the NATIVE Win32/GDI taskbar window
-   * (which runs on its own thread and reads the in-process sampler directly —
-   * see src-tauri/src/taskbar_mon.rs). Called on mount (from the persisted store)
-   * and whenever any tb* field changes. Colors are `#RRGGBB`; the native window
-   * shows iff `enabled`. Mirrors `perfRecorderConfig`.
-   */
-  tbmonConfig: (cfg: {
-    enabled: boolean;
-    singleLine: boolean;
-    barPosition: string;
-    offset: number;
-    customLayout: boolean;
-    size: number;
-    bold: boolean;
-    itemSpace: number;
-    innerSpace: number;
-    padding: number;
-    colorsEnabled: boolean;
-    bg: string;
-    label: string;
-    safe: string;
-    warn: string;
-    crit: string;
-    themeFps: string;
-    themeCpu: string;
-    themeGpu: string;
-    themeMem: string;
-    themeDisk: string;
-    themeNet: string;
-    warnLoad: number;
-    critLoad: number;
-    warnTemp: number;
-    critTemp: number;
-    metrics: string[];
-  }) => invoke<void>("tbmon_config", cfg),
-  /** Logical bounds [x,y,w,h] of the monitor the foreground game is on (null when
-   *  unresolved), so the overlay can follow the game across monitors. */
-  osdTargetMonitor: () =>
-    invoke<[number, number, number, number] | null>("osd_target_monitor"),
-  osdFps: () => invoke<number | null>("osd_fps"),
-  osdFpsStats: () => invoke<OsdFpsStats>("osd_fps_stats"),
-  foregroundProcess: () => invoke<string | null>("foreground_process"),
-  foregroundInfo: () => invoke<ForegroundInfo>("foreground_info"),
-  pidAlive: (pid: number) => invoke<boolean>("pid_alive", { pid }),
-  /** Installed games discovered from Steam / Epic / GOG (read-only display). */
-  gameLibraryList: () => invoke<GameEntry[]>("game_library_list"),
-  /** Attach the in-game (injection) overlay to `pid` — or, when the target is
-   *  anti-cheat-protected / unsupported, transparently fall back to the window
-   *  overlay. `layoutFlags` is the `show::*` bitfield of metric rows to draw. */
-  overlayAttach: (pid: number, layoutFlags?: number) =>
-    invoke<OverlayStatus>("overlay_attach", { pid, layoutFlags }),
-  /** Detach (eject) the injected overlay from `pid`; idempotent. */
-  overlayDetach: (pid: number) => invoke<void>("overlay_detach", { pid }),
-  /** Overlay status for `pid`, or the foreground game when omitted. */
-  overlayStatus: (pid?: number) => invoke<OverlayStatus>("overlay_status", { pid: pid ?? null }),
-  /** AUTO mode: backend auto-injects the foreground game (resident) and shows the
-   *  OSD only while it's the active window (hidden on alt-tab, ejected on exit). */
-  overlaySetAuto: (enable: boolean, layoutFlags?: number) =>
-    invoke<void>("overlay_set_auto", { enable, layoutFlags }),
-  /** Push the per-theme OSD row-color palette (8 packed 0xRRGGBBAA entries, in IPC
-   *  row order) to the injected-overlay writer so the in-game overlay matches the
-   *  active theme. Safe no-op when injection isn't active. */
-  overlaySetPalette: (rowColors: number[]) =>
-    invoke<void>("overlay_set_palette", { rowColors }),
-  /**
-   * Push perf-recorder config to the backend recorder thread (which does the
-   * actual sampling). Called on mount and whenever the relevant stores change.
-   * `white`/`black` are the record white/black list exe names; `osdWhite` is the
-   * OSD whitelist (also force-records, for back-compat). All lowercased.
-   */
-  perfRecorderConfig: (cfg: {
-    enabled: boolean;
-    white: string[];
-    black: string[];
-    osdWhite: string[];
-  }) =>
-    invoke<void>("perf_recorder_config", {
-      enabled: cfg.enabled,
-      white: cfg.white,
-      black: cfg.black,
-      osdWhite: cfg.osdWhite,
-    }),
-  /**
-   * Perf-session sample files: the ~1200-point sample array of one recorded
-   * session, stored as `app_data_dir()/perf-sessions/<id>.json` instead of
-   * inline in the shared store (where it was 22 MB of a 24 MB file that every
-   * unrelated `persist_set` rewrote). `id` is a `crypto.randomUUID()`; the
-   * backend rejects anything that isn't `^[0-9a-f-]{36}$` before touching disk.
-   * See `src/lib/perfSamples.ts` for the cache in front of these.
-   */
-  perfSessionSave: (id: string, json: string) =>
-    invoke<void>("perf_session_save", { id, json }),
-  /** Raw JSON of one session's samples; null when the file is gone/unreadable. */
-  perfSessionLoad: (id: string) => invoke<string | null>("perf_session_load", { id }),
-  /** Drop one session's sample file. Missing file is success (idempotent). */
-  perfSessionDelete: (id: string) => invoke<void>("perf_session_delete", { id }),
-  /** Drop every sample file (history "清空"). */
-  perfSessionDeleteAll: () => invoke<void>("perf_session_delete_all"),
-  /** Ids of every sample file on disk, for the post-hydration orphan sweep. */
-  perfSessionIds: () => invoke<string[]>("perf_session_ids"),
-  /** Native "the user cannot see the main window" gate (backend `ui_visibility`).
-   *  True when the main window is minimised, hidden to the tray, or fully covered
-   *  by a window filling the SAME monitor it lives on. Deliberately NOT a focus
-   *  check: CorePilot on a second monitor while a game owns the first must keep
-   *  updating. Cheap — a sync command doing one atomic load.
-   *  Callers MUST fail open (treat a rejection as `false`): a gate stuck closed is
-   *  the "monitor disappears" bug, a gate stuck open only costs CPU. */
-  uiOccluded: () => invoke<boolean>("ui_occluded"),
-  setCloseToTray: (enabled: boolean) => invoke<void>("set_close_to_tray", { enabled }),
-  /** Apply/clear the Windows 11 acrylic window backdrop on the main window. */
-  setAcrylic: (enabled: boolean) => invoke<void>("set_acrylic", { enabled }),
-  /** Set whole-window opacity (30–100%). Auto-applied on change + persisted. */
-  setWindowOpacity: (percent: number) => invoke<void>("set_window_opacity", { percent }),
-  /** Whether "开机自启动" is on (a logon scheduled task exists). */
-  getAutostart: () => invoke<boolean>("get_autostart"),
-  /** Enable/disable launching CorePilot elevated at Windows logon (scheduled task,
-   *  no UAC prompt). Source of truth is the OS task, not a persisted setting. */
-  setAutostart: (enable: boolean) => invoke<void>("set_autostart", { enable }),
-  /**
-   * Ask GitHub Releases whether a newer version exists. Facts only — whether to
-   * *prompt* is decided by `shouldPrompt` in `hooks/useUpdateCheck.ts`.
-   *
-   * Longer timeout than the default: the backend allows the manifest fetch 15 s
-   * before giving up, and a request that dies at 6 s here would report a
-   * misleading "timeout" while the real one is still deciding.
-   */
-  updateCheck: () => withTimeout(invoke<UpdateInfo>("update_check"), 20_000),
-  /**
-   * Download, verify and install the update. Re-checks blockers server-side, so
-   * a game launched while the prompt sat on screen still stops it.
-   *
-   * Never resolves on the happy path — both flavors exit the app to install, so
-   * the webview is gone before a response could arrive. Only rejections (a
-   * blocker, a network/signature failure) come back. No timeout for that reason:
-   * a slow download must not be cancelled out from under the installer.
-   */
-  updateInstall: () => invoke<void>("update_install"),
-  /**
-   * Open a URL in the default browser.
-   *
-   * Calls `tauri-plugin-opener`'s command directly rather than adding the
-   * `@tauri-apps/plugin-opener` npm package: the Rust plugin is already
-   * registered and `opener:default` is already in the capability set, so the
-   * package would only be a thin `invoke` wrapper we'd have to keep in step.
-   */
-  openExternal: (url: string) => invoke<void>("plugin:opener|open_url", { url }),
-};
+  topology: () => call<Topology>("get_topology"),
+  overview: () => call<Overview>("get_overview"),
+  metrics: () => call<Metrics>("get_metrics"),
+  sensors: () => call<Sensors>("get_sensors"),
+  cpuSensors: () => call<CpuSensor[]>("cpu_sensors"),
+  processes: () => call<Proc[]>("list_processes"),
+  processIcon: (exePath: string) => call<string | null>("process_icon", { exePath }),
+  gpuEngineLoads: () => call<Record<string, number>>("gpu_engine_loads"),
+  setAffinity: (pid: number, mask: bigint) => call<void>("set_affinity", { pid, mask: mask.toString() }),
+  setPriority: (pid: number, cls: number) => call<void>("set_priority", { pid, class: cls }),
+  endTask: (pid: number) => call<void>("end_task", { pid }),
+  restartTask: (pid: number) => call<void>("restart_task", { pid }),
+  reveal: (path: string) => call<void>("reveal_in_explorer", { path }),
 
-/**
- * Payload of the backend `perf://session` event (emitted when a recorded game
- * exits). Mirrors the Rust `SessionPayload` (camelCase). Rust summarizes and
- * downsamples before emitting, so the renderer receives only report-sized data.
- */
-/** Result of the startup crash guard (src-tauri/src/gpu_guard.rs). `reason` is a
- *  stable machine tag, not user-visible text: see src/store/gpuOcGuard.ts. */
-export interface GpuOcStartupCheck {
-  blocked: boolean;
-  reason: string;
-  detail: string;
+  memory: () => call<MemDetail>("get_memory_detail"),
+  freeWorkingSets: () => call<void>("free_working_sets"),
+  purgeStandby: () => call<void>("purge_standby"),
+  cleanTemp: () => call<CleanResult>("clean_temp"),
+  flushDns: () => call<void>("flush_dns"),
+  powerPlan: () => call<"balanced" | "high" | "other">("get_power_plan"),
+  setPowerPlan: (plan: "balanced" | "high") => call<void>("set_power_plan", { plan }),
+  services: () => call<Service[]>("list_services"),
+  controlService: (name: string, action: "start" | "stop" | "restart") => call<void>("control_service", { name, action }),
+  startup: () => call<StartupItem[]>("list_startup"),
+  setStartup: (name: string, location: string, enabled: boolean) => call<void>("set_startup_enabled", { name, location, enabled }),
+  netDiagnose: (en: boolean) => call<NetCheck[]>("network_diagnose", { en }),
+  netRepair: (actions: string[], en: boolean) => call<NetCheck[]>("network_repair", { actions, en }),
+  tweakApply: (id: string) => call<string>("tweak_apply", { id }),
+  tweakRevert: (id: string, snapshot: string) => call<void>("tweak_revert", { id, snapshot }),
+  restorePoint: () => call<void>("create_restore_point"),
+
+  volumes: () => call<Volume[]>("disk_list_volumes"),
+  scanStart: (scanIds: string[]) => call<string[]>("disk_scan_start", { scanIds }),
+  scanCancel: (scanId: string) => call<void>("disk_scan_cancel", { scanId }),
+  scanStatus: (scanId: string) => call<ScanProgress>("disk_scan_status", { scanId }),
+  diskTree: (scanId: string, focusPath: string | null, o: { depthLimit?: number; minBytes?: number; maxNodes?: number } = {}) =>
+    call<TreeView>("disk_tree", { scanId, focusPath, ...o }),
+  diskTop: (scanId: string, focusPath: string | null, n = 40) => call<ItemRow[]>("disk_top_items", { scanId, focusPath, n }),
+  startupDirective: () => call<string | null>("startup_directive"),
+
+  gpuInfo: () => call<GpuInfo>("gpu_oc_info"),
+  gpuApply: (settings: GpuOc) => call<void>("gpu_oc_apply", { settings }),
+  gpuReset: () => call<void>("gpu_oc_reset"),
+  gpuGuard: () => call<GpuGuard>("gpu_oc_startup_check"),
+  smuStatus: () => call<SmuStatus>("smu_status"),
+  smuCo: (ccd: number, core: number, margin: number) => call<SmuReply>("smu_apply_co", { ccd, core, margin }),
+  smuCoAll: (margin: number) => call<SmuReply>("smu_apply_co_all", { margin }),
+  smuLimit: (kind: "ppt" | "tdc" | "edc", value: number) => call<SmuReply>("smu_apply_limit", { kind, value }),
+  smuScalar: (scalar: number) => call<SmuReply>("smu_set_scalar", { scalar }),
+  smuStock: () => call<SmuReply>("smu_force_stock"),
+
+  fanInfo: () => call<FanState>("fan_info"),
+  fanSetConfig: (configs: FanConfig[]) => call<void>("fan_set_config", { configs }),
+  fanCalibrate: (controlIds: string[]) => call<FanCalibration[]>("fan_calibrate", { controlIds }),
+  tuneStart: (params: TuneParams) => call<TuneResult>("fan_autotune_start", { params }),
+  tuneAbort: () => call<boolean>("fan_autotune_abort"),
+  tuneResynth: (req: { params: TuneParams; model: Opaque; modelGpu: Opaque | null; calibrations: FanCalibration[]; pDesign: number; pDesignGpu: number | null }) =>
+    call<{ curves: TunedCurve[]; effectiveTarget: number; effectiveTargetGpu: number | null; warnings: TuneWarning[] }>("fan_autotune_resynth", { req }),
+  passiveConfigure: (config: Opaque | null) => call<void>("fan_passive_configure", { config }),
+  passiveStatus: () => call<PassiveStatus>("fan_passive_status"),
+
+  fps: () => call<FpsStats>("osd_fps_stats"),
+  foreground: () => call<Foreground>("foreground_info"),
+  pidAlive: (pid: number) => call<boolean>("pid_alive", { pid }),
+  games: () => call<GameEntry[]>("game_library_list"),
+  pickExe: () => call<string[]>("pick_exe_files"),
+  overlayStatus: (pid: number | null = null) => call<OverlayStatus>("overlay_status", { pid }),
+  /** Backend owns injection: it injects only detected, allow-listed, native 64-bit, anti-cheat-free games. */
+  overlayConfig: (enabled: boolean, allow: string[], layoutFlags: number) => call<void>("overlay_config", { enabled, allow, layoutFlags }),
+  overlayPalette: (rowColors: number[]) => call<void>("overlay_set_palette", { rowColors }),
+  osdBounds: (x: number, y: number, w: number, h: number) => call<void>("osd_set_bounds", { x, y, w, h }),
+  osdMonitor: () => call<[number, number, number, number] | null>("osd_target_monitor"),
+  osdHeartbeat: () => call<void>("osd_heartbeat"),
+  recorderConfig: (enabled: boolean, white: string[], black: string[], osdWhite: string[]) =>
+    call<void>("perf_recorder_config", { enabled, white, black, osdWhite }),
+  tbmonConfig: (c: TbConfig) => call<void>("tbmon_config", { ...c }),
+
+  persistGet: (name: string) => call<unknown>("persist_get", { name }),
+  persistSet: (name: string, value: unknown) => call<void>("persist_set", { name, value }),
+  sessionSave: (id: string, json: string) => call<void>("perf_session_save", { id, json }),
+  sessionLoad: (id: string) => call<string | null>("perf_session_load", { id }),
+  sessionDelete: (id: string) => call<void>("perf_session_delete", { id }),
+  sessionDeleteAll: () => call<void>("perf_session_delete_all"),
+  sessionIds: () => call<string[]>("perf_session_ids"),
+
+  closeToTray: (enabled: boolean) => call<void>("set_close_to_tray", { enabled }),
+  occluded: () => call<boolean>("ui_occluded"),
+  opacity: (percent: number) => call<void>("set_window_opacity", { percent }),
+  autostart: () => call<boolean>("get_autostart"),
+  setAutostart: (enable: boolean) => call<void>("set_autostart", { enable }),
+  updateCheck: () => call<UpdateInfo>("update_check"),
+  updateInstall: () => call<void>("update_install"),
+  exportLogs: (folderName: string) => call<string>("export_debug_logs", { folderName }),
 }
 
-export interface PerfSessionEvent {
-  meta: {
-    exe: string;
-    /** Full exe path (report path display + history-card icon), or null. */
-    path: string | null;
-    startedAt: number;
-    endedAt: number;
-    durationSec: number;
-    cpuName: string | null;
-    gpuName: string | null;
-  };
-  summary: PerfSummary;
-  samples: PerfSample[];
+// ---------------------------------------------------------------- events
+export interface Events {
+  "disk-scan://progress": ScanProgress
+  "perf://session": Omit<Session, "id">
+  "fan-calib-progress": CalibProgress
+  "fan-autotune-progress": TuneProgress
+  "fan-autotune-aborted": TuneAbort
+  "fan-autotune-passive": PassiveAdjustment
+  "update://state": { phase: string; error?: string }
+  "update://progress": { downloaded: number; total: number | null }
+  "app://focus": boolean
+}
+export function on<K extends keyof Events>(ev: K, fn: (p: Events[K]) => void): Promise<UnlistenFn> {
+  return listen<Events[K]>(ev, (e) => fn(e.payload))
 }
 
-/** Frame-pacing stats for the in-game OSD, derived from the ETW present stream.
- *  All fields are null when FPS data is unavailable (no game / no privilege). */
-export interface OsdFpsStats {
-  fps: number | null;
-  frametimeMs: number | null;
-  /** 1% low FPS (reciprocal of the 99th-percentile frame time). */
-  low1: number | null;
-  /** 0.1% low FPS (reciprocal of the 99.9th-percentile frame time). */
-  low01: number | null;
-}
-
-/** Foreground app snapshot — game detection + the perf-session recorder. */
-export interface ForegroundInfo {
-  /** Lowercased exe name, or null when unresolved. */
-  exe: string | null;
-  /** Foreground PID (0 when none). */
-  pid: number;
-  /** True when the foreground app is rendering frames (has recent presents). */
-  isGame: boolean;
-}
-
-// ---------------------------------------------------------------------------
-// Self-update (see src-tauri/src/updater.rs)
-// ---------------------------------------------------------------------------
-
-/** Which distribution this build is: the NSIS install or the portable folder. */
-export type UpdateFlavor = "installer" | "portable";
-
-/** `block` = installing now would fail or strand hardware; `warn` = it costs
- *  work in progress but is allowed. */
-export type BlockerSeverity = "block" | "warn";
-
-/** One reason not to install right now, with a ready-to-show Chinese message. */
-export interface UpdateBlocker {
-  id: string;
-  severity: BlockerSeverity;
-  message: string;
-}
-
-/** Result of an update check. Mirrors the Rust `UpdateInfo` (camelCase). */
-export interface UpdateInfo {
-  available: boolean;
-  currentVersion: string;
-  latestVersion: string | null;
-  /** Release notes (the GitHub release body) as plain text. */
-  notes: string | null;
-  pubDate: string | null;
-  flavor: UpdateFlavor;
-  /** A game holds the foreground — the auto-prompt is suppressed on this. */
-  gameForeground: boolean;
-  blockers: UpdateBlocker[];
-  releasesUrl: string;
-}
-
-/** Payload of `update://progress` — bytes fetched so far. `total` is null when
- *  the server sends no Content-Length. */
-export interface UpdateProgressEvent {
-  downloaded: number;
-  total: number | null;
-}
-
-/** Payload of `update://state` — where the install got to, plus the reason it
- *  stopped when `phase` is `failed`. */
-export interface UpdateStateEvent {
-  phase: "idle" | "checking" | "downloading" | "verifying" | "staging" | "swapping" | "ready" | "failed";
-  error?: string;
-}
-
-/** One installed game discovered from a storefront library (Steam/Epic/GOG). */
-export interface GameEntry {
-  name: string;
-  /** Install directory (lowercased) the detector prefix-matches EXE paths against. */
-  path: string;
-  /** "Steam" | "Epic" | "GOG". */
-  source: string;
-}
-
-/** Graphics API detected for an overlay target (drives which Present is hooked).
- *  Lowercased to match the backend's serde rename. */
-export type GraphicsApi = "dx12" | "dx11" | "dx10" | "dx9" | "vulkan" | "opengl" | "unknown";
-
-/** A target process classified for the in-game (injection) overlay. */
-export interface OverlayTarget {
-  pid: number;
-  api: GraphicsApi;
-  /** True when a known anti-cheat module is loaded — injection is refused. */
-  anticheat: boolean;
-  /** True iff the API is hookable AND no anti-cheat is present. */
-  injectable: boolean;
-}
-
-/** What the overlay does for a target:
- *  - `inject`: the in-frame DLL overlay (premium path);
- *  - `window`: the keep-alive window overlay (anti-cheat / unsupported API → safe);
- *  - `none`: no usable target (no foreground game). */
-export type OverlayMode = "inject" | "window" | "none";
-
-/** Overlay status for a target: classification, chosen mode, and a localised
- *  reason for the UI status line. */
-export interface OverlayStatus {
-  target: OverlayTarget;
-  mode: OverlayMode;
-  /** Localised explanation, e.g. "✅ 可注入（DX12）". Chinese — kept under the
-   *  original name so every existing caller keeps working. */
-  reason: string;
-  /** The same explanation, Chinese. Pair with `reasonEn` for the language switch:
-   *  the OSD tab's status line is the first place a user looks when the overlay
-   *  is not showing, so it has to speak their language rather than fall back to
-   *  a Chinese sentence in English mode. */
-  reasonZh: string;
-  /** The same explanation in English. */
-  reasonEn: string;
-  /** Whether the injected overlay is currently attached to this exact PID. */
-  attached: boolean;
-}
+export const PRIORITY = { idle: 0x40, below: 0x4000, normal: 0x20, above: 0x8000, high: 0x80 } as const
+// Overlay row bits (crates/corepilot-osd-ipc `show`), in palette row order.
+export const OSD_ROWS = ["fps", "frametime", "cpu", "gpu", "vram", "ram", "disk", "net"] as const
+export type OsdRow = (typeof OSD_ROWS)[number]
+export const osdFlags = (rows: Record<string, boolean>) => OSD_ROWS.reduce((f, r, i) => (rows[r] ? f | (1 << i) : f), 0)

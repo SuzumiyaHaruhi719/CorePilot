@@ -1,36 +1,19 @@
 <!doctype html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CorePilot</title>
-    <!-- Paint the dark base color immediately so there is no white flash before
-         the JS bundle + index.css load and React mounts (esp. on dev startup). -->
+    <!-- Paint the base color before the bundle loads (no white flash). The OSD
+         window loads this same page with ?osd and must stay transparent. -->
     <style>
-      html,
-      body,
-      #root {
-        margin: 0;
-        height: 100%;
-      }
-      /* Boot color on <html> only: an unlayered body/#root background here
-         would outrank index.css and paint over the themed window chrome. */
-      html {
-        background: #0a0b0f;
-      }
-      #boot {
-        position: fixed;
-        inset: 0;
-        display: grid;
-        place-items: center;
-        color: #4f5663;
-        font: 500 13px system-ui, sans-serif;
-        letter-spacing: 0.08em;
-      }
+      html, body, #root { margin: 0; height: 100%; }
+      html { background: #0c0c0e; }
+      html.osd, html.osd body { background: transparent; }
     </style>
   </head>
   <body>
-    <div id="root"><div id="boot">COREPILOT</div></div>
+    <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
