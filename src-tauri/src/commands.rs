@@ -210,7 +210,7 @@ where
 /// child processes) froze the whole app into "未响应". Async commands leave the
 /// main thread alone; `spawn_blocking` keeps the heavy work off the async
 /// reactor too.
-async fn run_blocking<T, F>(f: F) -> CoreResult<T>
+pub(crate) async fn run_blocking<T, F>(f: F) -> CoreResult<T>
 where
     T: Send + 'static,
     F: FnOnce() -> CoreResult<T> + Send + 'static,
