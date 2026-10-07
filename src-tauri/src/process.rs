@@ -372,18 +372,18 @@ pub(crate) struct GpuSnapshot {
     pub(crate) per_engine: HashMap<String, f64>,
 }
 
-/// Everything the single background GPU collect produces: per-PID engine data
-/// (+ aggregate + per-engine totals) plus per-PID dedicated VRAM.
+/// What the single background GPU collect produces: per-PID engine data plus
+/// the aggregate and per-engine totals. (Per-PID VRAM is NOT here: its only
+/// reader is the process list, so it is read when rows are built — see
+/// [`gpu_vram_map`].)
 pub(crate) struct GpuFullSnapshot {
     pub(crate) engine: GpuSnapshot,
-    pub(crate) vram: HashMap<u32, u64>,
 }
 
 impl Default for GpuFullSnapshot {
     fn default() -> Self {
         GpuFullSnapshot {
             engine: empty_engine_snapshot(),
-            vram: HashMap::new(),
         }
     }
 }
@@ -530,15 +530,11 @@ pub(crate) fn gpu_map() -> GpuSnapshot {
     }
 }
 
-/// One full GPU sample for the background telemetry collector: the per-PID +
-/// aggregate + per-engine snapshot (one `\GPU Engine(*)` collect) plus per-PID
-/// dedicated VRAM (one `\GPU Process Memory(*)` collect). This is the ONLY place
-/// these two wildcard collects run now; every command reads the published snapshot.
+/// One GPU sample for the background telemetry collector: the per-PID +
+/// aggregate + per-engine snapshot from one `\GPU Engine(*)` collect. The ONLY
+/// place that collect runs; every command reads the published snapshot.
 pub(crate) fn collect_gpu() -> GpuFullSnapshot {
-    GpuFullSnapshot {
-        engine: gpu_map(),
-        vram: gpu_vram_map(),
-    }
+    GpuFullSnapshot { engine: gpu_map() }
 }
 
 /// Whole-GPU per-engine utilization query, kept separate from [`GPU_QUERY`] so
@@ -665,18 +661,23 @@ pub fn thread_counts() -> CoreResult<HashMap<u32, u32>> {
     Ok(map)
 }
 
-/// Per-process dedicated VRAM (bytes) keyed by PID, via the PDH
-/// `\GPU Process Memory(*)\Dedicated Usage` counter — the same source Windows
-/// Task Manager uses. NVML does NOT report per-process VRAM on consumer (WDDM)
-/// GPUs, so PDH is the portable path. Dedicated Usage is a raw gauge (not a rate),
-/// so a single collection suffices; we open + close a short-lived query per
-/// snapshot. Returns an empty map on any failure (the column then shows "—").
-pub(crate) fn gpu_vram_map() -> HashMap<u32, u64> {
-    let mut map: HashMap<u32, u64> = HashMap::new();
+/// The `\GPU Process Memory(*)\Dedicated Usage` query, opened once. It used to be
+/// opened, expanded, collected and closed every second, 24/7, by the telemetry
+/// thread for a reader (the process list) that is rarely on screen.
+struct VramQuery {
+    query: PDH_HQUERY,
+    ctr: PDH_HCOUNTER,
+}
+// SAFETY: PDH handles are only touched behind VRAM_QUERY's mutex.
+unsafe impl Send for VramQuery {}
+
+static VRAM_QUERY: Lazy<Mutex<Option<VramQuery>>> = Lazy::new(|| Mutex::new(open_vram_query()));
+
+fn open_vram_query() -> Option<VramQuery> {
     unsafe {
         let mut query = PDH_HQUERY::default();
         if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != PDH_SUCCESS {
-            return map;
+            return None;
         }
         let path: Vec<u16> = r"\GPU Process Memory(*)\Dedicated Usage"
             .encode_utf16()
@@ -685,20 +686,36 @@ pub(crate) fn gpu_vram_map() -> HashMap<u32, u64> {
         let mut ctr = PDH_HCOUNTER::default();
         if PdhAddEnglishCounterW(query, PCWSTR(path.as_ptr()), 0, &mut ctr) != PDH_SUCCESS {
             let _ = PdhCloseQuery(query);
-            return map;
+            return None;
         }
-        if PdhCollectQueryData(query) != PDH_SUCCESS {
-            let _ = PdhCloseQuery(query);
+        Some(VramQuery { query, ctr })
+    }
+}
+
+/// Per-process dedicated VRAM (bytes) keyed by PID — the same source Windows
+/// Task Manager uses. NVML does NOT report per-process VRAM on consumer (WDDM)
+/// GPUs, so PDH is the portable path. Dedicated Usage is a raw gauge (not a
+/// rate), so each collect stands alone: reading it when rows are built gives the
+/// same values the 1 Hz collector did, only fresher. Empty map on any failure
+/// (the column then shows "—").
+pub(crate) fn gpu_vram_map() -> HashMap<u32, u64> {
+    let mut map: HashMap<u32, u64> = HashMap::new();
+    let guard = VRAM_QUERY.lock();
+    let Some(q) = guard.as_ref() else {
+        return map;
+    };
+    unsafe {
+        if PdhCollectQueryData(q.query) != PDH_SUCCESS {
             return map;
         }
         let mut size: u32 = 0;
         let mut count: u32 = 0;
-        let rc = PdhGetFormattedCounterArrayW(ctr, PDH_FMT_DOUBLE, &mut size, &mut count, None);
+        let rc = PdhGetFormattedCounterArrayW(q.ctr, PDH_FMT_DOUBLE, &mut size, &mut count, None);
         if rc == PDH_MORE_DATA && size > 0 {
             let mut buf = vec![0u8; size as usize];
             let items_ptr = buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
             if PdhGetFormattedCounterArrayW(
-                ctr,
+                q.ctr,
                 PDH_FMT_DOUBLE,
                 &mut size,
                 &mut count,
@@ -723,7 +740,6 @@ pub(crate) fn gpu_vram_map() -> HashMap<u32, u64> {
                 }
             }
         }
-        let _ = PdhCloseQuery(query);
     }
     map
 }
@@ -784,7 +800,7 @@ pub fn build_rows(raw: Vec<RawProc>, threads: &HashMap<u32, u32>, logical: f32) 
     // list (and, via the shared blocking pool, everything else).
     let snap = crate::telemetry::gpu_snapshot();
     let gpu = &snap.engine;
-    let gpu_vram = &snap.vram;
+    let gpu_vram = gpu_vram_map();
     // PIDs seen this refresh, used afterwards to prune the detail cache.
     let mut live_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let out: Vec<ProcInfo> = raw
@@ -1304,6 +1320,17 @@ fn process_details(pid: u32, accumulated_cpu_ms: u64) -> ProcDetails {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The persistent VRAM query must keep working across collects (it used to
+    /// be reopened every time). Needs a GPU with processes using VRAM.
+    #[test]
+    #[ignore]
+    fn vram_query_survives_repeated_collects() {
+        let first = gpu_vram_map();
+        let second = gpu_vram_map();
+        println!("vram pids: {} then {}", first.len(), second.len());
+        assert!(!first.is_empty() && !second.is_empty());
+    }
 
     /// Regression guard: the cached handle must carry SYNCHRONIZE. Opened without
     /// it, `WaitForSingleObject` returns WAIT_FAILED instead of WAIT_TIMEOUT, so
