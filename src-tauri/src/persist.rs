@@ -32,7 +32,6 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
 
 use once_cell::sync::OnceCell;
 use serde_json::{Map, Value};
@@ -468,9 +467,10 @@ pub async fn perf_session_delete_all(app: AppHandle) -> Result<(), String> {
     .await
 }
 
-/// Ids of every sample file on disk, for the orphan sweep (files whose history
-/// row is gone — e.g. the process died between the file write and the store
-/// write, which is the deliberately-safe ordering).
+/// Ids of every session file on disk. This IS the frontend's session list:
+/// each file is a self-contained `{id, meta, summary, samples}` written by the
+/// frontend on `perf://session` (no separate history index, no orphan sweep),
+/// so every file — including one saved seconds ago — must be listed.
 #[tauri::command]
 pub async fn perf_session_ids(app: AppHandle) -> Vec<String> {
     crate::commands::run_blocking_default("perf_session_ids", move || {
@@ -479,7 +479,7 @@ pub async fn perf_session_ids(app: AppHandle) -> Vec<String> {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if let Some(id) = name.strip_suffix(".json") {
-                    if valid_session_id(id) && !is_recent(&entry) {
+                    if valid_session_id(id) {
                         out.push(id.to_string());
                     }
                 }
@@ -488,33 +488,6 @@ pub async fn perf_session_ids(app: AppHandle) -> Vec<String> {
         out
     })
     .await
-}
-
-/// Grace period before a sample file may be reported to the orphan sweep.
-///
-/// The ONLY consumer of [`perf_session_ids`] is the frontend's orphan sweep, and
-/// a file is legitimately row-less for a while: the recorder writes samples
-/// first and adds the history row after, precisely so a crash leaves a harmless
-/// orphan instead of a row that charts nothing. Anything younger than this is
-/// therefore assumed to be mid-handoff rather than abandoned. This is the one
-/// check that makes every orphan-deletion race safe, including races with a
-/// future second writer that no in-process bookkeeping could see.
-///
-/// Orphans are tiny and rare; leaving one on disk for an hour costs nothing,
-/// deleting a live one costs the user a run.
-const PERF_SWEEP_GRACE: Duration = Duration::from_secs(60 * 60);
-
-fn is_recent(entry: &fs::DirEntry) -> bool {
-    // Unreadable mtime, or a file stamped in the future (clock step, so
-    // `elapsed` errors): treat it as recent. Failing toward "keep the file" is
-    // the whole point of this check.
-    let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
-        return true;
-    };
-    modified
-        .elapsed()
-        .map(|age| age < PERF_SWEEP_GRACE)
-        .unwrap_or(true)
 }
 
 #[cfg(test)]
