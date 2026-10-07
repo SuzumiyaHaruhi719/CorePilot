@@ -190,7 +190,7 @@ pub fn guard_critical_pid(pid: u32) -> CoreResult<()> {
 /// then the mutating call that follows fails on its own access check anyway.
 fn is_process_critical(pid: u32) -> bool {
     unsafe {
-        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false.into(), pid) else {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
             return false;
         };
         let mut critical = windows::core::BOOL(0);

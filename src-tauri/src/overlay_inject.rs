@@ -26,8 +26,11 @@
 //! foreground PID, so we track which PID currently has the DLL injected and only
 //! `LoadLibraryW` when that PID changes — a repeat attach for the resident PID
 //! just refreshes the layout flags through the shared block (no re-injection, so
-//! the module never accumulates). Detach re-finds the module by file name, ejects
-//! it, and clears that tracking so a later attach to the same PID injects again.
+//! the module never accumulates). Detach NEVER unloads the DLL: an external
+//! `FreeLibrary` left hudhook's Present hooks and window subclass pointing into
+//! unmapped memory, crashing the game on its next frame (every alt-tab). Detach
+//! only retargets the shared block; the resident DLL draws nothing unless the
+//! block names its own PID, so it goes inert and unloads with the game.
 //! The state shared with the sampler — the sampler target PID, the injected PID,
 //! and the layout flags — lives behind a small mutex (flags in an atomic).
 
@@ -85,7 +88,7 @@ struct OverlayState {
     /// the frontend polls and re-issues attach for the *same* PID, and without this
     /// we would `LoadLibraryW` on every poll, leaking/accumulating the module. We
     /// only run the real injection when the target PID is not already this value,
-    /// and [`overlay_detach`] clears it after the eject so a later re-attach works.
+    /// and [`overlay_detach`] clears it so a later re-attach re-checks residency.
     injected_pid: Option<u32>,
 }
 
@@ -119,16 +122,10 @@ static ROW_COLORS: Mutex<[u32; row::COUNT]> = Mutex::new([0; row::COUNT]);
 /// Ensures the sampler thread is spawned at most once.
 static SAMPLER_STARTED: AtomicBool = AtomicBool::new(false);
 
-/// AUTO mode: the sampler itself detects the foreground injectable game, injects
-/// `corepilot_overlay.dll` ONCE (resident), and gates OSD visibility by foreground
-/// — shown only while the game is the active window, hidden (NOT ejected) on
-/// alt-tab so it reappears instantly, ejected only when the game exits or auto mode
-/// is switched off. Toggled by [`overlay_set_auto`]. (Distinct from the manual
-/// `inject` path driven by the frontend, which ejects on every foreground change.)
-static AUTO_MODE: AtomicBool = AtomicBool::new(false);
-/// Last foreground PID seen by [`auto_tick`], so the heavy `classify_target` only
-/// runs when the foreground actually changes (the cheap PID read runs every tick).
-static AUTO_LAST_FG: AtomicU32 = AtomicU32::new(0);
+/// Set once any injection succeeds this session. The resident DLL then stays
+/// mapped in that game until it exits, so the updater has to move the file
+/// aside before the installer overwrites it ([`dll_maybe_mapped`]).
+static INJECTED_EVER: AtomicBool = AtomicBool::new(false);
 
 /// Bytes-per-MB (binary). VRAM/RAM cross the shared block as `u32` megabytes.
 const BYTES_PER_MB: u64 = 1024 * 1024;
@@ -168,6 +165,8 @@ impl Default for OverlayStatus {
             pid: 0,
             api: GraphicsApi::Unknown,
             anticheat: false,
+            game: false,
+            native: false,
             injectable: false,
         };
         Self {
@@ -314,7 +313,7 @@ fn publish_metrics(writer: &OsdShared, pid: u32, flags: u32, row_colors: [u32; r
 /// safe to call once from `lib.rs` `setup`. The `OsdShared` writer is created on
 /// the sampler thread and stored in [`STATE`] so the mapping outlives every
 /// attach/detach for the whole app lifetime.
-pub fn start_sampler(app: AppHandle) {
+pub fn start_sampler() {
     if SAMPLER_STARTED.swap(true, Ordering::SeqCst) {
         return; // already running
     }
@@ -336,11 +335,6 @@ pub fn start_sampler(app: AppHandle) {
             }
 
             loop {
-                // AUTO mode drives its own target/injection from the foreground.
-                if AUTO_MODE.load(Ordering::Relaxed) {
-                    auto_tick(&app);
-                }
-
                 // Snapshot the current target while holding the lock briefly; do
                 // the (slower) sampling outside the lock so attach/detach/status
                 // never block on a metric read.
@@ -356,13 +350,6 @@ pub fn start_sampler(app: AppHandle) {
                         // free to inject again rather than be treated as idempotent.
                         if !crate::fps::pid_alive(pid) {
                             clear_target_if(pid);
-                            write_disabled();
-                        } else if AUTO_MODE.load(Ordering::Relaxed)
-                            && crate::fps::foreground_pid_public() != pid
-                        {
-                            // AUTO mode: the DLL stays resident, but the game isn't
-                            // the active window — hide the OSD (don't eject) so it
-                            // reappears instantly when the user alt-tabs back.
                             write_disabled();
                         } else if let Some(writer) = STATE.lock().writer.as_ref() {
                             // Re-borrow the writer for the publish. The lock is
@@ -420,44 +407,6 @@ fn clear_target_if(pid: u32) {
     }
 }
 
-/// AUTO-mode tick: keep the overlay DLL resident in the foreground injectable
-/// game. Only (re)classifies when the foreground PID changes — the per-tick
-/// visibility gating (show only while the game is foreground) is handled in the
-/// sampler loop with the cheap `foreground_pid_public` read.
-fn auto_tick(app: &AppHandle) {
-    let fg = crate::fps::foreground_pid_public();
-    let last = AUTO_LAST_FG.swap(fg, Ordering::Relaxed);
-    if fg == last || fg == 0 {
-        return; // foreground unchanged (gate handles show/hide) or no foreground
-    }
-    let target = classify_target(fg);
-    if target.pid == 0 || !target.injectable {
-        // Desktop / non-game / anti-cheat / unsupported API: leave any resident
-        // inject as-is — the gate hides the OSD because it isn't the foreground.
-        return;
-    }
-    if STATE.lock().injected_pid == Some(fg) {
-        STATE.lock().target_pid = Some(fg); // already resident in this game
-        return;
-    }
-    // A new/different injectable game is in front — switch to it.
-    let previous = STATE.lock().injected_pid;
-    if let Some(old) = previous {
-        let _ = eject_dll(old);
-        let mut st = STATE.lock();
-        st.injected_pid = None;
-        if st.target_pid == Some(old) {
-            st.target_pid = None;
-        }
-    }
-    // `inject_dll` re-checks anti-cheat immediately before injecting (hard gate).
-    if inject_dll(app, fg).is_ok() {
-        let mut st = STATE.lock();
-        st.injected_pid = Some(fg);
-        st.target_pid = Some(fg);
-    }
-}
-
 /// Resolve the absolute path to `corepilot_overlay.dll`.
 ///
 /// Primary: next to the running executable. In `tauri dev` that's
@@ -499,6 +448,10 @@ fn reason_for(target: &OverlayTarget, mode: OverlayMode) -> (String, String) {
             "⚠️ 检测到反作弊，已自动改用窗口叠加（避免封号）".into(),
             "⚠️ Anti-cheat detected; using window overlay to avoid a ban".into(),
         ),
+        OverlayMode::Window if !target.native => (
+            "⚠️ 32 位游戏暂不支持注入，已改用窗口叠加".into(),
+            "⚠️ 32-bit games can't be injected; using window overlay".into(),
+        ),
         OverlayMode::Window => match target.api {
             GraphicsApi::Vulkan => (
                 "⚠️ Vulkan 暂不支持注入，已改用窗口叠加".into(),
@@ -535,7 +488,7 @@ fn api_label(api: GraphicsApi) -> &'static str {
 
 /// Decide the overlay mode for an already-classified target (no side effects).
 fn mode_for(target: &OverlayTarget) -> OverlayMode {
-    if target.pid == 0 {
+    if target.pid == 0 || !target.game {
         OverlayMode::None
     } else if target.injectable {
         OverlayMode::Inject
@@ -556,16 +509,14 @@ fn inject_dll(app: &AppHandle, pid: u32) -> Result<(), String> {
     if is_anticheat_protected(pid) {
         return Err("检测到反作弊保护，已拒绝注入（避免封号）".to_string());
     }
+    if pid == std::process::id() || !crate::overlay::is_native(pid) {
+        return Err("目标不是 64 位游戏进程，已拒绝注入".to_string());
+    }
 
     let dll = resolve_overlay_dll(app)?;
-    crate::inject::inject(pid, &dll)
-}
-
-/// Eject the overlay DLL from `pid` (best-effort): find the loaded module by file
-/// name and `FreeLibrary` it. Missing module / dead process is treated as
-/// "already gone" — not an error.
-fn eject_dll(pid: u32) -> Result<(), String> {
-    crate::inject::eject(pid, OVERLAY_DLL)
+    crate::inject::inject(pid, &dll)?;
+    INJECTED_EVER.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 /// **Hybrid attach.** Classify `pid`; if injectable, inject the in-frame DLL and
@@ -662,82 +613,26 @@ fn overlay_attach_blocking(
     }
 }
 
-/// Detach the injected overlay from `pid`: eject the DLL and clear the target so
-/// the sampler stops writing (sets `enabled = 0`). Idempotent.
-/// Async + blocking-pool: ejecting runs a remote `FreeLibrary` thread and waits
-/// on it — same off-main-thread rule as `overlay_attach`.
+/// Detach the injected overlay from `pid`: clear the target so the sampler stops
+/// publishing for it (`enabled = 0`). The DLL stays loaded but inert — see the
+/// module docs for why it is never unloaded from outside. Idempotent.
 #[tauri::command]
 pub async fn overlay_detach(_app: AppHandle, pid: u32) -> Result<(), String> {
     crate::commands::run_blocking_err("overlay_detach", move || overlay_detach_blocking(pid)).await
 }
 
-/// PID that currently has `corepilot_overlay.dll` resident, if any.
-///
-/// The self-updater needs this: while the DLL is mapped into a game, its file on
-/// disk cannot be replaced, so an update must eject it first (or refuse). Also
-/// drives the auto-mode re-attach guard — see [`OverlayState::injected_pid`].
-pub(crate) fn injected_pid() -> Option<u32> {
-    STATE.lock().injected_pid
-}
-
-/// Eject the overlay DLL from whatever process holds it, if any. Best-effort and
-/// idempotent; returns the PID it detached from. Used by the updater's teardown
-/// so the DLL file is unmapped before the program files are replaced.
-pub(crate) fn eject_resident() -> Option<u32> {
-    let pid = injected_pid()?;
-    if let Err(e) = overlay_detach_blocking(pid) {
-        tracing::warn!("updater: overlay eject from pid {pid} failed: {e}");
-    }
-    Some(pid)
+/// Whether `corepilot_overlay.dll` may still be mapped into some running game.
+/// Injection is never undone from outside, so this stays true for the session
+/// once anything was injected; the updater then renames the file aside (legal
+/// for a mapped image) instead of letting the installer fail on it.
+pub(crate) fn dll_maybe_mapped() -> bool {
+    INJECTED_EVER.load(Ordering::SeqCst)
 }
 
 fn overlay_detach_blocking(pid: u32) -> Result<(), String> {
-    // Clear the sampler target first so it immediately stops publishing for it.
     clear_target_if(pid);
     write_disabled();
-    let result = eject_dll(pid);
-    // Clear the injected-PID tracking for this PID regardless of the eject result.
-    // On success the module is gone; if the eject failed (e.g. the process already
-    // exited, or FreeLibrary errored) we still must not leave this PID marked as
-    // injected forever — otherwise a later attach would be wrongly skipped as
-    // idempotent and never re-inject. Clearing here lets re-attach retry cleanly.
-    {
-        let mut st = STATE.lock();
-        if st.injected_pid == Some(pid) {
-            st.injected_pid = None;
-        }
-    }
-    result
-}
-
-/// Toggle AUTO injection mode. When `enable` is true the sampler auto-injects the
-/// foreground injectable game (resident) and shows the OSD only while that game is
-/// the active window — hidden (not ejected) on alt-tab, ejected on game exit or
-/// when this is turned off. `layout_flags` sets which metric rows to draw. This is
-/// the "follow the game" mode, distinct from the manual `overlay_attach` path.
-#[tauri::command]
-pub fn overlay_set_auto(_app: AppHandle, enable: bool, layout_flags: Option<u32>) {
-    if let Some(f) = layout_flags {
-        LAYOUT_FLAGS.store(f, Ordering::Relaxed);
-        push_layout_flags();
-    }
-    let was = AUTO_MODE.swap(enable, Ordering::SeqCst);
-    if enable {
-        AUTO_LAST_FG.store(0, Ordering::Relaxed); // force a re-detect next tick
-    } else if was {
-        // Turning off: eject the resident DLL and stop publishing.
-        let injected = STATE.lock().injected_pid;
-        if let Some(pid) = injected {
-            let _ = eject_dll(pid);
-        }
-        {
-            let mut st = STATE.lock();
-            st.injected_pid = None;
-            st.target_pid = None;
-        }
-        write_disabled();
-        AUTO_LAST_FG.store(0, Ordering::Relaxed);
-    }
+    Ok(())
 }
 
 /// Push the per-theme OSD row-color palette (packed 0xRRGGBBAA, indexed by the IPC

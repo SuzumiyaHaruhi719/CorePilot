@@ -259,7 +259,7 @@ pub fn run() {
             // shared-memory writer (kept alive for the whole app lifetime so the
             // injected overlay DLL never loses the mapping) and loops at ~3 Hz,
             // publishing metrics while a game is attached and idling otherwise.
-            overlay_inject::start_sampler(app.handle().clone());
+            overlay_inject::start_sampler();
 
             // Start the backend per-game performance recorder. This MOVES the
             // perf-session recording off the main webview (which freezes when a
@@ -416,7 +416,6 @@ pub fn run() {
             overlay_inject::overlay_attach,
             overlay_inject::overlay_detach,
             overlay_inject::overlay_status,
-            overlay_inject::overlay_set_auto,
             overlay_inject::overlay_set_palette,
             perf_recorder::perf_recorder_config,
             persist::persist_get,

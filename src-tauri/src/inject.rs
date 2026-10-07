@@ -20,8 +20,10 @@
 //!      `LoadLibraryW` address is valid in the target.
 //!   5. Wait for the thread; a non-zero exit code = the `HMODULE` loaded OK.
 //!
-//! Eject mirrors it: find the overlay module's remote base via a ToolHelp module
-//! snapshot, then `CreateRemoteThread(FreeLibrary, base)`.
+//! There is deliberately NO eject. A `FreeLibrary` from outside unmaps the DLL
+//! while hudhook's Present hooks and window subclass still point into it, so the
+//! game crashes on its next frame or message. The DLL goes inert instead when
+//! CorePilot stops targeting its PID (see `overlay_inject`).
 //!
 //! Every call is best-effort and returns a `Result<_, String>` with a localised
 //! message; nothing here panics.
@@ -106,13 +108,13 @@ fn kernel32_proc(name: windows::core::PCSTR) -> Result<LPTHREAD_START_ROUTINE, S
 }
 
 /// Run a remote thread `start(arg)` in `proc` and wait for it, returning its
-/// 32-bit exit code. Used for both LoadLibrary (returns the HMODULE low bits) and
-/// FreeLibrary (returns BOOL).
+/// 32-bit exit code (LoadLibrary: the HMODULE low bits). `Ok(None)` = the wait
+/// timed out and the thread may STILL RUN later, still reading `arg`.
 fn run_remote_thread(
     proc: &ProcHandle,
     start: LPTHREAD_START_ROUTINE,
     arg: *const c_void,
-) -> Result<u32, String> {
+) -> Result<Option<u32>, String> {
     unsafe {
         let thread = CreateRemoteThread(proc.0, None, 0, start, Some(arg), 0, None)
             .map_err(|e| format!("无法在目标进程创建远程线程: {e}"))?;
@@ -121,11 +123,11 @@ fn run_remote_thread(
         // Wait (bounded) for the loader to finish.
         let wait = WaitForSingleObject(thread.0, REMOTE_THREAD_TIMEOUT_MS);
         if wait != WAIT_OBJECT_0 {
-            return Err("远程线程超时（目标进程无响应）".to_string());
+            return Ok(None);
         }
         let mut code: u32 = 0;
         GetExitCodeThread(thread.0, &mut code).map_err(|e| e.to_string())?;
-        Ok(code)
+        Ok(Some(code))
     }
 }
 
@@ -193,7 +195,13 @@ pub fn inject(pid: u32, dll_path: &Path) -> Result<(), String> {
 
         // CreateRemoteThread(LoadLibraryW, remote_path).
         let load_library = kernel32_proc(s!("LoadLibraryW"))?;
-        let code = run_remote_thread(&proc, load_library, remote)?;
+        let Some(code) = run_remote_thread(&proc, load_library, remote)? else {
+            // The game is suspended / holding its loader lock. Freeing the path
+            // now would let the late-running thread read freed memory, so leak
+            // the few hundred bytes instead.
+            std::mem::forget(remote_guard);
+            return Err("远程线程超时（目标进程无响应）".to_string());
+        };
 
         // The remote buffer is no longer needed once LoadLibrary has copied the
         // path; drop the guard explicitly to free it now.
@@ -225,8 +233,7 @@ impl Drop for RemoteAlloc {
 
 /// Find the remote base address of a loaded module named `dll_name`
 /// (case-insensitive) in `pid`, via a ToolHelp module snapshot. `None` when the
-/// module isn't loaded (or the snapshot fails). Mirrors the enumeration in
-/// `overlay.rs` but returns the module base needed for `FreeLibrary`.
+/// module isn't loaded (or the snapshot fails). Used by the idempotency guard.
 fn find_remote_module(pid: u32, dll_name: &str) -> Option<HMODULE> {
     let target = dll_name.to_lowercase();
     unsafe {
@@ -256,27 +263,4 @@ fn find_remote_module(pid: u32, dll_name: &str) -> Option<HMODULE> {
         }
     }
     None
-}
-
-/// Eject a previously-injected module (`dll_name`, e.g. `corepilot_overlay.dll`)
-/// from `pid` via `CreateRemoteThread(FreeLibrary, base)`. Returns `Ok(())` when
-/// the module is gone — including the "not loaded / process exited" cases, which
-/// are treated as already-ejected rather than errors.
-pub fn eject(pid: u32, dll_name: &str) -> Result<(), String> {
-    // Process gone → nothing to eject.
-    let Ok(proc) = open_for_inject(pid) else {
-        return Ok(());
-    };
-    // Module not present → already ejected.
-    let Some(module) = find_remote_module(pid, dll_name) else {
-        return Ok(());
-    };
-    let free_library = kernel32_proc(s!("FreeLibrary"))?;
-    // FreeLibrary(HMODULE) — pass the remote base as the thread arg.
-    let code = run_remote_thread(&proc, free_library, module.0 as *const c_void)?;
-    // FreeLibrary returns non-zero (BOOL TRUE) on success.
-    if code == 0 {
-        return Err("FreeLibrary 在目标进程中失败".to_string());
-    }
-    Ok(())
 }

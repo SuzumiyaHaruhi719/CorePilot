@@ -85,7 +85,7 @@ const CLASSIFICATION_CACHE_TTL: Duration = Duration::from_secs(10);
 
 /// Cache module walks because status polls run every 1.5 seconds and a ToolHelp
 /// walk can stall the UI; the TTL limits stale data when a PID is recycled.
-static CLASSIFICATION_CACHE: Lazy<Mutex<HashMap<u32, (Instant, OverlayTarget)>>> =
+static CLASSIFICATION_CACHE: Lazy<Mutex<HashMap<u32, (Instant, ModuleFacts)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 const API_MARKERS: &[(&str, GraphicsApi)] = &[
@@ -175,45 +175,93 @@ pub fn is_anticheat_protected(pid: u32) -> bool {
     protected
 }
 
-/// Whether a process is a safe, hookable overlay target right now: a known
-/// graphics API and no anti-cheat. Surfaced to the UI so the user is told *why*
-/// the overlay can't attach to a given game.
+/// True when `pid` runs natively (64-bit on 64-bit Windows). The injector starts
+/// its remote thread at OUR `LoadLibraryW` and loads a 64-bit DLL, neither of
+/// which exists in a WoW64 process — so anything else is refused. Fails closed:
+/// a process we can't query is treated as not native.
+pub fn is_native(pid: u32) -> bool {
+    use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN;
+    use windows::Win32::System::Threading::{
+        IsWow64Process2, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let handle = Snapshot(handle); // same RAII close
+        let mut process_machine = IMAGE_FILE_MACHINE_UNKNOWN;
+        IsWow64Process2(handle.0, &mut process_machine, None).is_ok()
+            && process_machine == IMAGE_FILE_MACHINE_UNKNOWN
+    }
+}
+
+/// Whether a process is a safe, hookable overlay target right now: the
+/// foreground GAME, rendering with a hookable API, native bitness, and no
+/// anti-cheat. Surfaced to the UI so the user is told *why* the overlay can't
+/// attach to a given app.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlayTarget {
     pub pid: u32,
     pub api: GraphicsApi,
     pub anticheat: bool,
-    /// True iff `api.is_hookable()` and `!anticheat`.
+    /// The foreground game detector (`fps::foreground_info_now`) says this PID
+    /// is a game. Without it every D3D-using app — explorer, a browser,
+    /// CorePilot itself — looked injectable.
+    pub game: bool,
+    /// Native 64-bit process (see [`is_native`]).
+    pub native: bool,
+    /// True iff `game && native && api.is_hookable() && !anticheat`.
     pub injectable: bool,
 }
 
-/// Classify a target process for the overlay (does not inject).
+/// The module-walk part of a classification: what's cached.
+#[derive(Clone, Copy)]
+struct ModuleFacts {
+    api: GraphicsApi,
+    anticheat: bool,
+    native: bool,
+}
+
+/// Classify a target process for the overlay (does not inject). The expensive
+/// module walk is cached per PID for [`CLASSIFICATION_CACHE_TTL`]; the game
+/// verdict is re-read every call because it flips as a game starts presenting.
 pub fn classify_target(pid: u32) -> OverlayTarget {
     if pid == 0 {
         return OverlayTarget {
             pid,
             api: GraphicsApi::Unknown,
             anticheat: false,
+            game: false,
+            native: false,
             injectable: false,
         };
     }
     let now = Instant::now();
-    if let Some((at, target)) = CLASSIFICATION_CACHE.lock().get(&pid) {
-        if now.duration_since(*at) < CLASSIFICATION_CACHE_TTL {
-            return target.clone();
-        }
-    }
-    let api = detect_graphics_api(pid);
-    let anticheat = is_anticheat_protected(pid);
-    let target = OverlayTarget {
-        pid,
-        api,
-        anticheat,
-        injectable: api.is_hookable() && !anticheat,
-    };
-    CLASSIFICATION_CACHE
+    let cached = CLASSIFICATION_CACHE
         .lock()
-        .insert(pid, (now, target.clone()));
-    target
+        .get(&pid)
+        .filter(|(at, _)| now.duration_since(*at) < CLASSIFICATION_CACHE_TTL)
+        .map(|(_, facts)| *facts);
+    let facts = cached.unwrap_or_else(|| {
+        let facts = ModuleFacts {
+            api: detect_graphics_api(pid),
+            anticheat: is_anticheat_protected(pid),
+            native: is_native(pid),
+        };
+        let mut cache = CLASSIFICATION_CACHE.lock();
+        cache.retain(|_, (at, _)| now.duration_since(*at) < CLASSIFICATION_CACHE_TTL);
+        cache.insert(pid, (now, facts));
+        facts
+    });
+    let fg = crate::fps::foreground_info_now();
+    let game = pid != std::process::id() && fg.pid == pid && fg.is_game;
+    OverlayTarget {
+        pid,
+        api: facts.api,
+        anticheat: facts.anticheat,
+        game,
+        native: facts.native,
+        injectable: game && facts.native && facts.api.is_hookable() && !facts.anticheat,
+    }
 }
