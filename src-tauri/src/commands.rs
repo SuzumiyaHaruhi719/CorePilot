@@ -285,21 +285,29 @@ pub fn end_task(pid: u32) -> CoreResult<()> {
 }
 
 /// Restart a process: kill it, wait for it to exit, then relaunch the same
-/// executable image. This is what the task-manager view offers for SYSTEM /
-/// service-account processes instead of a bare "end task" (mirrors Windows Task
-/// Manager's explorer.exe "重新启动"). The critical-PID guard still refuses the
-/// OS-critical set (csrss/lsass/…) outright. Async + blocking-pool: waits up to
-/// ~3 s for the old process to exit before respawning.
+/// executable image with its original arguments. This is what the task-manager
+/// view offers for SYSTEM / service-account processes instead of a bare "end
+/// task" (mirrors Windows Task Manager's explorer.exe "重新启动"). The
+/// critical-PID guard refuses the OS-critical set (csrss/lsass/… and anything
+/// the kernel flags critical) outright. Async + blocking-pool: waits up to ~3 s
+/// for the old process to exit before respawning.
 ///
-/// NOTE: this is an image relaunch, not an SCM service restart — right for
-/// shell-class processes (explorer.exe etc.); real services are managed from
-/// the services view.
+/// Service hosts are refused: an image relaunch can't bring their services back
+/// (a bare `svchost.exe` with no `-k` exits immediately), so the user is pointed
+/// at the services view, which restarts through the SCM.
 #[tauri::command]
 pub async fn restart_task(pid: u32) -> CoreResult<()> {
     run_blocking(move || {
         process::guard_critical_pid(pid)?;
+        if crate::winsvc::list_services()?.iter().any(|s| s.pid == pid) {
+            return Err(CoreError::Msg(
+                "该进程承载系统服务，无法直接重启；请在「服务」页重启对应服务".into(),
+            ));
+        }
         let path = crate::fps::process_image_path(pid)
             .ok_or_else(|| CoreError::Msg("无法解析进程路径，无法重启".into()))?;
+        // Capture the command line BEFORE the kill — it's gone with the process.
+        let args = process::command_line_args(pid);
         process::kill(pid)?;
         // Wait for the old instance to release single-instance locks (<=3 s).
         for _ in 0..30 {
@@ -312,6 +320,7 @@ pub async fn restart_task(pid: u32) -> CoreResult<()> {
             .parent()
             .map(|p| p.to_path_buf());
         let mut cmd = std::process::Command::new(&path);
+        cmd.args(args);
         if let Some(dir) = dir {
             cmd.current_dir(dir);
         }

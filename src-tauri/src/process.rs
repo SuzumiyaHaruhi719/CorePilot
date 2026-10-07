@@ -29,7 +29,8 @@ use windows::Win32::System::Performance::{
 };
 use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN;
 use windows::Win32::System::Threading::{
-    GetProcessAffinityMask, GetProcessHandleCount, IsWow64Process2, OpenProcess, OpenProcessToken,
+    GetProcessAffinityMask, GetProcessHandleCount, IsProcessCritical, IsWow64Process2, OpenProcess,
+    OpenProcessToken,
     QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_SYNCHRONIZE,
     PROCESS_TERMINATE,
@@ -174,7 +175,29 @@ pub fn guard_critical_pid(pid: u32) -> CoreResult<()> {
             return Err(CoreError::Msg(format!("拒绝操作关键系统进程: {name}")));
         }
     }
+    // The name list misses processes Windows marks critical at runtime (e.g. the
+    // svchost hosting DcomLaunch): terminating one is a CRITICAL_PROCESS_DIED
+    // bugcheck. Ask the kernel instead of guessing from the name.
+    if is_process_critical(pid) {
+        return Err(CoreError::Msg(format!(
+            "拒绝操作关键系统进程 (PID {pid}，终止会导致蓝屏)"
+        )));
+    }
     Ok(())
+}
+
+/// `IsProcessCritical` for `pid`. `false` when the process can't be opened —
+/// then the mutating call that follows fails on its own access check anyway.
+fn is_process_critical(pid: u32) -> bool {
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false.into(), pid) else {
+            return false;
+        };
+        let mut critical = windows::core::BOOL(0);
+        let ok = IsProcessCritical(handle, &mut critical).is_ok();
+        let _ = CloseHandle(handle);
+        ok && critical.as_bool()
+    }
 }
 
 /// Persistent PDH query for per-process GPU utilization.
@@ -807,6 +830,21 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
         .retain(|pid, _| live_pids.contains(pid));
 
     out
+}
+
+/// Original arguments of `pid` (argv without the image), for an image relaunch
+/// that behaves like the original. Empty when the command line can't be read.
+pub fn command_line_args(pid: u32) -> Vec<std::ffi::OsString> {
+    let spid = sysinfo::Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[spid]),
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    sys.process(spid)
+        .map(|p| p.cmd().iter().skip(1).cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Terminate a process (End task). Refuses critical system processes.
