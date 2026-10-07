@@ -13,8 +13,8 @@
 // license-free.
 //
 // NOTE: every method here only acts when explicitly called (from an `smu …`
-// stdin command the user opted into). Nothing here runs on its own. All writes
-// are clamped as a defense layer in addition to the Rust/UI clamps.
+// stdin command the user opted into). Nothing here runs on its own. Writes are
+// refused on CPUs outside CpuGate and for out-of-range values (SmuProtocol.cs).
 
 using System;
 using System.IO;
@@ -169,46 +169,61 @@ public sealed class RyzenSmuHost : IDisposable
         }
     }
 
-    // ---- high-level tuning ops (each clamps as a defense layer) --------------
+    // ---- high-level tuning ops --------------------------------------------------
+    // Each refuses (never clamps) on an unsupported CPU or an out-of-range value:
+    // a clamped write still changes the hardware, just not to what was asked.
 
-    /// <summary>Apply a per-core Curve Optimizer margin (clamped to ±50).</summary>
+    private static SmuResult? Refuse()
+        => CpuGate.Allowed ? null : SmuResult.Fail($"unsupported: {CpuGate.UnsupportedReason}");
+
+    /// <summary>Apply a per-core Curve Optimizer margin (±50).</summary>
     public SmuResult SetCurveOptimizer(int ccd, int coreInCcd, int margin)
     {
-        int m = Math.Clamp(margin, SmuEncoding.CoMarginMin, SmuEncoding.CoMarginMax);
-        uint mask = SmuEncoding.CoreMask(ccd, 0, coreInCcd); // Zen5: ccx = 0
-        uint[] args = { SmuEncoding.CoMarginArg(mask, m) };
+        if (Refuse() is { } no) return no;
+        if (margin < SmuEncoding.CoMarginMin || margin > SmuEncoding.CoMarginMax)
+            return SmuResult.Fail($"out of range: CO margin must be {SmuEncoding.CoMarginMin}..{SmuEncoding.CoMarginMax}");
+        if (ccd is < 0 or > 15 || coreInCcd is < 0 or > 15)
+            return SmuResult.Fail("out of range: core address");
+        uint mask = SmuEncoding.CoreMask(ccd, 0, coreInCcd); // ccx = 0 on these dies
+        uint[] args = { SmuEncoding.CoMarginArg(mask, margin) };
         int hr = SendRsmu(Zen5.MsgSetCoMarginPerCore, args);
         return hr == 0
-            ? SmuResult.Good($"CO ccd{ccd} core{coreInCcd} = {m}")
+            ? SmuResult.Good($"CO ccd{ccd} core{coreInCcd} = {margin}")
             : SmuResult.Fail($"CO write failed (hr=0x{hr:X8})");
     }
 
-    /// <summary>Apply an all-core Curve Optimizer margin (clamped to ±50).</summary>
+    /// <summary>Apply an all-core Curve Optimizer margin (±50).</summary>
     public SmuResult SetCurveOptimizerAll(int margin)
     {
-        int m = Math.Clamp(margin, SmuEncoding.CoMarginMin, SmuEncoding.CoMarginMax);
-        uint[] args = { (uint)(m & 0xFFFF) };
+        if (Refuse() is { } no) return no;
+        if (margin < SmuEncoding.CoMarginMin || margin > SmuEncoding.CoMarginMax)
+            return SmuResult.Fail($"out of range: CO margin must be {SmuEncoding.CoMarginMin}..{SmuEncoding.CoMarginMax}");
+        uint[] args = { (uint)(margin & 0xFFFF) };
         int hr = SendRsmu(Zen5.MsgSetCoMarginAllCores, args);
-        return hr == 0 ? SmuResult.Good($"CO all = {m}") : SmuResult.Fail($"CO-all failed (hr=0x{hr:X8})");
+        return hr == 0 ? SmuResult.Good($"CO all = {margin}") : SmuResult.Fail($"CO-all failed (hr=0x{hr:X8})");
     }
 
-    /// <summary>Set a PBO power/current limit. <paramref name="units"/> is W (PPT) or A
-    /// (TDC/EDC); the SMU takes milli-units, so we pass units×1000.</summary>
-    public SmuResult SetLimit(uint message, double units, string label, double maxUnits)
+    /// <summary>Set a PBO power/current limit. <paramref name="units"/> is W (PPT) or
+    /// A (TDC/EDC); the SMU takes milli-units, so we pass units×1000.</summary>
+    public SmuResult SetLimit(uint message, double units, string label, double minUnits)
     {
-        double clamped = Math.Clamp(units, 0, maxUnits);
-        uint[] args = { (uint)Math.Round(clamped * 1000.0) };
+        if (Refuse() is { } no) return no;
+        if (!double.IsFinite(units) || units < minUnits || units > SmuEncoding.LimitMax)
+            return SmuResult.Fail($"out of range: {label} must be {minUnits:0}..{SmuEncoding.LimitMax:0}");
+        uint[] args = { (uint)Math.Round(units * 1000.0) };
         int hr = SendRsmu(message, args);
-        return hr == 0 ? SmuResult.Good($"{label} = {clamped:0}") : SmuResult.Fail($"{label} failed (hr=0x{hr:X8})");
+        return hr == 0 ? SmuResult.Good($"{label} = {units:0}") : SmuResult.Fail($"{label} failed (hr=0x{hr:X8})");
     }
 
     /// <summary>Set the PBO scalar (1×–10×); the SMU takes scalar×100.</summary>
     public SmuResult SetPboScalar(int scalar)
     {
-        int s = Math.Clamp(scalar, 1, 10);
-        uint[] args = { (uint)(s * 100) };
+        if (Refuse() is { } no) return no;
+        if (scalar < SmuEncoding.ScalarMin || scalar > SmuEncoding.ScalarMax)
+            return SmuResult.Fail($"out of range: scalar must be {SmuEncoding.ScalarMin}..{SmuEncoding.ScalarMax}");
+        uint[] args = { (uint)(scalar * 100) };
         int hr = SendRsmu(Zen5.MsgSetPboScalar, args);
-        return hr == 0 ? SmuResult.Good($"scalar = {s}x") : SmuResult.Fail($"scalar failed (hr=0x{hr:X8})");
+        return hr == 0 ? SmuResult.Good($"scalar = {scalar}x") : SmuResult.Fail($"scalar failed (hr=0x{hr:X8})");
     }
 
     // ---- low-level PawnIO IOCTL ---------------------------------------------

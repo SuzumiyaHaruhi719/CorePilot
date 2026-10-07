@@ -1,5 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- The shipped binary is src-tauri/binaries/sensord-x86_64-pc-windows-msvc.exe:
+       dotnet publish -c Release -r win-x64 --self-contained false
+         -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o <dir>
+       then copy <dir>/sensord.exe over it (framework-dependent: needs .NET 8). -->
+
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
