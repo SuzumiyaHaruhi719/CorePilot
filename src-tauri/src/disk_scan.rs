@@ -438,11 +438,19 @@ impl DiskTree {
                 child = self.nodes[child as usize].next_sibling;
             }
         }
-        all.sort_unstable_by(|&a, &b| {
-            self.nodes[b as usize]
+        // Largest first. Only `want` rows are returned, so select them in O(n)
+        // and sort just those: a full sort of every node under the focus, ~3×
+        // a second, took seconds on million-node scans.
+        let by_size_desc = |a: &u32, b: &u32| {
+            self.nodes[*b as usize]
                 .alloc_size
-                .cmp(&self.nodes[a as usize].alloc_size)
-        });
+                .cmp(&self.nodes[*a as usize].alloc_size)
+        };
+        if all.len() > want {
+            all.select_nth_unstable_by(want - 1, by_size_desc);
+            all.truncate(want);
+        }
+        all.sort_unstable_by(by_size_desc);
         all.into_iter()
             .take(want)
             .map(|id| {
@@ -863,18 +871,16 @@ impl Drop for WalkerPermit<'_> {
 mod win {
     use super::*;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE,
-    };
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW,
         FindNextFileW, GetDiskFreeSpaceExW, GetDiskFreeSpaceW, GetDriveTypeW,
         GetFileInformationByHandle, GetLogicalDrives, GetVolumeInformationW,
         GetVolumeNameForVolumeMountPointW, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
         FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FIND_FIRST_EX_LARGE_FETCH, OPEN_EXISTING,
-        WIN32_FIND_DATAW,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FIND_FIRST_EX_LARGE_FETCH,
+        OPEN_EXISTING, WIN32_FIND_DATAW,
     };
 
     // Win32 DRIVE_* return codes from GetDriveTypeW (winbase.h). The windows crate
@@ -1144,12 +1150,15 @@ mod win {
     /// Returns None on any failure (denied / in-use) — the caller degrades.
     fn handle_info(wpath: &[u16]) -> Option<BY_HANDLE_FILE_INFORMATION> {
         // SAFETY: `wpath` is a NUL-terminated wide path; flags request metadata
-        // only (no content read), open-reparse so we stat the link itself, and
-        // backup-semantics so directories can be opened.
+        // only, open-reparse so we stat the link itself, and backup-semantics so
+        // directories can be opened. FILE_READ_ATTRIBUTES is all
+        // GetFileInformationByHandle needs: GENERIC_READ (a data open) made
+        // on-access antivirus scan every file of the walk and hit sharing
+        // violations on files opened for exclusive read.
         let h: HANDLE = match unsafe {
             CreateFileW(
                 PCWSTR(wpath.as_ptr()),
-                GENERIC_READ.0,
+                FILE_READ_ATTRIBUTES.0,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 None,
                 OPEN_EXISTING,
@@ -1198,6 +1207,9 @@ mod win {
         handle: &ScanHandle,
         arena: &Mutex<Arena>,
     ) -> Result<Vec<ChildResult>, EnumError> {
+        let links_possible = ["NTFS", "ReFS"]
+            .iter()
+            .any(|fs| handle.file_system.eq_ignore_ascii_case(fs));
         // Build the search pattern: "<dir>\*".
         let mut pattern: Vec<u16> = dir_wpath.to_vec();
         // dir_wpath is NUL-terminated; drop the NUL, append "\*\0".
@@ -1293,7 +1305,8 @@ mod win {
                 } else {
                     round_to_cluster(logical, cluster)
                 };
-                if !is_dir {
+                // Only NTFS / ReFS have hardlinks; on FAT/exFAT the open is pure cost.
+                if !is_dir && links_possible {
                     // Cheap probe: open for BY_HANDLE info only when the file might
                     // be hardlinked. We can't know link count without the handle,
                     // so only pay it when dedup matters by checking after open.
@@ -1912,6 +1925,46 @@ mod win {
         }
         {
             emit_progress(&app, &handle, handle.build_progress());
+        }
+    }
+
+    #[cfg(test)]
+    mod walk_tests {
+        use super::*;
+
+        /// Real NTFS walk of a temp dir holding a file and a hardlink to it:
+        /// the shared bytes count once and both entries carry FLAG_HARDLINK —
+        /// with the attribute-only (FILE_READ_ATTRIBUTES) probe.
+        #[test]
+        fn hardlinked_bytes_count_once() {
+            let dir = std::env::temp_dir().join(format!("cp-walk-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("a.bin"), vec![7u8; 40_000]).unwrap();
+            std::fs::hard_link(dir.join("a.bin"), dir.join("b.bin")).unwrap();
+            std::fs::write(dir.join("c.bin"), vec![1u8; 1_000]).unwrap();
+
+            let root = dir.to_string_lossy().to_string();
+            let fs = volume_file_system(&root[..3]); // "C:\\" — the volume root
+            assert!(
+                fs.eq_ignore_ascii_case("NTFS"),
+                "temp dir must be on NTFS, got {fs}"
+            );
+            let handle = ScanHandle::new("test".into(), root.clone(), root.clone(), fs);
+            let arena = Mutex::new(Arena {
+                nodes: Vec::new(),
+                interner: Interner::new(),
+                seen_links: std::collections::HashSet::new(),
+            });
+            let kids = enumerate_dir(&ext_root_w(&root), 4096, &handle, &arena)
+                .unwrap_or_else(|_| panic!("enumerate failed"));
+            let get = |n: &str| kids.iter().find(|k| k.name == n).unwrap();
+            let (a, b, c) = (get("a.bin"), get("b.bin"), get("c.bin"));
+            assert_eq!(a.logical + b.logical, 40_000, "linked bytes counted once");
+            assert!(a.flags & FLAG_HARDLINK != 0 && b.flags & FLAG_HARDLINK != 0);
+            assert_eq!(c.logical, 1_000);
+            assert_eq!(c.flags & FLAG_HARDLINK, 0);
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }
