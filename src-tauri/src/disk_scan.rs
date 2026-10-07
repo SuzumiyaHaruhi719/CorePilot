@@ -1881,16 +1881,28 @@ mod win {
                 let handle = &handle;
                 std::thread::Builder::new()
                     .name(format!("corepilot-scan-{}-pub", handle.scan_id))
-                    .spawn_scoped(s, move || loop {
-                        std::thread::sleep(PUBLISH_THROTTLE);
-                        let finished = handle.cancel.load(Ordering::Relaxed) || queue.lock().done;
-                        // Publish (even on the final iteration) so the last
-                        // mid-scan view reflects the latest growth; the post-scope
-                        // publish below produces the authoritative final tree.
-                        let tree = build_snapshot(arena);
-                        handle.publish(Arc::new(tree));
-                        if finished {
-                            return;
+                    .spawn_scoped(s, move || {
+                        let mut wait = PUBLISH_THROTTLE;
+                        loop {
+                            std::thread::sleep(wait);
+                            let finished =
+                                handle.cancel.load(Ordering::Relaxed) || queue.lock().done;
+                            // Publish (even on the final iteration) so the last
+                            // mid-scan view reflects the latest growth; the
+                            // post-scope publish below produces the authoritative
+                            // final tree.
+                            let started = std::time::Instant::now();
+                            let tree = build_snapshot(arena);
+                            handle.publish(Arc::new(tree));
+                            // The snapshot copies the whole arena under its lock;
+                            // on huge walks that is hundreds of ms, and repeating
+                            // it every 200 ms stalled the workers' merges. Space
+                            // publishes to ≥4× their own cost (small scans keep
+                            // the 200 ms cadence).
+                            wait = PUBLISH_THROTTLE.max(started.elapsed() * 4);
+                            if finished {
+                                return;
+                            }
                         }
                     })
                     .ok();
