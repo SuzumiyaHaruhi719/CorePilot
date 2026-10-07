@@ -331,7 +331,7 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
       {step === "running" && (
         <div className="space-y-3">
           <div className="flex items-center gap-2 text-[12.5px] text-ink">
-            <Loader2 size={14} className="animate-spin text-accent-bright" />
+            <Loader2 size={14} className="animate-spin text-accent" />
             <span className="font-semibold">{PHASE_ZH[progress?.phase ?? "precheck"] ?? progress?.phase}</span>
             {progress && progress.stepTotal > 0 && (
               <span className="nums text-dim">
@@ -393,7 +393,7 @@ export function AutoTuneWizard({ open, onClose, channels, labels, temps }: AutoT
       {step === "result" && result && (
         <div className="space-y-3">
           <div className="flex items-center gap-2 text-[13px] font-semibold text-ink">
-            <Check size={15} className="text-accent-bright" /> {tf("调优完成,曲线已应用", "Tune complete — curves applied")}
+            <Check size={15} className="text-accent" /> {tf("调优完成,曲线已应用", "Tune complete — curves applied")}
           </div>
           <div className="grid grid-cols-2 gap-2 text-[11.5px]">
             <Readout label={tf("满载实测", "Validated full-load")} value={result.validation.tV} unit="°C" />

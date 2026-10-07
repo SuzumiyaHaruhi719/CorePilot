@@ -175,7 +175,7 @@ export function DetailPanel({ scanId, view, selected, metric, skipped }: DetailP
 
       {/* "Largest items here" list (top-N of the focus, from disk_top_items). */}
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="flex items-center gap-1.5 px-4 pb-1.5 pt-3 text-[11px] font-semibold uppercase tracking-wider text-dim">
+        <div className="flex items-center gap-1.5 px-4 pb-1.5 pt-3 text-[12px] font-semibold text-muted">
           <ListTree size={13} />
           {tf("此处最大项目", "Largest items here")}
         </div>

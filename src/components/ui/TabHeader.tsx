@@ -1,10 +1,7 @@
-import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { useT } from "../../lib/i18n";
 
 interface TabHeaderProps {
-  /** @deprecated Ignored — the sidebar already shows the page icon. Remove at call sites. */
-  icon?: LucideIcon;
   title: string;
   subtitle?: string;
   actions?: ReactNode;

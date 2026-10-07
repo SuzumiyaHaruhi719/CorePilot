@@ -131,7 +131,7 @@ export function GroupRail({ processes, fullMask, optimizeOnStartup, onToggleOpti
                       <span className="flex min-w-0 items-center gap-2.5">
                         <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: color }} />
                         <span className="truncate text-[13px] font-medium text-ink">{group.name}</span>
-                        {group.builtin && <Badge className="h-[18px] px-1 text-[10.5px]">{t("内置")}</Badge>}
+                        {group.builtin && <Badge className="h-[18px] px-1">{t("内置")}</Badge>}
                       </span>
                       <span
                         className="nums shrink-0 text-[12px] text-dim"

@@ -27,7 +27,7 @@ function MiniGraph({ id, value, hist, color }: { id: number; value: number; hist
   return (
     <div className="overflow-hidden rounded-md bg-surface2/50 shadow-[inset_0_0_0_1px_var(--color-line)]">
       <div className="flex items-baseline justify-between px-1.5 pt-1">
-        <span className="nums text-[10px] text-dim">{id}</span>
+        <span className="nums text-[10.5px] text-dim">{id}</span>
         <span className="nums text-[11px] text-ink">{value.toFixed(0)}</span>
       </div>
       <Sparkline data={hist} max={100} color={color} height={28} />

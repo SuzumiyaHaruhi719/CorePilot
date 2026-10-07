@@ -670,7 +670,7 @@ export function OsdConfig() {
                     >
                       <MonitorPlay
                         size={13}
-                        className={isSel ? "text-accent-bright" : "text-dim"}
+                        className={isSel ? "text-accent" : "text-dim"}
                       />
                       <span className={cn("flex-1 truncate", isSel ? "text-ink" : "text-muted")}>
                         {t.name}
@@ -1711,11 +1711,11 @@ const TaskbarMetricsPicker = memo(function TaskbarMetricsPicker({
                   >
                     <span
                       className={cn(
-                        "grid h-4 w-4 shrink-0 place-items-center rounded border transition-colors",
-                        on ? "border-accent bg-accent" : "border-line-strong",
+                        "grid h-4 w-4 shrink-0 place-items-center rounded-[4px] transition-colors",
+                        on ? "bg-accent" : "shadow-[inset_0_0_0_1.5px_var(--color-dim)]",
                       )}
                     >
-                      {on && <span className="h-2 w-2 rounded-[2px] bg-white" />}
+                      {on && <span className="h-2 w-2 rounded-[2px] bg-on-accent" />}
                     </span>
                     <span className="flex-1">
                       <span className="text-dim">{m.tag} </span>

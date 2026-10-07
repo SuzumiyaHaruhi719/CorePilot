@@ -34,7 +34,7 @@ export function RangeInput({ value, min, max, step = 1, unit, disabled, label, o
         style={{ "--pct": `${pct}%` } as CSSProperties}
       />
       {ticks && (
-        <div className="nums flex justify-between text-[10.5px] text-dim">
+        <div className="nums flex justify-between text-[11px] text-dim">
           <span>
             {min}
             {unit}

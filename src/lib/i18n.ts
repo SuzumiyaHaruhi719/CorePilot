@@ -458,6 +458,33 @@ const EN: Record<string, string> = {
   "启用": "Enabled", "关闭": "Off", "开启": "On", "可逆": "Reversible",
   "32位": "32-bit", "64位": "64-bit", "驱动版本": "Driver version", "模块能力": "Module capabilities",
   "未知错误": "Unknown error", "操作失败": "Operation failed", "未运行": "Not running", "显示": "Show",
+
+  // Instrument redesign (2026-10) — new and re-worded UI copy
+  "CPU 拓扑": "CPU topology",
+  "核心映射": "Core map",
+  "平均占用": "Avg load",
+  "平均温度": "Avg temp",
+  "最高温度": "Max temp",
+  "平均功耗": "Avg power",
+  "平均频率": "Avg clock",
+  "物理内存": "Physical memory",
+  "负载": "Load",
+  "单项操作": "Individual actions",
+  "按需单独执行，所有操作均安全可逆": "Run one at a time — every action is safe and reversible",
+  "开启一项后拖动调整，点「应用」写入显卡。": "Enable an item, adjust it, then Apply to write it to the card.",
+  "提高可获得更持久的 Boost": "Higher limits sustain boost longer",
+  "Afterburner 式 +/- MHz，提升 Boost 上限": "Afterburner-style +/- MHz — raises the boost ceiling",
+  "+/- MHz，小幅递增测试稳定性": "+/- MHz — step up gradually and test stability",
+  "达到后自动降频维持，越低越凉、性能略降": "Clocks down to hold it — lower is cooler, slightly slower",
+  "自动交由显卡固件控制；手动固定转速": "Auto hands control to the card's firmware; manual pins a speed",
+  "还没有保存的配置。调好参数后点「另存为」，即可一键随时切换；开启「启动时自动应用」后，CorePilot 启动会自动套用所选配置。": "No saved profiles yet. Tune, then Save as to switch with one click; with Apply on startup on, CorePilot applies the selected profile at launch.",
+  "深色或浅色界面": "Dark or light interface",
+  "活动元素的柔和光晕": "Soft glow on active elements",
+  "纯黑中性表面 + 暖橙强调，适合长时间使用。": "Neutral near-black surfaces + warm orange signal — easy for long sessions.",
+  "赛博朋克 2077 黑·黄·蓝，暗夜街头。": "Cyberpunk 2077 black · yellow · blue — neon-noir streets.",
+  "高对比度浅色，淡蓝强调，简洁清爽。": "High-contrast light with a blue signal — clean and crisp.",
+  "智能调优:允许后台负载": "Smart Tune: allow background load",
+  "风扇智能调优默认要求系统空闲(后台占用会污染怠速基线)。开启后即使有后台负载也可开始调优 — 结果会标注实测后台占用并提示精度可能下降;91°C 失控保护与满载验证不受影响。常驻监控/挂机软件挡住调优时用这个。": "Smart Tune normally needs an idle system (background load skews the idle baseline). With this on it starts anyway — results note the measured background load and possible accuracy loss; the 91°C runaway guard and full-load validation still apply. Use it when always-on monitoring tools block tuning.",
 };
 
 /** Non-reactive translate (for use outside React / inside the DOM walker). */

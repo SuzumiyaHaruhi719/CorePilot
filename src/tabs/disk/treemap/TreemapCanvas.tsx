@@ -800,7 +800,7 @@ export function TreemapCanvas({
       {/* Persistent live-growth indicator (spec §3.2) — a static pill (no keyframe
           spin → no GPU/DPC churn) that makes the streaming layout clearly in-progress. */}
       {scanning && (
-        <div className="glass pointer-events-none absolute right-3 top-3 z-20 flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-[10.5px] font-medium text-muted shadow-sm">
+        <div className="glass pointer-events-none absolute right-3 top-3 z-20 flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-[11.5px] font-medium text-muted shadow-sm">
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent" />
           {tf("正在扫描…", "Scanning…")}
         </div>
@@ -874,7 +874,7 @@ function TreemapTooltip({ tf, rect, node, metric, rootSize, cx, cy, boxW, boxH }
           <div className="mb-0.5 truncate font-semibold text-ink">
             {node ? displayName(node, tf) : "—"}
           </div>
-          {node?.path && <div className="mb-1 truncate text-[10.5px] text-dim">{node.path}</div>}
+          {node?.path && <div className="mb-1 truncate text-[11.5px] text-dim">{node.path}</div>}
         </>
       )}
       <div className="flex items-center justify-between text-muted">
@@ -893,7 +893,7 @@ function TreemapTooltip({ tf, rect, node, metric, rootSize, cx, cy, boxW, boxH }
           </span>
         </div>
       )}
-      {denied && <div className="mt-0.5 text-[10.5px] text-warn">{tf("无访问权限", "Access denied")}</div>}
+      {denied && <div className="mt-0.5 text-[11.5px] text-warn">{tf("无访问权限", "Access denied")}</div>}
     </div>
   );
 }
