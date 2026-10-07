@@ -550,10 +550,17 @@ struct Readings {
 }
 
 impl Readings {
-    fn read() -> Readings {
+    /// `want_gpu`: a `gpu.*` metric is configured. Reading the NVML snapshot
+    /// stamps demand, which keeps the NVML worker running its full ~17-call
+    /// snapshot every second — for values the plate never draws otherwise.
+    fn read(want_gpu: bool) -> Readings {
         let metrics = crate::sampler::metrics_snapshot();
         let sensors = crate::sampler::sensors_snapshot();
-        let gpu = crate::gpu::gpu_oc_info_snapshot();
+        let gpu = if want_gpu {
+            crate::gpu::gpu_oc_info_snapshot()
+        } else {
+            std::sync::Arc::new(crate::gpu::GpuOcInfo::default())
+        };
 
         let mem_pct = if metrics.mem_total > 0 {
             Some(metrics.mem_used as f64 / metrics.mem_total as f64 * 100.0)
@@ -1169,7 +1176,7 @@ unsafe fn tick() {
         // themed category label, then that category's values), measured with the
         // cached font in a window DC. Category labels inherit the active OSD theme
         // color; values are white (or threshold-colored when `colors_enabled`).
-        let readings = Readings::read();
+        let readings = Readings::read(cfg.metrics.iter().any(|m| m.starts_with("gpu.")));
         let white = rgb(0xF2, 0xF2, 0xF2);
         let inner = cfg.inner_space.max(0);
         let item = cfg.item_space.max(0);
@@ -1638,6 +1645,9 @@ unsafe fn paint(rs: &mut RenderState) {
             false
         };
         if !drawn {
+            if rs.use_d2d {
+                drop_d2d_target(rs);
+            }
             paint_gdi(rs, mem, &rect);
         }
         let _ = BitBlt(hdc, 0, 0, w, h, Some(mem), 0, 0, SRCCOPY);
@@ -1650,6 +1660,9 @@ unsafe fn paint(rs: &mut RenderState) {
             false
         };
         if !drawn {
+            if rs.use_d2d {
+                drop_d2d_target(rs);
+            }
             paint_gdi(rs, hdc, &rect);
         }
     }
@@ -1716,6 +1729,21 @@ unsafe fn paint_d2d(rs: &RenderState, hdc: HDC, rect: &RECT) -> bool {
     // A device loss (D2DERR_RECREATE_TARGET) returns an Err here; report failure so
     // the caller draws GDI this frame and we keep the resources for next paint.
     target.EndDraw(None, None).is_ok()
+}
+
+/// A failed D2D frame (device loss, D2DERR_RECREATE_TARGET — e.g. a GPU driver
+/// reset, plausible in an overclocking app) leaves the DC render target dead.
+/// It was kept, so every later paint failed D2D and fell back to GDI forever,
+/// losing the tabular-digit rendering until restart. Drop it (and its brush)
+/// so the next tick's `init_d2d` rebuilds them.
+/// Only when every resource was present, i.e. BindDC / EndDraw itself failed:
+/// a missing text format is not a device loss, and rebuilding for it would
+/// re-create the whole engine every tick.
+unsafe fn drop_d2d_target(rs: &mut RenderState) {
+    if rs.dc_target.is_some() && rs.d2d_brush.is_some() && rs.text_format.is_some() {
+        rs.dc_target = None;
+        rs.d2d_brush = None;
+    }
 }
 
 /// GDI owner-draw fallback (the original engine). Fills the color-keyed bg with
