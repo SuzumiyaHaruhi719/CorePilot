@@ -61,10 +61,24 @@ fn run_capture(program: &str, args: &[&str]) -> Option<std::process::Output> {
         .ok()
 }
 
-/// `ipconfig` emits OEM/ANSI text on localized Windows; decode leniently so we
-/// can still scan for IPv4 dotted-quads regardless of code page.
+/// Console tools write in the OEM code page (936 / GBK on zh-CN), not UTF-8.
+/// Decoding as UTF-8 turned "默认网关" into replacement characters, so the
+/// gateway label was never found on Chinese Windows.
 fn decode_console(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+    use windows::Win32::Globalization::{
+        MultiByteToWideChar, CP_OEMCP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS,
+    };
+    if bytes.is_empty() {
+        return String::new();
+    }
+    let flags = MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
+    let n = unsafe { MultiByteToWideChar(CP_OEMCP, flags, bytes, None) };
+    if n <= 0 {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let mut wide = vec![0u16; n as usize];
+    let n = unsafe { MultiByteToWideChar(CP_OEMCP, flags, bytes, Some(&mut wide)) };
+    String::from_utf16_lossy(&wide[..n.max(0) as usize])
 }
 
 /// True when `s` parses as a non-empty, non-loopback, non-zero IPv4 literal.
@@ -102,7 +116,11 @@ fn parse_ipconfig(text: &str) -> (Option<String>, Option<String>) {
             expect_gateway_continuation = false;
             continue;
         };
+        // `192.168.1.11(Preferred)` / `(首选)`: the state suffix made every
+        // address unparseable, so the diagnosis reported "no valid IPv4" on a
+        // working connection and steered users to reboot-requiring resets.
         let value = value.trim().trim_matches('.').trim();
+        let value = value.split('(').next().unwrap_or(value).trim();
         let label_lower = label.to_lowercase();
 
         let is_gateway = label.contains("网关") || label_lower.contains("gateway");
@@ -464,18 +482,35 @@ fn network_repair_impl(actions: Vec<String>, en: bool) -> Vec<NetCheck> {
                 &["int", "ip", "reset"],
                 en,
             ),
-            "resetProxy" => run_fix(
-                "resetProxy",
-                tr(en, "Reset proxy", "重置代理"),
-                tr(
+            "resetProxy" => {
+                // The diagnosis flags the per-user (WinINet) proxy, so that is
+                // what must be turned off; the old repair reset only WinHTTP —
+                // a different stack — and the flagged proxy stayed on. WinHTTP
+                // is still reset too (harmless, and some services use it).
+                let _ = run_capture("netsh", &["winhttp", "reset", "proxy"]);
+                run_fix(
+                    "resetProxy",
+                    tr(en, "Reset proxy", "重置代理"),
+                    tr(
+                        en,
+                        "System proxy turned off (direct connection)",
+                        "系统代理已关闭（直连）",
+                    ),
+                    "reg",
+                    &[
+                        "add",
+                        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                        "/v",
+                        "ProxyEnable",
+                        "/t",
+                        "REG_DWORD",
+                        "/d",
+                        "0",
+                        "/f",
+                    ],
                     en,
-                    "WinHTTP proxy reset to direct",
-                    "WinHTTP 代理已重置为直连",
-                ),
-                "netsh",
-                &["winhttp", "reset", "proxy"],
-                en,
-            ),
+                )
+            }
             // Unknown action — silently skip per spec.
             _ => continue,
         };
@@ -483,4 +518,37 @@ fn network_repair_impl(actions: Vec<String>, en: bool) -> Vec<NetCheck> {
     }
 
     results
+}
+
+#[cfg(test)]
+mod ipconfig_tests {
+    use super::*;
+
+    /// The shapes real `ipconfig` prints (taken from this machine): a state
+    /// suffix on the address, an IPv6 gateway with the IPv4 one wrapped onto
+    /// the next line.
+    #[test]
+    fn parses_suffixed_address_and_wrapped_gateway() {
+        let text = "Ethernet adapter Ethernet:\r\n\
+            \x20  IPv4 Address. . . . . . . . . . . : 192.168.1.11(Preferred)\r\n\
+            \x20  Default Gateway . . . . . . . . . : fe80::6b3:c9ff:fed1:f0d0%17\r\n\
+            \x20                                      192.168.1.1\r\n";
+        let (ip, gw) = parse_ipconfig(text);
+        assert_eq!(ip.as_deref(), Some("192.168.1.11"));
+        assert_eq!(gw.as_deref(), Some("192.168.1.1"));
+        let zh = "   IPv4 地址 . . . . . . . . . . . . : 10.0.0.5(首选)\r\n   默认网关. . . . . . . . . . . . . : 10.0.0.1\r\n";
+        assert_eq!(
+            parse_ipconfig(zh),
+            (Some("10.0.0.5".into()), Some("10.0.0.1".into()))
+        );
+    }
+
+    /// Real `ipconfig` on this machine, decoded with the OEM code page.
+    #[test]
+    fn real_ipconfig_yields_an_address() {
+        let out = run_capture("ipconfig", &[]).expect("ipconfig runs");
+        let (ip, _) = parse_ipconfig(&decode_console(&out.stdout));
+        println!("local IPv4: {ip:?}");
+        assert!(ip.is_some(), "a networked machine has a routable IPv4");
+    }
 }
