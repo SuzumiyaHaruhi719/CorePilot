@@ -792,7 +792,7 @@ fn tick(app: &AppHandle, active: &mut HashMap<u32, ActiveSession>) {
         // 3. Blacklist wins over everything: drop (silently — the user said
         //    NEVER record this) any session whose exe is now blacklisted. Handles
         //    both a list edit mid-session and a false positive being killed live.
-        active.retain(|_, s| !cfg.black.iter().any(|n| *n == s.exe));
+        active.retain(|_, s| !cfg.black.contains(&s.exe));
         let listed = |list: &[String]| exe_lc.as_ref().is_some_and(|e| list.iter().any(|n| n == e));
         (
             listed(&cfg.black),

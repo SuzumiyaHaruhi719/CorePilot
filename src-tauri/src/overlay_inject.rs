@@ -350,7 +350,7 @@ pub fn start_sampler(app: AppHandle) {
             let mut failed: Option<(u32, Instant)> = None;
             loop {
                 tick = tick.wrapping_add(1);
-                if tick % DECIDE_EVERY == 0 {
+                if tick.is_multiple_of(DECIDE_EVERY) {
                     decide(&app, &mut failed);
                 }
                 // Snapshot the current target while holding the lock briefly; do

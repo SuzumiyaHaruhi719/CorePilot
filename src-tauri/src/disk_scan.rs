@@ -1751,7 +1751,7 @@ mod win {
         handle.publish(Arc::new(DiskTree { nodes, names }));
         handle.set_status(ScanStatus::Done);
 
-        emit_progress(&app, &handle, handle.build_progress());
+        emit_progress(app, handle, handle.build_progress());
         true
     }
 

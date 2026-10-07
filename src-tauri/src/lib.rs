@@ -47,9 +47,9 @@ use tauri::{Emitter, Manager};
 pub static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// Location + time of the last panic written to crash.log (repeat suppression).
-static LAST_PANIC: once_cell::sync::Lazy<
-    parking_lot::Mutex<Option<(Option<String>, std::time::Instant)>>,
-> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+type PanicStamp = (Option<String>, std::time::Instant);
+static LAST_PANIC: once_cell::sync::Lazy<parking_lot::Mutex<Option<PanicStamp>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
 static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
 /// Chromium / WebView2 command-line flags applied to every CorePilot webview.

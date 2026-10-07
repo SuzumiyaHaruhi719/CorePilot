@@ -185,7 +185,7 @@ pub fn start(app: AppHandle) {
                             }
                             _ => {
                                 idle_ticks += 1;
-                                if idle_ticks % IDLE_SWEEP_EVERY == 0 {
+                                if idle_ticks.is_multiple_of(IDLE_SWEEP_EVERY) {
                                     process::sweep_exited();
                                 }
                             }

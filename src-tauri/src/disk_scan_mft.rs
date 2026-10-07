@@ -788,7 +788,7 @@ mod imp {
             || rec_size > 64 * 1024
             || bytes_per_cluster == 0
             || bytes_per_sector == 0
-            || rec_size % FIXUP_STRIDE != 0
+            || !rec_size.is_multiple_of(FIXUP_STRIDE)
             || mft_valid == 0
         {
             return None;

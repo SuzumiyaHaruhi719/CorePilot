@@ -56,7 +56,7 @@ impl CpuLoad {
 
         let stop = Arc::new(AtomicBool::new(false));
         let handles = (0..n)
-            .map(|i| {
+            .filter_map(|i| {
                 let stop = Arc::clone(&stop);
                 std::thread::Builder::new()
                     .name(format!("cpu-load-{i}"))
@@ -81,7 +81,6 @@ impl CpuLoad {
                     .map_err(|e| tracing::warn!("cpu-load worker {i} failed to spawn: {e}"))
                     .ok()
             })
-            .flatten()
             .collect();
         Self {
             stop,

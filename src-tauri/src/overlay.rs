@@ -219,8 +219,9 @@ const KERNEL_ANTICHEAT_SERVICES: &[(&str, &str)] = &[
 
 /// How long a kernel-AC probe result is reused (an SCM query per service).
 const KERNEL_AC_TTL: Duration = Duration::from_secs(30);
-static KERNEL_AC: Lazy<Mutex<Option<(Instant, Option<&'static str>)>>> =
-    Lazy::new(|| Mutex::new(None));
+/// (probed at, vendor found).
+type KernelAcProbe = (Instant, Option<&'static str>);
+static KERNEL_AC: Lazy<Mutex<Option<KernelAcProbe>>> = Lazy::new(|| Mutex::new(None));
 
 /// The vendor name of a running kernel anti-cheat, if any.
 pub fn kernel_anticheat_running() -> Option<&'static str> {

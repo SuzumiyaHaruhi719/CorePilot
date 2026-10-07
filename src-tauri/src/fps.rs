@@ -568,13 +568,13 @@ fn stats_for(pid: u32) -> FpsStats {
         );
         if let Some((k, stats)) = STATS_CACHE.lock().get(&pid) {
             if *k == key {
-                return stats.clone();
+                return *stats;
             }
         }
         (key, dq.iter().copied().collect())
     };
     let stats = stats_from_ticks(&stamps);
-    STATS_CACHE.lock().insert(pid, (key, stats.clone()));
+    STATS_CACHE.lock().insert(pid, (key, stats));
     stats
 }
 
