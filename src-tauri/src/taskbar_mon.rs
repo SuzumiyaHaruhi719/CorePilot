@@ -67,11 +67,11 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateSolidBrush,
-    DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetMonitorInfoW, GetTextExtentPoint32W,
-    InvalidateRect, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TextOutW,
+    DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetTextExtentPoint32W, InvalidateRect,
+    MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TextOutW,
     ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE, FW_BOLD,
-    FW_NORMAL, HBITMAP, HBRUSH, HDC, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
+    FW_NORMAL, HBITMAP, HBRUSH, HDC, HFONT, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS,
+    PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{
@@ -80,12 +80,11 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows, FindWindowW,
-    GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowLongW, GetWindowRect, KillTimer,
-    LoadCursorW, PostQuitMessage, RegisterClassW, SetLayeredWindowAttributes, SetTimer,
-    SetWindowPos, ShowWindow, TranslateMessage, GWL_STYLE, HWND_TOPMOST, IDC_ARROW, LWA_COLORKEY,
-    MSG, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_ENDSESSION, WM_PAINT, WM_TIMER,
-    WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_MAXIMIZE, WS_POPUP, WS_THICKFRAME,
+    GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect, KillTimer, LoadCursorW,
+    PostQuitMessage, RegisterClassW, SetLayeredWindowAttributes, SetTimer, SetWindowPos,
+    ShowWindow, TranslateMessage, HWND_TOPMOST, IDC_ARROW, LWA_COLORKEY, MSG, SWP_NOACTIVATE,
+    SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_ENDSESSION, WM_PAINT, WM_TIMER, WNDCLASSW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 /// Ensures the native window thread is spawned at most once (mirrors
@@ -1083,63 +1082,23 @@ unsafe fn measure_d2d(rs: &RenderState, s: &str) -> Option<(i32, i32)> {
 ///     borderless game is `WS_POPUP` with no caption/thick-frame and is NOT
 ///     maximized; a maximized Explorer/browser (which keeps a caption/frame and
 ///     still shows the taskbar) therefore never counts.
-unsafe fn foreground_is_fullscreen() -> bool {
-    // Exclusive / D3D fullscreen — the only trusted shell positive.
-    if let Ok(state) = SHQueryUserNotificationState() {
-        if state == QUNS_RUNNING_D3D_FULL_SCREEN {
-            return true;
-        }
-    }
-    // Borderless fullscreen: a visible, borderless, monitor-covering foreground
-    // window. Anything that fails one of these gates keeps the plate visible.
+unsafe fn foreground_is_fullscreen(plate: HWND) -> bool {
     let fg = GetForegroundWindow();
     if fg.0.is_null() {
         return false;
     }
-    let mut cls = [0u16; 64];
-    let n = GetClassNameW(fg, &mut cls);
-    let c = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
-    // The desktop / shell / our own plate are never games. `Windows.UI.Core.
-    // CoreWindow` is the Win11 Start menu / Search / Action Center / Task View —
-    // these are hosted in FULLSCREEN transparent CoreWindows, so the monitor-cover
-    // test below would wrongly treat "pressing the Windows key" or clicking the
-    // taskbar as a fullscreen game and HIDE the plate. Exclude them: the taskbar
-    // stays visible for all of these, so the plate must too. Real exclusive/UWP
-    // fullscreen games are still caught by SHQueryUserNotificationState above.
-    if c == "Progman"
-        || c == "WorkerW"
-        || c == "Shell_TrayWnd"
-        || c == "Shell_SecondaryTrayWnd"
-        || c == "CorePilotTaskbarMon"
-        || c == "Windows.UI.Core.CoreWindow"
-        || c == "XamlExplorerHostIslandWindow"
-        || c == "ForegroundStaging"
-    {
-        return false;
+    // Only a fullscreen window on the plate's OWN monitor hides it: a game on a
+    // second screen used to hide the plate on the primary taskbar too.
+    let plate_mon = MonitorFromWindow(plate, MONITOR_DEFAULTTONEAREST);
+    // Exclusive / D3D fullscreen — the only trusted shell positive. The signal
+    // is session-global, so it is tied to the foreground window's monitor.
+    if let Ok(state) = SHQueryUserNotificationState() {
+        if state == QUNS_RUNNING_D3D_FULL_SCREEN {
+            return MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST) == plate_mon;
+        }
     }
-    // Style gate: reject maximized windows and any window that still has a
-    // caption or a sizing (thick) frame — i.e. all normal/maximized apps. A
-    // borderless fullscreen game has none of these.
-    let style = GetWindowLongW(fg, GWL_STYLE) as u32;
-    if (style & WS_MAXIMIZE.0) != 0 || (style & WS_CAPTION.0) != 0 || (style & WS_THICKFRAME.0) != 0
-    {
-        return false;
-    }
-    let mut wr = RECT::default();
-    if GetWindowRect(fg, &mut wr).is_err() {
-        return false;
-    }
-    let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
-    let mut mi = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    if !GetMonitorInfoW(mon, &mut mi).as_bool() {
-        return false;
-    }
-    let m = mi.rcMonitor;
-    // Covers the entire monitor on all four edges → genuine borderless game.
-    wr.left <= m.left && wr.top <= m.top && wr.right >= m.right && wr.bottom >= m.bottom
+    // Borderless fullscreen (shared test, see `fps::fullscreen_monitor`).
+    crate::fps::fullscreen_monitor(fg) == Some(plate_mon)
 }
 
 /// One ~1 s tick: read config + readings, (re)build cells + grid geometry,
@@ -1166,7 +1125,7 @@ unsafe fn tick() {
         // game, and reacting instantly blinked the plate on each switch. Flip
         // the effective state only after FS_DEBOUNCE_TICKS consecutive ticks
         // agree; a stable game still hides it within ~2 s.
-        let raw_fs = foreground_is_fullscreen();
+        let raw_fs = foreground_is_fullscreen(rs.hwnd);
         if raw_fs == rs.fs_hidden {
             rs.fs_streak = 0;
         } else {

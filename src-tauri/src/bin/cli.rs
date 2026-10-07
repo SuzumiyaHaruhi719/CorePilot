@@ -50,6 +50,8 @@ fn main() {
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or_else(fps::foreground_pid_public);
             let secs = args.get(3).and_then(|s| s.parse::<u64>().ok()).unwrap_or(6);
+            // Own session: the app's would be force-stopped as "stale".
+            fps::use_session_name("CorePilot-FPS-cli");
             eprintln!("sampling pid {pid} for {secs}s (ETW needs admin) ...");
             for _ in 0..secs {
                 std::thread::sleep(Duration::from_secs(1));

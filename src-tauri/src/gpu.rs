@@ -855,6 +855,13 @@ mod static_cache_tests {
         assert_eq!(a.driver_version, b.driver_version);
         assert_eq!(a.power_limit_max_w, b.power_limit_max_w);
         assert_eq!(a.max_graphics_clock_mhz, b.max_graphics_clock_mhz);
-        println!("{} driver {} power {}..{} W, max {} MHz", a.name, a.driver_version, a.power_limit_min_w, a.power_limit_max_w, a.max_graphics_clock_mhz);
+        println!(
+            "{} driver {} power {}..{} W, max {} MHz",
+            a.name,
+            a.driver_version,
+            a.power_limit_min_w,
+            a.power_limit_max_w,
+            a.max_graphics_clock_mhz
+        );
     }
 }

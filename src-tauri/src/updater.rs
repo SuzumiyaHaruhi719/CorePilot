@@ -298,9 +298,7 @@ pub fn shutdown_teardown() {
     crate::fan::park_dirty_for_exit();
     crate::sidecar::graceful_stop(SIDECAR_EXIT_WAIT);
     crate::overlay_inject::write_disabled();
-    if let Err(e) = ferrisetw::trace::stop_trace_by_name(crate::fps::FPS_SESSION_NAME) {
-        tracing::debug!("shutdown: FPS trace already stopped or unavailable: {e:?}");
-    }
+    crate::fps::stop_capture();
     // NO `persist::flush()` here: this body is behind the once-guard, and the
     // portable-update path runs it long before the process actually exits, which
     // would make the flush at real exit a no-op and drop the last debounce window

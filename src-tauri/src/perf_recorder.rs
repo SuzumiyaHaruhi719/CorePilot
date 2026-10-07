@@ -699,7 +699,11 @@ fn finalize(app: &AppHandle, pid: u32, session: ActiveSession) {
     // Wall time from start to end, minus sleep the game sat through.
     let slept = (ended_at - session.started_at) - active_ms(&session.samples);
     let played_ms = (ended_at - session.started_at)
-        - if slept > MAX_SAMPLE_GAP_MS { slept } else { 0.0 };
+        - if slept > MAX_SAMPLE_GAP_MS {
+            slept
+        } else {
+            0.0
+        };
     let payload = SessionPayload {
         meta: SessionMeta {
             exe: session.exe,
@@ -790,7 +794,11 @@ fn tick(app: &AppHandle, active: &mut HashMap<u32, ActiveSession>) {
         //    both a list edit mid-session and a false positive being killed live.
         active.retain(|_, s| !cfg.black.iter().any(|n| *n == s.exe));
         let listed = |list: &[String]| exe_lc.as_ref().is_some_and(|e| list.iter().any(|n| n == e));
-        (listed(&cfg.black), listed(&cfg.white), listed(&cfg.osd_white))
+        (
+            listed(&cfg.black),
+            listed(&cfg.white),
+            listed(&cfg.osd_white),
+        )
     };
 
     // 4. Start a session for a newly-foregrounded recordable target. Existing
