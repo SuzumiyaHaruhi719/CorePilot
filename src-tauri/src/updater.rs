@@ -797,6 +797,8 @@ pub async fn update_install(app: AppHandle) -> Result<(), String> {
 
     emit_state(&app, "downloading", None);
     let mut downloaded: u64 = 0;
+    // Throttled: one event per HTTP chunk flooded the IPC channel.
+    let mut last_emit = std::time::Instant::now() - Duration::from_secs(1);
     let progress_app = app.clone();
     let verify_app = app.clone();
     // `download` verifies the minisign signature before it hands the bytes back;
@@ -807,7 +809,12 @@ pub async fn update_install(app: AppHandle) -> Result<(), String> {
         .download(
             move |chunk, total| {
                 downloaded += chunk as u64;
-                let _ = progress_app.emit("update://progress", ProgressEvent { downloaded, total });
+                let done = total.is_some_and(|t| downloaded >= t);
+                if done || last_emit.elapsed() >= Duration::from_millis(100) {
+                    last_emit = std::time::Instant::now();
+                    let _ =
+                        progress_app.emit("update://progress", ProgressEvent { downloaded, total });
+                }
             },
             move || emit_state(&verify_app, "verifying", None),
         )

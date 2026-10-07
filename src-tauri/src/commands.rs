@@ -249,7 +249,15 @@ pub(crate) fn warn_slow<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
     let started = std::time::Instant::now();
     let out = f();
     let ms = started.elapsed().as_millis();
-    if ms > SLOW_COMMAND_WARN_MS {
+    // `list_processes` waits for a fresh walk by design after an idle gap (the
+    // affinity enforcer every 8 s): that is not a stall, and at WARN it pushed
+    // real evidence out of the 1 MB warn log within a day.
+    let budget = if name == "list_processes" {
+        1_500
+    } else {
+        SLOW_COMMAND_WARN_MS
+    };
+    if ms > budget {
         tracing::warn!("slow command body: {name} took {ms} ms (off the main thread)");
     }
     out

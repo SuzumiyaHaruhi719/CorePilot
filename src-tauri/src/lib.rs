@@ -45,6 +45,11 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use tauri::{Emitter, Manager};
 
 pub static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Location + time of the last panic written to crash.log (repeat suppression).
+static LAST_PANIC: once_cell::sync::Lazy<
+    parking_lot::Mutex<Option<(Option<String>, std::time::Instant)>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
 static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
 /// Chromium / WebView2 command-line flags applied to every CorePilot webview.
@@ -133,21 +138,49 @@ pub fn run() {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let bt = std::backtrace::Backtrace::force_capture();
+        // A deterministic panic in a polled command (caught by the blocking
+        // pool) fires every poll; one full backtrace per location per minute is
+        // enough, and crash.log rotates at 1 MB instead of growing forever.
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()));
+        let repeat = {
+            let mut last = LAST_PANIC.lock();
+            let now = std::time::Instant::now();
+            let repeat = last.as_ref().is_some_and(|(loc, at)| {
+                *loc == location && now.duration_since(*at).as_secs() < 60
+            });
+            if !repeat {
+                *last = Some((location, now));
+            }
+            repeat
+        };
         if let Ok(appdata) = std::env::var("APPDATA") {
             let dir = std::path::Path::new(&appdata).join("com.corepilot.app");
             let _ = std::fs::create_dir_all(&dir);
+            let log = dir.join("crash.log");
+            if std::fs::metadata(&log).is_ok_and(|m| m.len() > 1024 * 1024) {
+                let _ = std::fs::rename(&log, dir.join("crash.log.1"));
+            }
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(dir.join("crash.log"))
+                .open(&log)
             {
                 use std::io::Write;
-                let _ = writeln!(
-                    f,
-                    "[epoch {epoch}] CorePilot {} PANIC: {info}\n{bt}\n---",
-                    env!("CARGO_PKG_VERSION")
-                );
+                let ver = env!("CARGO_PKG_VERSION");
+                let _ = if repeat {
+                    writeln!(
+                        f,
+                        "[epoch {epoch}] CorePilot {ver} PANIC (repeat): {info}\n---"
+                    )
+                } else {
+                    let bt = std::backtrace::Backtrace::force_capture();
+                    writeln!(
+                        f,
+                        "[epoch {epoch}] CorePilot {ver} PANIC: {info}\n{bt}\n---"
+                    )
+                };
             }
         }
         default_hook(info);
