@@ -17,6 +17,7 @@ Tauri v2 (Rust backend, React/zustand frontend, WebView2) system utility: task m
 - Build: `npx tauri build` — **never bare `cargo build`** (bakes the dev URL → ERR_CONNECTION_REFUSED). App must be closed first (exe lock).
 - Compile-check while the app runs: `cargo check` + `cargo test --lib` in `src-tauri/`, `npx tsc --noEmit` at root.
 - WebView2 screenshots come out black unless the window is visible; CJK in the Windows terminal displays as mojibake — verify bytes, not display.
+- UI work without the backend: `npx vite` → `http://localhost:1420/preview.html?tab=<TabId>&style=<preset>&lang=en&still=1` (mocked IPC in `src/dev/mockTauri.ts`, never bundled). Visual rules: `DESIGN.md`; product intent: `PRODUCT.md`.
 
 ## Map (where things live)
 
