@@ -5,7 +5,9 @@ import { listen } from "@tauri-apps/api/event";
 import { createJSONStorage, type StateStorage } from "zustand/middleware";
 import { OsdOverlay } from "./osd/OsdOverlay";
 import { useOsd, useOsdTargets } from "./store/osd";
-import { useSettings, type Theme, type ThemeStyle } from "./store/settings";
+// Type-only: a runtime import would hydrate a second settings store in the
+// OSD window (an extra persist_get per load / GDI recycle) — see below.
+import type { Theme, ThemeStyle } from "./store/settings";
 import "./index.css";
 
 // The transparent overlay window loads the same bundle with `?osd` (corner/free
@@ -37,7 +39,6 @@ if (isOverlay) {
   };
   useOsd.persist.setOptions({ storage: createJSONStorage(() => noopStorage) });
   useOsdTargets.persist.setOptions({ storage: createJSONStorage(() => noopStorage) });
-  useSettings.persist.setOptions({ storage: createJSONStorage(() => noopStorage) });
 
   // App (which owns the theme effect) never mounts in the OSD webview, so apply
   // the persisted theme to this window's <html> here — then the overlay's accent

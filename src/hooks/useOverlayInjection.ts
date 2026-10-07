@@ -59,7 +59,22 @@ export function useOverlayInjection(): void {
     }
 
     let alive = true;
+    // One tick at a time: an inject can take longer than POLL_MS, and an
+    // overlapping tick would see the same "not attached yet" state and call
+    // overlayAttach a second time — double-injecting the DLL.
+    let inFlight = false;
+    // Publish only real changes: the steady state re-reads an identical status
+    // every 1.5 s, and each publish re-renders every subscriber.
+    let lastKey = "";
+    const publish = (v: Parameters<typeof setStatus>[0]) => {
+      const key = JSON.stringify(v);
+      if (key === lastKey) return;
+      lastKey = key;
+      setStatus(v);
+    };
     const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const st = await api.overlayStatus();
         if (!alive) return;
@@ -74,31 +89,36 @@ export function useOverlayInjection(): void {
           // (no re-injection). An unchanged pid + unchanged flags does no IPC.
           if (pidChanged) {
             if (attachedPid.current !== 0) await detachCurrent();
+            // Injection may have been switched off while we were detaching;
+            // attaching now would inject into a game the user just opted out of.
+            if (!alive) return;
             const attached = await api.overlayAttach(st.target.pid, flagsRef.current);
             attachedPid.current = st.target.pid;
             attachedFlags.current = flagsRef.current;
-            if (alive) setStatus(attached);
+            if (alive) publish(attached);
           } else if (flagsChanged) {
             // Same game, new metric selection: backend updates the shared block's
             // layout flags in place rather than re-injecting.
             const attached = await api.overlayAttach(st.target.pid, flagsRef.current);
             attachedFlags.current = flagsRef.current;
-            if (alive) setStatus(attached);
+            if (alive) publish(attached);
           } else if (alive) {
             // Steady state: nothing changed. Refresh the status line only.
-            setStatus(st);
+            publish(st);
           }
         } else {
           // Not injectable (anti-cheat / unsupported / no game): drop any prior
           // attach and surface the reason (backend already chose the fallback).
           if (attachedPid.current !== 0) await detachCurrent();
-          if (alive) setStatus(st);
+          if (alive) publish(st);
         }
       } catch {
         // A transient backend read failure must NOT reset the panel to its
         // null "detecting foreground game…" state — that misrepresents a glitch
         // as "no game yet" and can stick there. Keep the last known status; the
         // next successful tick refreshes it.
+      } finally {
+        inFlight = false;
       }
     };
     void tick();

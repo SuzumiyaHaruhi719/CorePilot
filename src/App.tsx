@@ -5,6 +5,7 @@ import { Sidebar } from "./components/shell/Sidebar";
 import { StatusBar } from "./components/shell/StatusBar";
 import { TitleBar } from "./components/shell/TitleBar";
 import { api, type Overview } from "./lib/ipc";
+import { getOverviewOnce } from "./lib/memoOnce";
 import { easeOut } from "./lib/motion";
 import { osdCategoryColorFor, osdRowColorsRgba } from "./lib/osdPalette";
 import { useSettings } from "./store/settings";
@@ -130,7 +131,8 @@ function App() {
   const uiActive = useUiActive((s) => s.active);
 
   useEffect(() => {
-    api.getOverview().then(setOverview).catch(() => undefined);
+    // Memoized: PerfView reads the same fixed hardware description.
+    getOverviewOnce().then(setOverview).catch(() => undefined);
   }, []);
 
   // ── "Is anyone actually looking at this window?" ──────────────────────────

@@ -20,9 +20,13 @@ const OSD_HOTKEY = "CommandOrControl+Shift+F10";
 export function useOsdHotkey(): void {
   useEffect(() => {
     let dispose = () => {};
+    // Unmount can land before register() resolves (StrictMode double-invoke,
+    // hot reload); without this the late registration would never be released.
+    let disposed = false;
     void (async () => {
       try {
         const gs = await import("@tauri-apps/plugin-global-shortcut");
+        if (disposed) return;
         await gs.register(OSD_HOTKEY, (event: ShortcutEvent) => {
           // Fire once per physical press, not on the paired "Released" event.
           if (event.state !== "Pressed") return;
@@ -34,11 +38,15 @@ export function useOsdHotkey(): void {
         dispose = () => {
           gs.unregister(OSD_HOTKEY).catch(() => {});
         };
+        if (disposed) dispose();
       } catch {
         /* plugin unavailable (e.g. accelerator already claimed, or not loadable)
            — the hotkey is simply disabled; the rest of the app is unaffected. */
       }
     })();
-    return () => dispose();
+    return () => {
+      disposed = true;
+      dispose();
+    };
   }, []);
 }
