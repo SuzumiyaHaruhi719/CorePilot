@@ -12,6 +12,10 @@
 //   set <controlId> <0..100>   -> IControl.SetSoftware(pct)
 //   auto <controlId>           -> IControl.SetDefault()  (back to BIOS control)
 //   autoall                    -> reset every control touched this session
+//   forget <controlId>         -> stop tracking it WITHOUT resetting (its BIOS
+//                                 default is unknown to this process; see Rust
+//                                 fan::park_dirty_for_exit)
+// `smu …` commands may end in `#<id>`; the smuReply line echoes it as "id".
 //
 // Opening the Computer loads a kernel driver to read MSRs / Super-I/O, which
 // requires elevation. Every read is wrapped so a failure emits a null-ish line
@@ -106,6 +110,19 @@ internal static class Program
     private const int MaxColdStartReopens = 10;
     private static int _coldStartReopens;
 
+    /// <summary>Lost-hardware recovery. OpenComputer() can return null (driver
+    /// blocked for a moment), or a reopen can come back without the Super-I/O
+    /// controls (LHM's ISA-bus mutex held by HWiNFO / Armoury Crate at that
+    /// instant). Before, either state was permanent: NullLine or no board fans for
+    /// the rest of the session, and still emitting lines so the parent never
+    /// noticed. Retry with backoff instead.</summary>
+    private const int RecoverBackoffMinMs = 2_000;
+    private const int RecoverBackoffMaxMs = 60_000;
+    private static int _recoverBackoffMs = RecoverBackoffMinMs;
+    private static long _lastRecoverTick;
+    /// <summary>Most controls seen at once this session (fewer now = some vanished).</summary>
+    private static int _maxControlsSeen;
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         // Default options reject NaN/Infinity; we sanitize to null beforehand so
@@ -194,6 +211,24 @@ internal static class Program
                     _reopenCooldownMs = (!_sawMoboFan && _coldStartReopens < MaxColdStartReopens)
                         ? LiveReopenCooldownMs
                         : stillStale ? StaleReopenCooldownMs : LiveReopenCooldownMs;
+                }
+
+                bool lost = computer == null || _controls.Count < _maxControlsSeen;
+                if (lost && nowTick - _lastRecoverTick >= _recoverBackoffMs)
+                {
+                    lock (Gate)
+                    {
+                        try { computer?.Close(); } catch { /* ignore */ }
+                        computer = OpenComputer();
+                        _reopens++;
+                        ReapplyDrivenValues(computer);
+                    }
+                    _lastRecoverTick = nowTick;
+                    line = BuildSample(computer, visitor, out _);
+                    bool recovered = computer != null && _controls.Count >= _maxControlsSeen;
+                    _recoverBackoffMs = recovered
+                        ? RecoverBackoffMinMs
+                        : Math.Min(_recoverBackoffMs * 2, RecoverBackoffMaxMs);
                 }
             }
             catch
@@ -301,6 +336,15 @@ internal static class Program
         {
             return;
         }
+        // Optional trailing request id (`#17`), echoed in the reply so the parent
+        // can match it to the write that is waiting.
+        uint? requestId = null;
+        if (parts.Length > 1 && parts[^1].StartsWith('#')
+            && uint.TryParse(parts[^1].AsSpan(1), NumberStyles.None, CultureInfo.InvariantCulture, out uint rid))
+        {
+            requestId = rid;
+            parts = parts[..^1];
+        }
 
         string verb = parts[0].ToLowerInvariant();
         try
@@ -316,6 +360,10 @@ internal static class Program
                         break;
                     case "auto" when parts.Length == 2:
                         ApplyAuto(parts[1]);
+                        break;
+                    case "forget" when parts.Length == 2:
+                        _touched.Remove(parts[1]);
+                        _drivenValues.Remove(parts[1]);
                         break;
                     case "autoall" when parts.Length == 1:
                         foreach (string id in _touched)
@@ -335,7 +383,7 @@ internal static class Program
                     // SMU tuning (Curve Optimizer / PBO). Only ever runs on an
                     // explicit user-opted command; every write is clamped in the host.
                     case "smu" when parts.Length >= 2:
-                        HandleSmu(parts);
+                        HandleSmu(parts, requestId);
                         break;
                 }
             }
@@ -437,7 +485,7 @@ internal static class Program
     ///   smu scalar &lt;1..10&gt;             PBO scalar
     /// Unknown / malformed commands reply with ok=false and are otherwise ignored.
     /// </summary>
-    private static void HandleSmu(string[] p)
+    private static void HandleSmu(string[] p, uint? requestId)
     {
         string sub = p[1].ToLowerInvariant();
         RyzenSmuHost smu = SmuHost();
@@ -445,6 +493,8 @@ internal static class Program
         if (sub == "status")
         {
             uint ver = smu.GetSmuVersion();
+            string? reason = CpuGate.UnsupportedReason
+                ?? (smu.IsLoaded ? null : "RyzenSMU module not loaded (PawnIO missing?)");
             WriteJsonLine(JsonSerializer.Serialize(new
             {
                 smuStatus = new
@@ -453,6 +503,8 @@ internal static class Program
                     loaded = smu.IsLoaded,
                     version = ver,
                     versionStr = $"{(ver >> 16) & 0xff}.{(ver >> 8) & 0xff}.{ver & 0xff}",
+                    supported = reason == null,
+                    unsupportedReason = reason,
                 },
                 reopens = Volatile.Read(ref _reopens),
                 updateMs = Volatile.Read(ref _updateMs),
@@ -461,6 +513,8 @@ internal static class Program
         }
 
         SmuResult r;
+        try
+        {
         switch (sub)
         {
             case "co" when p.Length == 5
@@ -473,13 +527,13 @@ internal static class Program
                 r = smu.SetCurveOptimizerAll(allMargin);
                 break;
             case "ppt" when p.Length == 3 && ParseNum(p[2], out double w):
-                r = smu.SetLimit(Zen5.MsgSetPptLimit, w, "PPT", 1000);
+                r = smu.SetLimit(Zen5.MsgSetPptLimit, w, "PPT", SmuEncoding.PptMinWatts);
                 break;
             case "tdc" when p.Length == 3 && ParseNum(p[2], out double tdc):
-                r = smu.SetLimit(Zen5.MsgSetTdcLimit, tdc, "TDC", 1000);
+                r = smu.SetLimit(Zen5.MsgSetTdcLimit, tdc, "TDC", SmuEncoding.CurrentMinAmps);
                 break;
             case "edc" when p.Length == 3 && ParseNum(p[2], out double edc):
-                r = smu.SetLimit(Zen5.MsgSetEdcLimit, edc, "EDC", 1000);
+                r = smu.SetLimit(Zen5.MsgSetEdcLimit, edc, "EDC", SmuEncoding.CurrentMinAmps);
                 break;
             case "scalar" when p.Length == 3 && int.TryParse(p[2], out int sc):
                 r = smu.SetPboScalar(sc);
@@ -488,11 +542,20 @@ internal static class Program
                 r = SmuResult.Fail($"bad smu command: {sub}");
                 break;
         }
+        }
+        catch (Exception e)
+        {
+            // Always answer: the parent is waiting on this id.
+            r = SmuResult.Fail($"smu error: {e.Message}");
+        }
 
+        object reply = requestId is uint id
+            ? new { cmd = sub, ok = r.ok, detail = r.detail, id }
+            : new { cmd = sub, ok = r.ok, detail = r.detail };
         WriteJsonLine(JsonSerializer.Serialize(
             new
             {
-                smuReply = new { cmd = sub, ok = r.ok, detail = r.detail },
+                smuReply = reply,
                 reopens = Volatile.Read(ref _reopens),
                 updateMs = Volatile.Read(ref _updateMs),
             }, JsonOpts));
@@ -572,6 +635,7 @@ internal static class Program
 
             // Publish the freshly-collected control map for the command thread.
             _controls = controlMap;
+            _maxControlsSeen = Math.Max(_maxControlsSeen, controlMap.Count);
         }
 
         // Motherboard fans are the non-GPU fan readings. Detect the stale-bank

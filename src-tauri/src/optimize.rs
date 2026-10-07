@@ -123,6 +123,7 @@ pub fn memory_detail() -> CoreResult<MemDetail> {
 /// reparse points, but we also test the raw attribute bit so non-surrogate
 /// reparse points (e.g. some mount points) are caught too.
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+const FILE_ATTRIBUTE_DIRECTORY_BIT: u32 = 0x10;
 
 /// True if the symlink-level metadata describes a reparse point or symlink — i.e.
 /// something we must NOT descend into or treat as a plain directory/file.
@@ -130,23 +131,71 @@ fn is_reparse_or_symlink(meta: &std::fs::Metadata) -> bool {
     meta.file_type().is_symlink() || (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
 }
 
-/// True if `path`, once canonicalized, still lives under `root` (also canonical).
-/// Used as the final gate before any deletion so we can never remove something
-/// that resolves outside the temp tree, even if an earlier check was bypassed.
-fn stays_under(root: &Path, path: &Path) -> bool {
-    match std::fs::canonicalize(path) {
-        Ok(real) => real.starts_with(root),
-        // If it can't be canonicalized (e.g. it vanished) treat it as out-of-tree
-        // and skip it — deletion is best-effort, so skipping is always safe.
-        Err(_) => false,
+/// An open handle on a directory that has been verified NOT to be a reparse
+/// point. Opened without `FILE_SHARE_DELETE`, so while it lives nobody can
+/// rename or delete that directory — and Windows also refuses to rename any
+/// ancestor of a directory with open handles in its subtree. That pins the
+/// whole path from the volume root down to here, which is what makes the
+/// path-based deletes below race-free: a check-then-delete by path let a
+/// standard user swap a directory under the temp root for a junction between
+/// the check and the delete, steering this ELEVATED process into System32.
+struct PinnedDir(HANDLE);
+
+impl Drop for PinnedDir {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
     }
 }
 
-/// Recursively delete the contents of `dir`, staying strictly inside `root`
-/// (which must already be canonical). Symlink-aware: reparse points / symlinked
-/// directories are skipped wholesale (never followed), and every entry's
-/// canonical path is verified to remain under `root` before it is removed.
-fn clean_dir(root: &Path, dir: &Path, acc: &mut CleanResult) {
+/// Open and pin `path` as a directory. `None` if it can't be opened or the
+/// object actually opened is a reparse point (never followed: the open itself
+/// uses `FILE_FLAG_OPEN_REPARSE_POINT`, so it lands on the link, not its target).
+fn pin_dir(path: &Path) -> Option<PinnedDir> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_LIST_DIRECTORY, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let handle = CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_LIST_DIRECTORY.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        .ok()?;
+        let pin = PinnedDir(handle);
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        GetFileInformationByHandle(pin.0, &mut info).ok()?;
+        let attrs = info.dwFileAttributes;
+        (attrs & FILE_ATTRIBUTE_REPARSE_POINT == 0 && attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0)
+            .then_some(pin)
+    }
+}
+
+/// The path the pinned handle really refers to (`\\?\C:\…`, as `canonicalize`
+/// returns), for checking the root we pinned is the root we resolved.
+fn pinned_path(pin: &PinnedDir) -> Option<PathBuf> {
+    use windows::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED};
+    let mut buf = vec![0u16; 1024];
+    let len = unsafe { GetFinalPathNameByHandleW(pin.0, &mut buf, FILE_NAME_NORMALIZED) } as usize;
+    (len > 0 && len < buf.len()).then(|| PathBuf::from(String::from_utf16_lossy(&buf[..len])))
+}
+
+/// Recursively delete the contents of `dir` while it is pinned (see
+/// [`PinnedDir`]). Reparse points are removed as links and never descended
+/// into; real subdirectories are pinned in turn before their contents go.
+fn clean_dir(dir: &Path, acc: &mut CleanResult) {
+    let Some(_pin) = pin_dir(dir) else {
+        return;
+    };
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -157,38 +206,23 @@ fn clean_dir(root: &Path, dir: &Path, acc: &mut CleanResult) {
         let Ok(meta) = std::fs::symlink_metadata(&p) else {
             continue;
         };
-
         if is_reparse_or_symlink(&meta) {
-            // A reparse point could point anywhere. Remove the LINK itself if and
-            // only if the link node lives under root (its own path is inside the
-            // temp tree), but never recurse through it. Use the directory/file
-            // remover that matches the link's surface type without following it.
-            if p.parent()
-                .map(|parent| stays_under(root, parent))
-                .unwrap_or(false)
-            {
-                if meta.file_type().is_dir() {
-                    // Removes the junction/dir-symlink node, not its target tree.
-                    let _ = std::fs::remove_dir(&p);
-                } else {
-                    let _ = std::fs::remove_file(&p);
-                }
+            // Removes the link node itself (DeleteFile / RemoveDirectory act on a
+            // final-component reparse point, not its target). Junctions report
+            // `is_symlink`, not `is_dir`, so pick the remover by the attribute.
+            if meta.file_attributes() & FILE_ATTRIBUTE_DIRECTORY_BIT != 0 {
+                let _ = std::fs::remove_dir(&p);
+            } else {
+                let _ = std::fs::remove_file(&p);
             }
             continue;
         }
-
         if meta.is_dir() {
-            // Real directory: descend, then try to remove the now-empty dir — but
-            // only if it canonicalizes back under root.
-            clean_dir(root, &p, acc);
-            if stays_under(root, &p) {
-                let _ = std::fs::remove_dir(&p);
-            }
+            clean_dir(&p, acc);
+            // The child's pin is released by now; if it was swapped for a
+            // junction in this instant, RemoveDirectory removes only the link.
+            let _ = std::fs::remove_dir(&p);
         } else {
-            // Real file: delete only if its canonical path is still under root.
-            if !stays_under(root, &p) {
-                continue;
-            }
             let len = meta.len();
             if std::fs::remove_file(&p).is_ok() {
                 acc.bytes = acc.bytes.saturating_add(len);
@@ -212,13 +246,33 @@ fn canonical_temp_root(path: &Path) -> Option<PathBuf> {
     real.is_dir().then_some(real)
 }
 
+/// Clean one temp root: resolve it, pin it, and confirm the pinned object is
+/// the directory we resolved (an ancestor could have been swapped between the
+/// canonicalize and the open) before deleting anything under it.
+fn clean_root(path: &Path, acc: &mut CleanResult) {
+    let Some(root) = canonical_temp_root(path) else {
+        return;
+    };
+    let Some(pin) = pin_dir(&root) else {
+        return;
+    };
+    let same = pinned_path(&pin).is_some_and(|real| {
+        real.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&root.as_os_str().to_string_lossy())
+    });
+    if same {
+        clean_dir(&root, acc);
+    }
+}
+
 /// Best-effort cleanup of user + Windows temp directories (skips locked files).
 ///
 /// The temp root is taken from [`std::env::temp_dir`] (not a raw, attacker-
-/// controllable `%TEMP%` read in the delete path) and canonicalized up front;
-/// the walker then refuses to follow any reparse point and verifies every
-/// deletion target still resolves under that canonical root. Running elevated,
-/// this prevents a hostile env var or an in-tree junction from steering the
+/// controllable `%TEMP%` read in the delete path), canonicalized, and pinned;
+/// the walker pins every directory it descends into and never follows a
+/// reparse point. Running elevated, this prevents a hostile env var or an
+/// in-tree junction — including one swapped in mid-walk — from steering the
 /// recursive delete onto arbitrary files.
 pub fn clean_temp() -> CleanResult {
     let mut acc = CleanResult { bytes: 0, files: 0 };
@@ -226,9 +280,7 @@ pub fn clean_temp() -> CleanResult {
     // User temp: resolved by std (honours TMP/TEMP but yields a real path we then
     // canonicalize), so we operate on the actual directory, not an unverified
     // string.
-    if let Some(root) = canonical_temp_root(&std::env::temp_dir()) {
-        clean_dir(&root, &root, &mut acc);
-    }
+    clean_root(&std::env::temp_dir(), &mut acc);
 
     // Windows\Temp: derive from the system root rather than %WINDIR% where
     // possible, then canonicalize the same way.
@@ -236,16 +288,14 @@ pub fn clean_temp() -> CleanResult {
         .or_else(|| std::env::var_os("WINDIR"))
         .map(PathBuf::from);
     if let Some(windir) = windir {
-        if let Some(root) = canonical_temp_root(&windir.join("Temp")) {
-            clean_dir(&root, &root, &mut acc);
-        }
+        clean_root(&windir.join("Temp"), &mut acc);
     }
 
     acc
 }
 
 pub fn flush_dns() -> CoreResult<()> {
-    let status = std::process::Command::new("ipconfig")
+    let status = std::process::Command::new(crate::commands::system_tool("ipconfig"))
         .arg("/flushdns")
         .creation_flags(CREATE_NO_WINDOW)
         .status()
@@ -261,7 +311,7 @@ const PLAN_BALANCED: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
 const PLAN_HIGH: &str = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
 
 fn run_powercfg(args: &[&str]) -> CoreResult<()> {
-    let status = std::process::Command::new("powercfg")
+    let status = std::process::Command::new(crate::commands::system_tool("powercfg"))
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
         .status()
@@ -283,7 +333,7 @@ pub fn set_power_plan(plan: &str) -> CoreResult<()> {
 }
 
 pub fn get_power_plan() -> CoreResult<String> {
-    let output = std::process::Command::new("powercfg")
+    let output = std::process::Command::new(crate::commands::system_tool("powercfg"))
         .args(["/getactivescheme"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
@@ -297,4 +347,70 @@ pub fn get_power_plan() -> CoreResult<String> {
         "other"
     };
     Ok(name.to_string())
+}
+
+#[cfg(test)]
+mod clean_tests {
+    use super::*;
+
+    /// The guarantee: a junction inside the tree is removed as a link and the
+    /// directory it points at is left untouched; real files and dirs go.
+    #[test]
+    fn junctions_are_unlinked_never_followed() {
+        let base = std::env::temp_dir().join(format!("cp-clean-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("a.tmp"), b"1234").unwrap();
+        std::fs::write(root.join("sub").join("b.tmp"), b"56").unwrap();
+        std::fs::write(outside.join("keep.txt"), b"precious").unwrap();
+        let junction = root.join("link");
+        let made = std::process::Command::new(crate::commands::system_tool("cmd"))
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(made, "mklink /J failed");
+
+        let mut acc = CleanResult { bytes: 0, files: 0 };
+        clean_root(&root, &mut acc);
+
+        assert_eq!(acc.files, 2);
+        assert_eq!(acc.bytes, 6);
+        assert!(!junction.exists(), "junction should be unlinked");
+        assert!(!root.join("sub").exists());
+        assert_eq!(
+            std::fs::read(outside.join("keep.txt")).unwrap(),
+            b"precious"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_root_that_is_a_junction_is_refused() {
+        let base = std::env::temp_dir().join(format!("cp-clean-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"x").unwrap();
+        let link = base.join("rootlink");
+        let made = std::process::Command::new(crate::commands::system_tool("cmd"))
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(made, "mklink /J failed");
+
+        let mut acc = CleanResult { bytes: 0, files: 0 };
+        clean_root(&link, &mut acc);
+        assert_eq!(acc.files, 0);
+        assert!(target.join("keep.txt").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

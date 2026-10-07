@@ -3,8 +3,12 @@
 //! CorePilot ships two flavors and both update themselves, but only one of them
 //! has an installer to hand off to:
 //!
-//! * **Installer** (NSIS `setup.exe`) — `tauri-plugin-updater` does the whole
-//!   job: fetch, verify, run the installer, exit us.
+//! * **Installer** (NSIS `setup.exe`) — the plugin fetches and verifies; we
+//!   stage the verified installer in an admin-only directory and launch it
+//!   ourselves ([`installer_install`]). The plugin's own `install` writes it to
+//!   the user's `%TEMP%` and runs it elevated seconds later — any same-user,
+//!   non-elevated process could swap the file in that window and get admin +
+//!   ring-0 (PawnIO) with no UAC prompt.
 //! * **Portable** (a folder holding the three program files) — there is nothing
 //!   to hand off to, so we extract the release zip and swap the files ourselves
 //!   ([`portable_install`]).
@@ -23,7 +27,8 @@
 //! anything holding one of them open has to let go first ([`teardown`]):
 //!
 //! * `corepilot_overlay.dll` may be **mapped into a running game**. A mapped
-//!   image cannot be replaced, so it is ejected.
+//!   image cannot be overwritten — but it can be renamed, so it is moved aside
+//!   to `.old` (it is never unloaded from outside; that crashed games).
 //! * `sensord.exe` is a live child process, and a running image locks its own
 //!   file. It is told to hand the fans back to the BIOS (`autoall`), then its
 //!   stdin is CLOSED so it reaches that restore before it dies; only a sidecar
@@ -71,14 +76,11 @@ const BACKUP_SUFFIX: &str = "old";
 /// check spinning — it reports a failure and the user moves on.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// How long to wait for the sidecar to die before giving up and continuing.
+/// How long the sidecar gets to run its own fan reset after its stdin closes,
+/// before `TerminateProcess`. Sized to cover sensord's worst realistic `Gate`
+/// hold — a full LibreHardwareMonitor close+reopen on the stale-bank path —
+/// without making a tray quit feel stuck.
 const SIDECAR_EXIT_WAIT: Duration = Duration::from_secs(3);
-
-/// How long to let the sidecar exit on its own after its stdin is closed, before
-/// falling back to `TerminateProcess`. Sized to cover sensord's worst realistic
-/// `Gate` hold — a full LibreHardwareMonitor close+reopen on the stale-bank path
-/// — without making a tray quit feel stuck.
-const SIDECAR_EOF_WAIT: Duration = Duration::from_secs(2);
 
 /// Shown whenever the in-app path can't finish, so there is always a way out.
 const RELEASES_URL: &str = "https://github.com/SuzumiyaHaruhi719/CorePilot/releases/latest";
@@ -223,16 +225,6 @@ fn dir_writable(dir: &Path) -> bool {
 fn blockers(flavor: Flavor) -> Vec<Blocker> {
     let mut out = Vec::new();
 
-    if let Some(pid) = crate::overlay_inject::injected_pid() {
-        out.push(Blocker {
-            id: "overlayInjected",
-            severity: Severity::Block,
-            message: format!(
-                "游戏内叠加层正在注入运行中的游戏（PID {pid}）。叠加层 DLL 被游戏占用,无法替换 — 请先退出该游戏或分离叠加层。"
-            ),
-        });
-    }
-
     if crate::fan::exclusive_active() {
         out.push(Blocker {
             id: "fanTuning",
@@ -295,46 +287,19 @@ pub fn shutdown_teardown() {
     if SHUTDOWN_TORN_DOWN.swap(true, Ordering::AcqRel) {
         return;
     }
-    // Restore hardware before the sidecar dies — and make sure it actually gets
-    // to RUN that restore.
-    //
-    // The failure this prevents: `autoall` is only QUEUED on sensord's stdin.
-    // sensord can be holding its `Gate` far longer than a fixed short sleep —
-    // the stale-bank reopen path holds it across a whole LibreHardwareMonitor
-    // close+reopen (hundreds of ms to seconds) and then RE-PINS the fan at its
-    // last PWM. `TerminateProcess` runs none of sensord's four ResetTouched
-    // routes, so sleeping 200 ms and killing lost that race and left the
-    // Nuvoton pinned at the last software PWM (fans stuck at e.g. 25%) with
-    // CorePilot gone and the BIOS NOT back in control, until a cold boot.
-    // So: send `autoall`, then drop the ChildStdin (`fan::clear`) — closing the
-    // write end makes sensord's CommandLoop hit EOF and run ResetTouched under
-    // Gate on its way out — then give it a real budget to exit and only
-    // terminate a sidecar that is still alive afterwards.
-    let queued = crate::fan::send_command("autoall");
-    crate::fan::clear();
-    if let Some(pid) = crate::sensors::sidecar_pid() {
-        if queued {
-            let deadline = Instant::now() + SIDECAR_EOF_WAIT;
-            // Stop waiting once the reader thread has reaped it and released the
-            // PID (`sidecar_pid() != pid`): Windows recycles PIDs fast, so a bare
-            // `pid_alive` could otherwise describe an unrelated new process.
-            while Instant::now() < deadline
-                && crate::sensors::sidecar_pid() == Some(pid)
-                && crate::fps::pid_alive(pid)
-            {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        }
-        if crate::sensors::sidecar_pid() == Some(pid) && crate::fps::pid_alive(pid) {
-            if let Err(e) = crate::process::kill(pid) {
-                tracing::warn!("shutdown: could not stop sensord (pid {pid}): {e}");
-            }
-        }
-    }
+    // Hand the hardware back before the sidecar dies, and let it actually RUN
+    // that restore: `graceful_stop` queues `autoall`, closes stdin (sensord's
+    // CommandLoop then resets every touched control under its Gate on the way
+    // out) and only terminates a sidecar still alive after the grace window.
+    // The old sleep-200-ms-then-kill lost that race against a long Gate hold and
+    // left the Nuvoton pinned at the last software PWM until a cold boot.
+    // Headers whose hand-back was already lost to a sidecar crash are parked at
+    // 100 % first instead (see `fan::park_dirty_for_exit`).
+    crate::fan::park_dirty_for_exit();
+    crate::sidecar::graceful_stop(SIDECAR_EXIT_WAIT);
+    crate::gpu::restore_auto_fan_on_exit();
     crate::overlay_inject::write_disabled();
-    if let Err(e) = ferrisetw::trace::stop_trace_by_name(crate::fps::FPS_SESSION_NAME) {
-        tracing::debug!("shutdown: FPS trace already stopped or unavailable: {e:?}");
-    }
+    crate::fps::stop_capture();
     // NO `persist::flush()` here: this body is behind the once-guard, and the
     // portable-update path runs it long before the process actually exits, which
     // would make the flush at real exit a no-op and drop the last debounce window
@@ -343,21 +308,10 @@ pub fn shutdown_teardown() {
 }
 
 fn teardown() {
-    if let Some(pid) = crate::overlay_inject::eject_resident() {
-        tracing::info!("updater: ejected overlay DLL from pid {pid}");
-    }
     shutdown_teardown();
     // Explicit, because `shutdown_teardown` no longer flushes (see above) and the
     // update path may never reach `RunEvent::Exit` in a usable state.
     crate::persist::flush();
-    // The updater has a longer budget than normal process exit because it is
-    // about to replace the sidecar image on disk.
-    if let Some(pid) = crate::sensors::sidecar_pid() {
-        let deadline = Instant::now() + SIDECAR_EXIT_WAIT;
-        while crate::fps::pid_alive(pid) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
 }
 
 // =============================================================================
@@ -490,6 +444,193 @@ fn portable_install(app: &AppHandle, bytes: &[u8]) -> Result<(), String> {
 }
 
 // =============================================================================
+// Installer install
+// =============================================================================
+
+/// Prefix of the per-update staging directory created directly under
+/// `%ProgramData%`. A fresh name per update: `CreateDirectoryW` fails on an
+/// existing path, so a pre-created (squatted) directory can never be reused.
+const INSTALLER_STAGE_PREFIX: &str = "CorePilot-update-";
+
+/// SDDL for the staging directory: owner Administrators, protected DACL granting
+/// only SYSTEM and Administrators. A non-elevated process — even the same user,
+/// whose Administrators SID is deny-only until elevation — can't create, swap or
+/// rename anything in it, which is what makes "verify, then run elevated" sound.
+const ADMIN_ONLY_SDDL: windows::core::PCWSTR =
+    windows::core::w!("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+
+/// NSIS arguments for the configured `installMode: "passive"` (tauri.conf.json),
+/// exactly what the plugin would pass: passive UI, relaunch the app afterwards.
+const NSIS_PASSIVE_ARGS: &str = "/P /R /UPDATE";
+
+fn create_admin_only_dir(dir: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    use windows::Win32::Storage::FileSystem::CreateDirectoryW;
+
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            ADMIN_ONLY_SDDL,
+            SDDL_REVISION_1,
+            &mut sd,
+            None,
+        )
+        .map_err(|e| format!("无法创建安全描述符: {e}"))?;
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd.0,
+            bInheritHandle: false.into(),
+        };
+        let made = CreateDirectoryW(windows::core::PCWSTR(wide.as_ptr()), Some(&sa));
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+        made.map_err(|e| format!("无法创建更新目录 {}: {e}", dir.display()))
+    }
+}
+
+/// Write the verified installer into a fresh admin-only directory.
+fn stage_installer(bytes: &[u8], version: &str) -> Result<PathBuf, String> {
+    use std::io::Write;
+    if !bytes.starts_with(b"MZ") {
+        return Err("更新包不是有效的安装程序,已拒绝安装。".to_string());
+    }
+    let root = std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .ok_or_else(|| "无法定位 %ProgramData%".to_string())?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = root.join(format!(
+        "{INSTALLER_STAGE_PREFIX}{:x}{:x}",
+        std::process::id(),
+        nonce
+    ));
+    create_admin_only_dir(&dir)?;
+    let path = dir.join(format!("CorePilot_{version}_x64-setup.exe"));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| format!("写入安装程序失败: {e}"))?;
+    f.write_all(bytes)
+        .and_then(|()| f.sync_all())
+        .map_err(|e| format!("写入安装程序失败: {e}"))?;
+    Ok(path)
+}
+
+/// Quote one argument for NSIS's command-line parser, matching the plugin's
+/// escaping: `/` also forces quotes so NSIS never reads it as a switch.
+fn nsis_quote(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '/', '"']) {
+        return arg.to_string();
+    }
+    let mut out = String::from('"');
+    let mut backslashes = 0usize;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat_n('\\', backslashes + 1));
+                backslashes = 0;
+            }
+            _ => backslashes = 0,
+        }
+        out.push(c);
+    }
+    out.extend(std::iter::repeat_n('\\', backslashes));
+    out.push('"');
+    out
+}
+
+/// The installer's parameter string: mode switches, then our own arguments
+/// after `/ARGS` so the relaunched app starts the way this one did.
+fn nsis_parameters<I: IntoIterator<Item = String>>(current_args: I) -> String {
+    let mut p = format!("{NSIS_PASSIVE_ARGS} /ARGS");
+    for a in current_args {
+        p.push(' ');
+        p.push_str(&nsis_quote(&a));
+    }
+    p
+}
+
+/// Stage, tear down, hand off to NSIS, exit. Only reached with verified bytes.
+fn installer_install(app: &AppHandle, bytes: &[u8], version: &str) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
+
+    emit_state(app, "staging", None);
+    let setup = stage_installer(bytes, version)?;
+
+    // Point of no return: the hardware is handed back and the sidecar stops.
+    teardown();
+
+    emit_state(app, "swapping", None);
+    if crate::overlay_inject::dll_maybe_mapped() {
+        if let Ok(dir) = exe_dir() {
+            let dll = dir.join(PORTABLE_FILES[2]);
+            let backup = backup_path(&dll);
+            let _ = std::fs::remove_file(&backup);
+            if let Err(e) = std::fs::rename(&dll, &backup) {
+                tracing::warn!("updater: could not move overlay DLL aside: {e}");
+            }
+        }
+    }
+
+    let file: Vec<u16> = setup.as_os_str().encode_wide().chain(Some(0)).collect();
+    let params: Vec<u16> = nsis_parameters(std::env::args().skip(1))
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    // ShellExecute (not CreateProcess) so an installer that requests elevation
+    // still launches if this process somehow isn't elevated.
+    let code = unsafe {
+        ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            windows::core::PCWSTR(file.as_ptr()),
+            windows::core::PCWSTR(params.as_ptr()),
+            windows::core::PCWSTR::null(),
+            SW_SHOW,
+        )
+    };
+    if code.0 as usize <= 32 {
+        return Err(format!(
+            "无法启动安装程序(代码 {}),请从发布页手动下载: {RELEASES_URL}",
+            code.0 as usize
+        ));
+    }
+    emit_state(app, "ready", None);
+    app.exit(0);
+    Ok(())
+}
+
+/// Delete staging directories left by earlier installer updates. Best-effort:
+/// the installer may still be running (it relaunches us before it exits).
+fn remove_installer_stages() {
+    let Some(root) = std::env::var_os("ProgramData").map(PathBuf::from) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+    for e in entries.flatten() {
+        if e.file_name()
+            .to_string_lossy()
+            .starts_with(INSTALLER_STAGE_PREFIX)
+        {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+// =============================================================================
 // Startup housekeeping
 // =============================================================================
 
@@ -497,8 +638,15 @@ fn portable_install(app: &AppHandle, bytes: &[u8]) -> Result<(), String> {
 /// and the staging directory. Best-effort — reaching this code at all means the
 /// new version launched, which is the evidence that the old one is disposable.
 pub fn cleanup_stale() {
+    remove_installer_stages();
     let Ok(dir) = exe_dir() else { return };
     let _ = std::fs::remove_dir_all(dir.join(STAGING_DIR));
+    // An installer update that died after the overlay DLL was moved aside leaves
+    // only the `.old` copy; put it back so the overlay still works.
+    let dll = dir.join(PORTABLE_FILES[2]);
+    if !dll.exists() {
+        let _ = std::fs::rename(backup_path(&dll), &dll);
+    }
     for name in PORTABLE_FILES {
         let backup = backup_path(&dir.join(name));
         if backup.exists() {
@@ -566,10 +714,6 @@ fn updater_for(app: &AppHandle, flavor: Flavor) -> Result<tauri_plugin_updater::
         // Read the portable zip's entry out of the same manifest instead of the
         // stock windows-x86_64 installer entry.
         b = b.target(PORTABLE_TARGET);
-    } else {
-        // The installer flavor hands off to NSIS, which replaces the program
-        // files — so the locks have to be gone before the plugin exits us.
-        b = b.on_before_exit(teardown);
     }
     b.build().map_err(explain)
 }
@@ -653,6 +797,8 @@ pub async fn update_install(app: AppHandle) -> Result<(), String> {
 
     emit_state(&app, "downloading", None);
     let mut downloaded: u64 = 0;
+    // Throttled: one event per HTTP chunk flooded the IPC channel.
+    let mut last_emit = std::time::Instant::now() - Duration::from_secs(1);
     let progress_app = app.clone();
     let verify_app = app.clone();
     // `download` verifies the minisign signature before it hands the bytes back;
@@ -663,7 +809,12 @@ pub async fn update_install(app: AppHandle) -> Result<(), String> {
         .download(
             move |chunk, total| {
                 downloaded += chunk as u64;
-                let _ = progress_app.emit("update://progress", ProgressEvent { downloaded, total });
+                let done = total.is_some_and(|t| downloaded >= t);
+                if done || last_emit.elapsed() >= Duration::from_millis(100) {
+                    last_emit = std::time::Instant::now();
+                    let _ =
+                        progress_app.emit("update://progress", ProgressEvent { downloaded, total });
+                }
             },
             move || emit_state(&verify_app, "verifying", None),
         )
@@ -690,13 +841,17 @@ pub async fn update_install(app: AppHandle) -> Result<(), String> {
             }
         }
         Flavor::Installer => {
-            emit_state(&app, "swapping", None);
-            // Hands off to NSIS and exits us; `on_before_exit` runs the teardown.
-            update.install(bytes).map_err(|e| {
-                let msg = explain(e);
+            let app2 = app.clone();
+            let version = update.version.clone();
+            let outcome = tauri::async_runtime::spawn_blocking(move || {
+                installer_install(&app2, &bytes, &version)
+            })
+            .await
+            .map_err(|e| format!("更新任务失败: {e}"))?;
+            if let Err(msg) = outcome {
                 emit_state(&app, "failed", Some(msg.clone()));
-                msg
-            })?;
+                return Err(msg);
+            }
         }
     }
 
@@ -712,6 +867,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn nsis_args_match_plugin_escaping() {
+        assert_eq!(nsis_parameters(Vec::<String>::new()), "/P /R /UPDATE /ARGS");
+        assert_eq!(
+            nsis_parameters(["--x".to_string(), "a b".into(), "c/d".into(), "".into()]),
+            r#"/P /R /UPDATE /ARGS --x "a b" "c/d" """#
+        );
+        assert_eq!(nsis_quote(r#"say "hi""#), r#""say \"hi\"""#);
+        assert_eq!(nsis_quote(r"C:\dir x\"), r#""C:\dir x\\""#);
+        assert_eq!(nsis_quote(r"plain"), "plain");
     }
 
     #[test]

@@ -210,7 +210,7 @@ where
 /// child processes) froze the whole app into "未响应". Async commands leave the
 /// main thread alone; `spawn_blocking` keeps the heavy work off the async
 /// reactor too.
-async fn run_blocking<T, F>(f: F) -> CoreResult<T>
+pub(crate) async fn run_blocking<T, F>(f: F) -> CoreResult<T>
 where
     T: Send + 'static,
     F: FnOnce() -> CoreResult<T> + Send + 'static,
@@ -218,6 +218,32 @@ where
     tauri::async_runtime::spawn_blocking(f)
         .await
         .map_err(|e| CoreError::Msg(format!("blocking task failed: {e}")))?
+}
+
+/// Absolute path of a Windows helper tool (`reg`, `sc`, `powercfg`, …). A bare
+/// name goes through `CreateProcess`'s search order, which looks in the
+/// application's own directory first — and this process runs elevated, so a
+/// `reg.exe` planted next to a portable install would run as admin.
+pub(crate) fn system_tool(name: &str) -> std::path::PathBuf {
+    let root = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    match name {
+        "explorer" => root.join("explorer.exe"),
+        "powershell" => root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
+        _ => root.join("System32").join(format!("{name}.exe")),
+    }
+}
+
+/// Run one tick of a 24/7 background loop, surviving a panic in it. Those
+/// loops (sampler, telemetry) had no supervision: one panic ended the thread
+/// and its snapshot froze forever while every reader kept serving it. The panic
+/// itself is still recorded by the hook in `lib.rs`.
+pub(crate) fn guarded_tick(name: &'static str, f: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
+        tracing::error!("{name}: tick panicked; continuing");
+    }
 }
 
 /// Duration above which a blocking-capable command body logs a warning. The
@@ -233,7 +259,15 @@ pub(crate) fn warn_slow<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
     let started = std::time::Instant::now();
     let out = f();
     let ms = started.elapsed().as_millis();
-    if ms > SLOW_COMMAND_WARN_MS {
+    // `list_processes` waits for a fresh walk by design after an idle gap (the
+    // affinity enforcer every 8 s): that is not a stall, and at WARN it pushed
+    // real evidence out of the 1 MB warn log within a day.
+    let budget = if name == "list_processes" {
+        1_500
+    } else {
+        SLOW_COMMAND_WARN_MS
+    };
+    if ms > budget {
         tracing::warn!("slow command body: {name} took {ms} ms (off the main thread)");
     }
     out
@@ -285,21 +319,29 @@ pub fn end_task(pid: u32) -> CoreResult<()> {
 }
 
 /// Restart a process: kill it, wait for it to exit, then relaunch the same
-/// executable image. This is what the task-manager view offers for SYSTEM /
-/// service-account processes instead of a bare "end task" (mirrors Windows Task
-/// Manager's explorer.exe "重新启动"). The critical-PID guard still refuses the
-/// OS-critical set (csrss/lsass/…) outright. Async + blocking-pool: waits up to
-/// ~3 s for the old process to exit before respawning.
+/// executable image with its original arguments. This is what the task-manager
+/// view offers for SYSTEM / service-account processes instead of a bare "end
+/// task" (mirrors Windows Task Manager's explorer.exe "重新启动"). The
+/// critical-PID guard refuses the OS-critical set (csrss/lsass/… and anything
+/// the kernel flags critical) outright. Async + blocking-pool: waits up to ~3 s
+/// for the old process to exit before respawning.
 ///
-/// NOTE: this is an image relaunch, not an SCM service restart — right for
-/// shell-class processes (explorer.exe etc.); real services are managed from
-/// the services view.
+/// Service hosts are refused: an image relaunch can't bring their services back
+/// (a bare `svchost.exe` with no `-k` exits immediately), so the user is pointed
+/// at the services view, which restarts through the SCM.
 #[tauri::command]
 pub async fn restart_task(pid: u32) -> CoreResult<()> {
     run_blocking(move || {
         process::guard_critical_pid(pid)?;
+        if crate::winsvc::list_services()?.iter().any(|s| s.pid == pid) {
+            return Err(CoreError::Msg(
+                "该进程承载系统服务，无法直接重启；请在「服务」页重启对应服务".into(),
+            ));
+        }
         let path = crate::fps::process_image_path(pid)
             .ok_or_else(|| CoreError::Msg("无法解析进程路径，无法重启".into()))?;
+        // Capture the command line BEFORE the kill — it's gone with the process.
+        let args = process::command_line_args(pid);
         process::kill(pid)?;
         // Wait for the old instance to release single-instance locks (<=3 s).
         for _ in 0..30 {
@@ -312,6 +354,7 @@ pub async fn restart_task(pid: u32) -> CoreResult<()> {
             .parent()
             .map(|p| p.to_path_buf());
         let mut cmd = std::process::Command::new(&path);
+        cmd.args(args);
         if let Some(dir) = dir {
             cmd.current_dir(dir);
         }
@@ -348,36 +391,53 @@ pub fn smu_status() -> crate::smu::SmuStatus {
     crate::smu::status()
 }
 
-/// Apply a per-core Curve Optimizer margin (clamped ±50 in the host). Live
-/// override; never auto-reverted.
+/// The SMU writes below each wait (≤3 s) for sensord's reply to that exact
+/// request, so they run on the blocking pool. All are live overrides; never
+/// auto-reverted.
+///
+/// Per-core Curve Optimizer margin (±50, enforced in sensord).
 #[tauri::command]
-pub fn smu_apply_co(ccd: i32, core: i32, margin: i32) -> bool {
-    crate::smu::apply_co(ccd, core, margin)
+pub async fn smu_apply_co(ccd: i32, core: i32, margin: i32) -> crate::smu::SmuApplyResult {
+    run_blocking_default("smu_apply_co", move || {
+        crate::smu::apply_co(ccd, core, margin)
+    })
+    .await
 }
 
-/// Apply an all-core Curve Optimizer margin. Live override; never auto-reverted.
+/// All-core Curve Optimizer margin.
 #[tauri::command]
-pub fn smu_apply_co_all(margin: i32) -> bool {
-    crate::smu::apply_co_all(margin)
+pub async fn smu_apply_co_all(margin: i32) -> crate::smu::SmuApplyResult {
+    run_blocking_default("smu_apply_co_all", move || crate::smu::apply_co_all(margin)).await
 }
 
-/// Set a PBO limit. `kind` ∈ {ppt, tdc, edc}; `value` W (PPT) or A (TDC/EDC).
+/// PBO limit. `kind` ∈ {ppt, tdc, edc}; `value` W (PPT) or A (TDC/EDC).
 #[tauri::command]
-pub fn smu_apply_limit(kind: String, value: f64) -> bool {
-    crate::smu::apply_limit(&kind, value)
+pub async fn smu_apply_limit(kind: String, value: f64) -> crate::smu::SmuApplyResult {
+    run_blocking_default("smu_apply_limit", move || {
+        crate::smu::apply_limit(&kind, value)
+    })
+    .await
 }
 
-/// Set the PBO scalar (1×–10×).
+/// PBO scalar (1×–10×).
 #[tauri::command]
-pub fn smu_set_scalar(scalar: i32) -> bool {
-    crate::smu::set_scalar(scalar)
+pub async fn smu_set_scalar(scalar: i32) -> crate::smu::SmuApplyResult {
+    run_blocking_default("smu_set_scalar", move || crate::smu::set_scalar(scalar)).await
 }
 
 /// Explicit "force stock": all-core CO = 0. Overrides BIOS Curve-Optimizer for
 /// this boot (reboot restores the BIOS undervolt). User-initiated only.
 #[tauri::command]
-pub fn smu_force_stock() -> bool {
-    crate::smu::force_stock_co()
+pub async fn smu_force_stock() -> crate::smu::SmuApplyResult {
+    run_blocking_default("smu_force_stock", crate::smu::force_stock_co).await
+}
+
+/// The deep CPU sensor list (per-core clocks, CCD temps, voltages, TDC/EDC…)
+/// from the sidecar. Split out of `get_sensors`, which every 1 Hz poller pays
+/// for, because only the SMU telemetry view reads it.
+#[tauri::command]
+pub fn cpu_sensors() -> Vec<crate::sensors::CpuSensor> {
+    crate::sensors::cpu_sensors()
 }
 
 /// Reveal a file in Windows Explorer (opens its folder and selects it). Used by
@@ -410,7 +470,7 @@ pub async fn reveal_in_explorer(path: String) -> CoreResult<()> {
         }
         // `explorer /select,"<full path>"` — pass verbatim via raw_arg so the path
         // (which may contain spaces) is quoted correctly for explorer's parser.
-        std::process::Command::new("explorer.exe")
+        std::process::Command::new(system_tool("explorer"))
             .raw_arg(format!("/select,\"{p}\""))
             .creation_flags(0x0800_0000)
             .spawn()
@@ -501,7 +561,7 @@ pub async fn get_autostart() -> bool {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            std::process::Command::new("schtasks")
+            std::process::Command::new(system_tool("schtasks"))
                 .args(["/query", "/tn", AUTOSTART_TASK])
                 .creation_flags(0x0800_0000) // CREATE_NO_WINDOW — never flash a console
                 .output()
@@ -536,7 +596,7 @@ fn create_autostart_task() -> Result<(), String> {
     // raw_arg writes the command line verbatim, so we emit `/tr "\"<exe>\""`
     // → schtasks stores the action as a quoted path. (Command's own arg
     // escaping of embedded quotes is version-fragile, hence raw_arg.)
-    let mut cmd = std::process::Command::new("schtasks");
+    let mut cmd = std::process::Command::new(system_tool("schtasks"));
     cmd.raw_arg("/create")
         .raw_arg("/f")
         .raw_arg("/tn")
@@ -582,7 +642,7 @@ pub fn repair_autostart_path() {
         };
         let exe = exe.to_string_lossy().to_string();
 
-        let Ok(out) = std::process::Command::new("schtasks")
+        let Ok(out) = std::process::Command::new(system_tool("schtasks"))
             .args(["/query", "/tn", AUTOSTART_TASK, "/fo", "LIST", "/v"])
             .creation_flags(NO_WINDOW)
             .output()
@@ -627,7 +687,7 @@ pub async fn set_autostart(enable: bool) -> Result<(), String> {
             if enable {
                 create_autostart_task()?;
             } else {
-                let out = std::process::Command::new("schtasks")
+                let out = std::process::Command::new(system_tool("schtasks"))
                     .args(["/delete", "/f", "/tn", AUTOSTART_TASK])
                     .creation_flags(NO_WINDOW)
                     .output()

@@ -14,11 +14,6 @@
 //! that fails to initialize or read is left `None` and never fabricated.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
-use std::os::windows::process::CommandExt;
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
@@ -43,30 +38,26 @@ const PDH_SUCCESS: u32 = 0;
 /// `DXGI_ADAPTER_FLAG_SOFTWARE` raw bit, used to skip the Microsoft Basic Render adapter.
 const DXGI_SOFTWARE_FLAG: u32 = DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32;
 
-/// `CREATE_NO_WINDOW` process-creation flag: run the sidecar without a console window.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-/// File name of the bundled hardware-sensor sidecar (Tauri strips the target
-/// triple from `externalBin`, placing it next to the main executable).
-const SIDECAR_EXE: &str = "sensord.exe";
-
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SensorSample {
-    pub gpu_pct: Option<f32>,        // overall GPU utilization %, 0..100
-    pub gpu_name: Option<String>,    // primary adapter description
-    pub vram_used: Option<u64>,      // dedicated VRAM used, bytes
-    pub vram_total: Option<u64>,     // dedicated VRAM total, bytes
-    pub disk_pct: Option<f32>,       // disk active time %, 0..100 (cap at 100)
-    pub disk_read: Option<u64>,      // bytes/sec
-    pub disk_write: Option<u64>,     // bytes/sec
-    pub net_up: Option<u64>,         // bytes/sec
-    pub net_down: Option<u64>,       // bytes/sec
-    pub cpu_power: Option<f32>,      // watts
-    pub gpu_power: Option<f32>,      // watts
-    pub cpu_temp: Option<f32>,       // °C
-    pub gpu_temp: Option<f32>,       // °C
-    pub cpu_clock: Option<f64>,      // live CPU clock, MHz (base × % perf)
-    pub cpu_sensors: Vec<CpuSensor>, // deep SMU/CPU sensors (per-core clk, CCD temp, voltages, TDC/EDC…)
+    pub gpu_pct: Option<f32>,     // overall GPU utilization %, 0..100
+    pub gpu_name: Option<String>, // primary adapter description
+    pub vram_used: Option<u64>,   // dedicated VRAM used, bytes
+    pub vram_total: Option<u64>,  // dedicated VRAM total, bytes
+    pub disk_pct: Option<f32>,    // disk active time %, 0..100 (cap at 100)
+    pub disk_read: Option<u64>,   // bytes/sec
+    pub disk_write: Option<u64>,  // bytes/sec
+    pub net_up: Option<u64>,      // bytes/sec
+    pub net_down: Option<u64>,    // bytes/sec
+    pub cpu_power: Option<f32>,   // watts
+    pub gpu_power: Option<f32>,   // watts
+    pub cpu_temp: Option<f32>,    // °C
+    pub gpu_temp: Option<f32>,    // °C
+    pub cpu_clock: Option<f64>,   // live CPU clock, MHz (base × % perf)
+                                  // The deep SMU/CPU sensor list (~100–180 entries, 6–10 KB serialized) used to
+                                  // ride along here on every 1 Hz poll for its one reader; it is now the
+                                  // separate `cpu_sensors` command.
 }
 
 /// A PDH query handle plus the counters opened against it. PDH handles are raw
@@ -116,292 +107,24 @@ pub struct CpuSensor {
 /// Shared store of the most recent deep CPU sensors (kept out of the `Copy`
 /// `SidecarReadings` so that stays a cheap value type).
 static CPU_SENSORS: Lazy<Mutex<Vec<CpuSensor>>> = Lazy::new(|| Mutex::new(Vec::new()));
-/// Whether a sidecar process is currently believed to be alive.
-///
-/// Set `true` (via a CAS) by [`ensure_sidecar`] when it wins the right to spawn,
-/// and reset to `false` by the reader thread when the sidecar's stdout closes
-/// (crash / EOF). Unlike a `Once`, this lets a later `ensure_sidecar()` re-spawn
-/// the sidecar after it dies, instead of leaving fans + sensors dead until the
-/// app restarts. The CAS keeps spawning idempotent (no double-spawn).
-static SIDECAR_ALIVE: AtomicBool = AtomicBool::new(false);
-
-/// PID of the live `sensord.exe` child (0 = none). The reader thread owns the
-/// `Child` handle, so this is the only way another module can reach the process.
-///
-/// The self-updater needs it: `sensord.exe` sits next to `corepilot.exe` and a
-/// running image locks its own file, so an update that replaces the program
-/// files must stop the sidecar first or it half-fails. See `updater::teardown`.
-static SIDECAR_PID: AtomicU32 = AtomicU32::new(0);
-static REOPEN_STATE: Lazy<Mutex<(u64, Instant)>> = Lazy::new(|| Mutex::new((0, Instant::now())));
-
-/// Sidecar poll cadence while anything actually consumes its readings.
-const SIDECAR_INTERVAL_ACTIVE_MS: u32 = 1400;
-/// Slow cadence used when nothing does: the main window is in the tray, no game
-/// session is being recorded, and no fan runs off our curve/manual control.
-/// sensord's LibreHardwareMonitor sweep is the single most expensive thing in
-/// the idle process (measured 3.1% of a core at 1400 ms), and nobody is looking.
-const SIDECAR_INTERVAL_IDLE_MS: u32 = 3000;
-/// Last interval we successfully pushed to the sidecar. 0 = unknown (never sent,
-/// or the sidecar was replaced), which forces the next refresh to send.
-static SIDECAR_INTERVAL_MS: AtomicU32 = AtomicU32::new(0);
-
-/// Which cadence the sidecar should be running at right now.
-///
-/// Anything that CONSUMES sensor readings keeps the fast cadence:
-/// * the main window is on screen (the user is reading the numbers),
-/// * the perf recorder has a live game session (its ~5 Hz samples interpolate
-///   from these readings — slowing them down would flatten a real report),
-/// * a fan channel is in curve or manual mode, i.e. the fan engine is actively
-///   steering hardware off these temperatures. Halving its feedback rate is the
-///   one change here that could be *felt* (a slower ramp on a thermal spike),
-///   so we never do it while the engine drives anything.
-fn desired_sidecar_interval_ms() -> u32 {
-    if !crate::ui_visibility::main_hidden() {
-        return SIDECAR_INTERVAL_ACTIVE_MS;
+/// One sidecar line (parsed once by `crate::sidecar`): pick out the power/temp
+/// readings and the deep CPU sensor array.
+pub(crate) fn ingest(json: &serde_json::Value) {
+    if let Some(readings) = parse_sidecar_line(json) {
+        *SIDECAR.lock() = SidecarReadings {
+            received_at: Some(Instant::now()),
+            ..readings
+        };
     }
-    if crate::perf_recorder::active_session_count() > 0 {
-        return SIDECAR_INTERVAL_ACTIVE_MS;
-    }
-    let driving_fans = crate::fan::config_snapshot()
-        .iter()
-        .any(|c| c.mode == "curve" || c.mode == "manual");
-    if driving_fans {
-        return SIDECAR_INTERVAL_ACTIVE_MS;
-    }
-    SIDECAR_INTERVAL_IDLE_MS
-}
-
-/// Re-evaluate the sidecar poll interval and push it only when it CHANGED.
-///
-/// Edge-triggered on purpose: the sidecar's stdin is a line protocol shared with
-/// the fan engine's `set`/`auto` commands, so spamming an `interval` line every
-/// tick would both waste the pipe and interleave with real actuation. Callers
-/// may therefore invoke this as often as they like (the visibility thread calls
-/// it every 2 s; the tray paths call it on the transition).
-///
-/// If the write fails (no sidecar yet / it just died) the cached value is left
-/// alone, so the next call retries instead of believing a command that never
-/// landed.
-pub fn refresh_sidecar_interval() {
-    let want = desired_sidecar_interval_ms();
-    if SIDECAR_INTERVAL_MS.load(Ordering::SeqCst) == want {
-        return;
-    }
-    if crate::fan::send_command(&format!("interval {want}")) {
-        SIDECAR_INTERVAL_MS.store(want, Ordering::SeqCst);
-        tracing::debug!("sensord poll interval -> {want} ms");
+    if let Some(cs) = parse_cpu_sensors(json) {
+        *CPU_SENSORS.lock() = cs;
     }
 }
 
-/// PID of the running sensord sidecar, if one is alive.
-pub fn sidecar_pid() -> Option<u32> {
-    match SIDECAR_PID.load(Ordering::SeqCst) {
-        0 => None,
-        pid => Some(pid),
-    }
-}
-
-/// Ensure the `sensord` sidecar is running, spawning it if not, and read its
-/// line-delimited JSON on a background thread, updating [`SIDECAR`] with each
-/// parsed sample.
-///
-/// Idempotent and respawn-capable: a CAS on [`SIDECAR_ALIVE`] guarantees at most
-/// one live sidecar at a time (concurrent / repeated calls while one is running
-/// are no-ops), yet once the sidecar crashes or hits EOF the reader thread
-/// clears the flag, so a later call here will spawn a fresh process instead of
-/// leaving fans + sensors dead until the app restarts.
-///
-/// Resolves the sidecar next to the current executable (where Tauri places
-/// `externalBin`). If the file is missing, spawning fails, or stdout can't be
-/// captured, this returns quietly (resetting the flag so a future call may
-/// retry) and the four fields simply stay `None` — the app keeps running with
-/// power/temperature unavailable. The reader thread never panics: parse failures
-/// are ignored and EOF/errors end the thread cleanly.
-pub fn ensure_sidecar() {
-    // Claim the right to spawn. If another spawn is live (or in progress), the
-    // CAS fails and we return — keeping spawning idempotent / no double-spawn.
-    if SIDECAR_ALIVE
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return;
-    }
-
-    // Helper: release the alive-flag on any failure path so a subsequent
-    // `ensure_sidecar()` call is free to retry the spawn.
-    let release = || {
-        SIDECAR_ALIVE.store(false, Ordering::SeqCst);
-        SIDECAR_PID.store(0, Ordering::SeqCst);
-    };
-
-    // Resolve `<dir of current exe>/sensord.exe`.
-    let exe_path = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => {
-            release();
-            return;
-        }
-    };
-    let Some(dir) = exe_path.parent() else {
-        release();
-        return;
-    };
-    let sidecar = dir.join(SIDECAR_EXE);
-    if !sidecar.exists() {
-        // Graceful: no sidecar bundled/built — leave readings as None.
-        release();
-        return;
-    }
-
-    // Pass our PID so sensord can exit even when its stdin pipe survives a
-    // CorePilot crash or is swallowed by the Windows console host.
-    let child = Command::new(&sidecar)
-        .arg("--parent")
-        .arg(std::process::id().to_string())
-        .stdout(Stdio::piped())
-        // Piped (not null) so the fan engine can send `set`/`auto` commands
-        // to the sidecar over stdin (see `crate::fan`).
-        .stdin(Stdio::piped())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
-
-    let mut child = match child {
-        Ok(c) => c,
-        Err(_) => {
-            release();
-            return; // spawn failed (e.g. blocked) — stay graceful.
-        }
-    };
-
-    SIDECAR_PID.store(child.id(), Ordering::SeqCst);
-
-    // Hand the sidecar's stdin to the fan engine (used as the fan-control
-    // actuator). Taken before the child moves into the reader thread.
-    if let Some(stdin) = child.stdin.take() {
-        crate::fan::register_sidecar_stdin(stdin);
-        // A fresh sidecar starts at its own built-in cadence, so forget whatever
-        // we had pushed to the previous one and re-send unconditionally.
-        SIDECAR_INTERVAL_MS.store(0, Ordering::SeqCst);
-        refresh_sidecar_interval();
-    }
-
-    let Some(stdout) = child.stdout.take() else {
-        // Without stdout we can't read anything; tear the child down and release
-        // so a later call can respawn a sidecar we can actually read.
-        let _ = child.kill();
-        let _ = child.wait();
-        crate::fan::clear();
-        release();
-        return;
-    };
-
-    // Detached reader thread: owns the child handle so it isn't dropped (a
-    // dropped Child does not kill the process, but keeping it lets the OS
-    // reap it and ties the lifetime to this thread).
-    let spawned = std::thread::Builder::new()
-        .name("sensord-reader".into())
-        .spawn(move || {
-            let reader = BufReader::new(stdout);
-            let pid = child.id();
-            let last_line = Arc::new(AtomicU64::new(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            ));
-            let watchdog_stamp = Arc::clone(&last_line);
-            std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(5));
-                // Stop the moment this sidecar is no longer the live one. The
-                // reader reaps the child (`child.wait()`) when sensord dies on
-                // its own, which releases the PID back to Windows — but this
-                // thread would keep a stale `pid` with a frozen stamp and then
-                // fire a GUARANTEED kill ~30 s later on whatever recycled it
-                // (Windows reuses PIDs fast and this app churns processes).
-                // Also what stops one leaked 30 s thread per sidecar death.
-                if SIDECAR_PID.load(Ordering::SeqCst) != pid {
-                    break;
-                }
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                if now.saturating_sub(watchdog_stamp.load(Ordering::SeqCst)) > 30 {
-                    // BufRead blocks while a hung sidecar emits no line, so the
-                    // reader cannot perform the timeout itself. Kill by PID; the
-                    // reader then observes EOF and the normal respawn path runs.
-                    // Via `process::kill` (not `taskkill /T /F`): it runs the
-                    // `guard_critical_pid` gate that refuses csrss/wininit/
-                    // services/lsass — terminating one of those bugchecks the
-                    // box with CRITICAL_PROCESS_DIED — and it takes down only
-                    // this PID, never a recycled owner's whole child tree.
-                    let _ = crate::process::kill(pid);
-                    break;
-                }
-            });
-            for line in reader.lines() {
-                let Ok(line) = line else {
-                    break; // read error / pipe closed.
-                };
-                last_line.store(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                    Ordering::SeqCst,
-                );
-                let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) else {
-                    continue;
-                };
-                if let Some(reopens) = json.get("reopens").and_then(|v| v.as_u64()) {
-                    let mut state = REOPEN_STATE.lock();
-                    let now = Instant::now();
-                    if now.duration_since(state.1) >= Duration::from_secs(60) {
-                        *state = (reopens, now);
-                    } else if reopens > state.0 + 3 {
-                        tracing::warn!(reopens, "sensord chip reopens advanced by more than 3/min");
-                        state.0 = reopens;
-                    }
-                }
-                if let Some(readings) = parse_sidecar_line(&json) {
-                    *SIDECAR.lock() = SidecarReadings {
-                        received_at: Some(Instant::now()),
-                        ..readings
-                    };
-                }
-                if let Some(cs) = parse_cpu_sensors(&json) {
-                    *CPU_SENSORS.lock() = cs;
-                }
-                // The same line also carries fan / temp / control arrays for
-                // the fan engine; let it parse what it needs.
-                crate::fan::ingest_line(&line);
-                // …and may carry an SMU status / reply for the tuning bridge.
-                crate::smu::ingest_line(&line);
-            }
-            // Sidecar stopped emitting (crashed or exited): clear readings so
-            // the UI shows power/temp as unavailable ("—") rather than stale
-            // last-known values.
-            *SIDECAR.lock() = SidecarReadings::default();
-            CPU_SENSORS.lock().clear();
-            crate::fan::clear();
-            // stdout closed → sidecar exited. Reap it; ignore the result.
-            let _ = child.wait();
-            // The interval we pushed died with this process; clear the cache so
-            // the replacement is configured instead of silently inheriting the
-            // sidecar's default cadence.
-            SIDECAR_INTERVAL_MS.store(0, Ordering::SeqCst);
-            // Mark dead LAST so a concurrent `ensure_sidecar()` that wins the CAS
-            // after this point spawns a genuinely fresh process.
-            SIDECAR_PID.store(0, Ordering::SeqCst);
-            SIDECAR_ALIVE.store(false, Ordering::SeqCst);
-        });
-
-    // If even the reader thread failed to start, don't leak the flag (the child
-    // would otherwise run unmonitored with the flag stuck true forever).
-    if spawned.is_err() {
-        release();
-    }
+/// The sidecar exited: readings go to unavailable ("—") rather than stale.
+pub(crate) fn sidecar_gone() {
+    *SIDECAR.lock() = SidecarReadings::default();
+    CPU_SENSORS.lock().clear();
 }
 
 /// Parse one compact JSON line from the sidecar into [`SidecarReadings`].
@@ -468,10 +191,22 @@ pub fn cpu_sensors() -> Vec<CpuSensor> {
     CPU_SENSORS.lock().clone()
 }
 
+/// How old a sidecar reading may be and still count. A hung sidecar left the
+/// last values in place for up to the watchdog's patience, and the auto-tune's
+/// runaway check — running a 100 % synthetic load — read that frozen CPU temp.
+const READING_MAX_AGE: Duration = Duration::from_secs(5);
+
 /// Latest sidecar power/temperature readings as (cpu_temp, cpu_power, gpu_temp,
-/// gpu_power). All `None` until the sidecar produces them.
+/// gpu_power). All `None` until the sidecar produces them, and again once the
+/// newest line is older than [`READING_MAX_AGE`].
 pub fn latest_readings() -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
-    let s = SIDECAR.lock();
+    let s = *SIDECAR.lock();
+    if !s
+        .received_at
+        .is_some_and(|t| t.elapsed() <= READING_MAX_AGE)
+    {
+        return (None, None, None, None);
+    }
     (s.cpu_temp, s.cpu_power, s.gpu_temp, s.gpu_power)
 }
 
@@ -710,7 +445,7 @@ fn query_dxgi() -> (Option<String>, Option<u64>) {
 pub fn sample() -> SensorSample {
     // Launch the hardware-sensor sidecar on first call (no-op thereafter). If it
     // is missing or fails to start, power/temperature simply stay `None`.
-    ensure_sidecar();
+    crate::sidecar::ensure();
 
     let mut s = SAMPLER.lock();
     let mut out = SensorSample::default();
@@ -841,6 +576,5 @@ pub fn sample() -> SensorSample {
         out.gpu_power = nvml_power.or_else(|| fresh.then_some(readings.gpu_power).flatten());
     }
 
-    out.cpu_sensors = cpu_sensors();
     out
 }

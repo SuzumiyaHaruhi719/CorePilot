@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{ERROR_SUCCESS, WIN32_ERROR};
+use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS, WIN32_ERROR};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_EXPAND_SZ,
@@ -401,13 +401,15 @@ pub fn control_service(name: String, action: String) -> CoreResult<()> {
             "stop" => stop(&service),
             "restart" => {
                 // Stop is best-effort: an already-stopped service should still
-                // proceed to start. Then poll briefly for the stop to settle.
+                // proceed to start. Then wait for the stop to settle — up to
+                // 30 s: slow services (the old 3 s poll) were left STOPPED
+                // because the start raced a stop still in progress.
                 let _ = stop(&service);
-                for _ in 0..20 {
-                    sleep(Duration::from_millis(150));
+                for _ in 0..200 {
                     if current_state(&service) == Some(SERVICE_STOPPED) {
                         break;
                     }
+                    sleep(Duration::from_millis(150));
                 }
                 start(&service)
             }
@@ -494,13 +496,15 @@ fn enum_run_values(key: &RegKey) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut index: u32 = 0;
 
+    const DEFAULT_DATA_BUF: usize = 8_192;
+    let mut data_buf_size = DEFAULT_DATA_BUF;
     loop {
         // Generous fixed buffers: value names cap at 16,383 wide chars; data we
         // bound conservatively (long commands still fit).
         let mut name_buf = vec![0u16; 16_384];
         let mut name_len: u32 = name_buf.len() as u32; // in chars, incl. NUL space
         let mut value_type: u32 = 0;
-        let mut data_buf = vec![0u8; 8_192];
+        let mut data_buf = vec![0u8; data_buf_size];
         let mut data_len: u32 = data_buf.len() as u32; // in bytes
 
         let rc = unsafe {
@@ -516,10 +520,17 @@ fn enum_run_values(key: &RegKey) -> Vec<(String, String)> {
             )
         };
 
+        if rc == ERROR_MORE_DATA && data_len as usize > data_buf.len() {
+            // A command line longer than the buffer: retry THIS index with room
+            // for it. Breaking here hid the entry and every one after it.
+            data_buf_size = data_len as usize;
+            continue;
+        }
         if rc != ERROR_SUCCESS {
             // ERROR_NO_MORE_ITEMS (or any error) ends enumeration.
             break;
         }
+        data_buf_size = DEFAULT_DATA_BUF;
         index += 1;
 
         let rtype = REG_VALUE_TYPE(value_type);
@@ -699,6 +710,24 @@ pub fn list_startup() -> CoreResult<Vec<StartupItem>> {
     Ok(items)
 }
 
+/// The Startup-folder file a listed item refers to. Items are listed by stem
+/// ("Foo") but StartupApproved keys them by file name ("Foo.lnk"), so writing
+/// the stem toggled nothing (the switch snapped back on refresh).
+fn startup_folder_file_name(name: &str) -> String {
+    let dir_entries = startup_folder_path().and_then(|d| std::fs::read_dir(d).ok());
+    for entry in dir_entries.into_iter().flatten().flatten() {
+        let path = entry.path();
+        let file_name = path.file_name().map(|n| n.to_string_lossy().to_string());
+        let stem = path.file_stem().map(|n| n.to_string_lossy().to_string());
+        if let (Some(file_name), Some(stem)) = (file_name, stem) {
+            if file_name.eq_ignore_ascii_case(name) || stem.eq_ignore_ascii_case(name) {
+                return file_name;
+            }
+        }
+    }
+    name.to_string()
+}
+
 /// Enable or disable a startup entry by writing its StartupApproved blob.
 pub fn set_startup_enabled(name: String, location: String, enabled: bool) -> CoreResult<()> {
     if !matches!(
@@ -740,6 +769,11 @@ pub fn set_startup_enabled(name: String, location: String, enabled: bool) -> Cor
         APPROVED_DISABLED
     };
 
+    let name = if location == LOC_STARTUP_FOLDER {
+        startup_folder_file_name(&name)
+    } else {
+        name
+    };
     let name_w = wide(&name);
     let rc = unsafe {
         RegSetValueExW(
@@ -759,4 +793,22 @@ pub fn set_startup_enabled(name: String, location: String, enabled: bool) -> Cor
 /// Wrap a non-success `WIN32_ERROR` into a `CoreError` with context.
 fn win32_err(rc: WIN32_ERROR, what: &str) -> CoreError {
     CoreError::Msg(format!("{what} failed: error {}", rc.0))
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    /// Read-only against the real per-user Startup folder: every listed item
+    /// (shown by stem) must map back to the file whose StartupApproved value
+    /// the toggle writes.
+    #[test]
+    fn startup_folder_items_resolve_to_their_file() {
+        let dir = startup_folder_path().unwrap();
+        for item in list_startup_folder() {
+            let file = startup_folder_file_name(&item.name);
+            assert!(dir.join(&file).is_file(), "{} -> {file}", item.name);
+            println!("{} -> {file}", item.name);
+        }
+    }
 }

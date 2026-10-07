@@ -438,11 +438,19 @@ impl DiskTree {
                 child = self.nodes[child as usize].next_sibling;
             }
         }
-        all.sort_unstable_by(|&a, &b| {
-            self.nodes[b as usize]
+        // Largest first. Only `want` rows are returned, so select them in O(n)
+        // and sort just those: a full sort of every node under the focus, ~3×
+        // a second, took seconds on million-node scans.
+        let by_size_desc = |a: &u32, b: &u32| {
+            self.nodes[*b as usize]
                 .alloc_size
-                .cmp(&self.nodes[a as usize].alloc_size)
-        });
+                .cmp(&self.nodes[*a as usize].alloc_size)
+        };
+        if all.len() > want {
+            all.select_nth_unstable_by(want - 1, by_size_desc);
+            all.truncate(want);
+        }
+        all.sort_unstable_by(by_size_desc);
         all.into_iter()
             .take(want)
             .map(|id| {
@@ -739,6 +747,20 @@ pub struct ScanProgress {
 /// iterate the whole map while holding an entry lock.
 static SCANS: Lazy<DashMap<ScanId, Arc<ScanHandle>>> = Lazy::new(DashMap::new);
 
+/// Emit `disk-scan://progress` for `handle` only while it is still the handle
+/// registered for its key. A scan that was closed (`disk_scan_cancel`) or
+/// replaced by a restart keeps running until it notices its cancel flag; its
+/// late "cancelled" frame must not land on top of the fresh scan's progress.
+pub(crate) fn emit_progress(app: &tauri::AppHandle, handle: &Arc<ScanHandle>, p: ScanProgress) {
+    use tauri::Emitter;
+    let current = SCANS
+        .get(&handle.scan_id)
+        .is_some_and(|h| Arc::ptr_eq(&h, handle));
+    if current {
+        let _ = app.emit("disk-scan://progress", p);
+    }
+}
+
 /// Whether any volume scan is still running. Used by the self-updater to warn
 /// that installing now throws away an in-flight scan (a full MFT pass is ~15 s
 /// of work the user would have to redo). A warning, not a block.
@@ -849,18 +871,16 @@ impl Drop for WalkerPermit<'_> {
 mod win {
     use super::*;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE,
-    };
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW,
         FindNextFileW, GetDiskFreeSpaceExW, GetDiskFreeSpaceW, GetDriveTypeW,
         GetFileInformationByHandle, GetLogicalDrives, GetVolumeInformationW,
         GetVolumeNameForVolumeMountPointW, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
         FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FIND_FIRST_EX_LARGE_FETCH, OPEN_EXISTING,
-        WIN32_FIND_DATAW,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FIND_FIRST_EX_LARGE_FETCH,
+        OPEN_EXISTING, WIN32_FIND_DATAW,
     };
 
     // Win32 DRIVE_* return codes from GetDriveTypeW (winbase.h). The windows crate
@@ -1130,12 +1150,15 @@ mod win {
     /// Returns None on any failure (denied / in-use) — the caller degrades.
     fn handle_info(wpath: &[u16]) -> Option<BY_HANDLE_FILE_INFORMATION> {
         // SAFETY: `wpath` is a NUL-terminated wide path; flags request metadata
-        // only (no content read), open-reparse so we stat the link itself, and
-        // backup-semantics so directories can be opened.
+        // only, open-reparse so we stat the link itself, and backup-semantics so
+        // directories can be opened. FILE_READ_ATTRIBUTES is all
+        // GetFileInformationByHandle needs: GENERIC_READ (a data open) made
+        // on-access antivirus scan every file of the walk and hit sharing
+        // violations on files opened for exclusive read.
         let h: HANDLE = match unsafe {
             CreateFileW(
                 PCWSTR(wpath.as_ptr()),
-                GENERIC_READ.0,
+                FILE_READ_ATTRIBUTES.0,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 None,
                 OPEN_EXISTING,
@@ -1184,6 +1207,9 @@ mod win {
         handle: &ScanHandle,
         arena: &Mutex<Arena>,
     ) -> Result<Vec<ChildResult>, EnumError> {
+        let links_possible = ["NTFS", "ReFS"]
+            .iter()
+            .any(|fs| handle.file_system.eq_ignore_ascii_case(fs));
         // Build the search pattern: "<dir>\*".
         let mut pattern: Vec<u16> = dir_wpath.to_vec();
         // dir_wpath is NUL-terminated; drop the NUL, append "\*\0".
@@ -1279,7 +1305,8 @@ mod win {
                 } else {
                     round_to_cluster(logical, cluster)
                 };
-                if !is_dir {
+                // Only NTFS / ReFS have hardlinks; on FAT/exFAT the open is pure cost.
+                if !is_dir && links_possible {
                     // Cheap probe: open for BY_HANDLE info only when the file might
                     // be hardlinked. We can't know link count without the handle,
                     // so only pay it when dedup matters by checking after open.
@@ -1637,7 +1664,6 @@ mod win {
             std::thread::Builder::new()
                 .name(format!("corepilot-scan-mft-emit-{}", handle.scan_id))
                 .spawn(move || {
-                    use tauri::Emitter;
                     let mut last = ScanProgressKey::default();
                     while !mft_done.load(Ordering::Relaxed) {
                         std::thread::sleep(PROGRESS_THROTTLE);
@@ -1645,7 +1671,7 @@ mod win {
                         let key = ScanProgressKey::from(&p);
                         if key != last {
                             last = key;
-                            let _ = app.emit("disk-scan://progress", p);
+                            emit_progress(&app, &handle, p);
                         }
                     }
                 })
@@ -1725,8 +1751,7 @@ mod win {
         handle.publish(Arc::new(DiskTree { nodes, names }));
         handle.set_status(ScanStatus::Done);
 
-        use tauri::Emitter;
-        let _ = app.emit("disk-scan://progress", handle.build_progress());
+        emit_progress(app, handle, handle.build_progress());
         true
     }
 
@@ -1771,8 +1796,7 @@ mod win {
             // as Cancelled rather than running the walk on a cancelled scan.
             handle.publish(Arc::new(DiskTree::default()));
             handle.set_status(ScanStatus::Cancelled);
-            use tauri::Emitter;
-            let _ = app.emit("disk-scan://progress", handle.build_progress());
+            emit_progress(&app, &handle, handle.build_progress());
             return;
         }
 
@@ -1821,7 +1845,6 @@ mod win {
             std::thread::Builder::new()
                 .name(format!("corepilot-scan-emit-{}", handle.scan_id))
                 .spawn(move || {
-                    use tauri::Emitter;
                     let mut last = ScanProgressKey::default();
                     while !walk_done.load(Ordering::Relaxed) {
                         std::thread::sleep(PROGRESS_THROTTLE);
@@ -1829,7 +1852,7 @@ mod win {
                         let key = ScanProgressKey::from(&p);
                         if key != last {
                             last = key;
-                            let _ = app.emit("disk-scan://progress", p);
+                            emit_progress(&app, &handle, p);
                         }
                     }
                 })
@@ -1858,16 +1881,28 @@ mod win {
                 let handle = &handle;
                 std::thread::Builder::new()
                     .name(format!("corepilot-scan-{}-pub", handle.scan_id))
-                    .spawn_scoped(s, move || loop {
-                        std::thread::sleep(PUBLISH_THROTTLE);
-                        let finished = handle.cancel.load(Ordering::Relaxed) || queue.lock().done;
-                        // Publish (even on the final iteration) so the last
-                        // mid-scan view reflects the latest growth; the post-scope
-                        // publish below produces the authoritative final tree.
-                        let tree = build_snapshot(arena);
-                        handle.publish(Arc::new(tree));
-                        if finished {
-                            return;
+                    .spawn_scoped(s, move || {
+                        let mut wait = PUBLISH_THROTTLE;
+                        loop {
+                            std::thread::sleep(wait);
+                            let finished =
+                                handle.cancel.load(Ordering::Relaxed) || queue.lock().done;
+                            // Publish (even on the final iteration) so the last
+                            // mid-scan view reflects the latest growth; the
+                            // post-scope publish below produces the authoritative
+                            // final tree.
+                            let started = std::time::Instant::now();
+                            let tree = build_snapshot(arena);
+                            handle.publish(Arc::new(tree));
+                            // The snapshot copies the whole arena under its lock;
+                            // on huge walks that is hundreds of ms, and repeating
+                            // it every 200 ms stalled the workers' merges. Space
+                            // publishes to ≥4× their own cost (small scans keep
+                            // the 200 ms cadence).
+                            wait = PUBLISH_THROTTLE.max(started.elapsed() * 4);
+                            if finished {
+                                return;
+                            }
                         }
                     })
                     .ok();
@@ -1901,8 +1936,47 @@ mod win {
             let _ = h.join();
         }
         {
-            use tauri::Emitter;
-            let _ = app.emit("disk-scan://progress", handle.build_progress());
+            emit_progress(&app, &handle, handle.build_progress());
+        }
+    }
+
+    #[cfg(test)]
+    mod walk_tests {
+        use super::*;
+
+        /// Real NTFS walk of a temp dir holding a file and a hardlink to it:
+        /// the shared bytes count once and both entries carry FLAG_HARDLINK —
+        /// with the attribute-only (FILE_READ_ATTRIBUTES) probe.
+        #[test]
+        fn hardlinked_bytes_count_once() {
+            let dir = std::env::temp_dir().join(format!("cp-walk-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("a.bin"), vec![7u8; 40_000]).unwrap();
+            std::fs::hard_link(dir.join("a.bin"), dir.join("b.bin")).unwrap();
+            std::fs::write(dir.join("c.bin"), vec![1u8; 1_000]).unwrap();
+
+            let root = dir.to_string_lossy().to_string();
+            let fs = volume_file_system(&root[..3]); // "C:\\" — the volume root
+            assert!(
+                fs.eq_ignore_ascii_case("NTFS"),
+                "temp dir must be on NTFS, got {fs}"
+            );
+            let handle = ScanHandle::new("test".into(), root.clone(), root.clone(), fs);
+            let arena = Mutex::new(Arena {
+                nodes: Vec::new(),
+                interner: Interner::new(),
+                seen_links: std::collections::HashSet::new(),
+            });
+            let kids = enumerate_dir(&ext_root_w(&root), 4096, &handle, &arena)
+                .unwrap_or_else(|_| panic!("enumerate failed"));
+            let get = |n: &str| kids.iter().find(|k| k.name == n).unwrap();
+            let (a, b, c) = (get("a.bin"), get("b.bin"), get("c.bin"));
+            assert_eq!(a.logical + b.logical, 40_000, "linked bytes counted once");
+            assert!(a.flags & FLAG_HARDLINK != 0 && b.flags & FLAG_HARDLINK != 0);
+            assert_eq!(c.logical, 1_000);
+            assert_eq!(c.flags & FLAG_HARDLINK, 0);
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }
@@ -1980,15 +2054,27 @@ pub async fn disk_list_volumes() -> CoreResult<Vec<VolumeInfo>> {
 
 /// Start scanning each requested disk. Inserts a `ScanHandle` and spawns one
 /// dedicated owner thread per disk (NOT the `spawn_blocking` pool). Returns the
-/// keys immediately — O(1) from the caller's view. A `scan_id` that is already
-/// scanning is left untouched (idempotent re-start is `disk_scan_rescan`, Phase 5).
+/// keys immediately. A `scan_id` that is already scanning (and not cancelled) is
+/// left untouched; a finished or cancelled one is replaced by a fresh scan, so
+/// "cancel + start" is a restart.
+///
+/// Async + blocking pool: resolving the walk root and filesystem calls
+/// `GetVolumeInformationW` / `GetVolumeNameForVolumeMountPointW`, which block
+/// for seconds on a spinning-up USB disk or a stale mapped drive (rule 1).
 #[tauri::command]
-pub fn disk_scan_start(app: tauri::AppHandle, scan_ids: Vec<ScanId>) -> CoreResult<Vec<ScanId>> {
+pub async fn disk_scan_start(
+    app: tauri::AppHandle,
+    scan_ids: Vec<ScanId>,
+) -> CoreResult<Vec<ScanId>> {
+    crate::commands::run_blocking(move || Ok(start_scans(app, scan_ids))).await
+}
+
+fn start_scans(app: tauri::AppHandle, scan_ids: Vec<ScanId>) -> Vec<ScanId> {
     let mut started = Vec::new();
     for scan_id in scan_ids {
-        // Skip a scan that is already in flight for this key.
         if let Some(existing) = SCANS.get(&scan_id) {
-            if existing.status() == ScanStatus::Scanning {
+            if existing.status() == ScanStatus::Scanning && !existing.cancel.load(Ordering::Relaxed)
+            {
                 started.push(scan_id);
                 continue;
             }
@@ -2002,12 +2088,15 @@ pub fn disk_scan_start(app: tauri::AppHandle, scan_ids: Vec<ScanId>) -> CoreResu
             walk_root,
             file_system,
         ));
-        SCANS.insert(scan_id.clone(), Arc::clone(&handle));
+        // Replacing an entry whose old scan is still draining: make sure it stops.
+        if let Some(old) = SCANS.insert(scan_id.clone(), Arc::clone(&handle)) {
+            old.cancel.store(true, Ordering::Relaxed);
+        }
 
-        let app = app.clone();
+        let thread_app = app.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("corepilot-scan-{scan_id}"))
-            .spawn(move || win::run_scan(handle, app));
+            .spawn(move || win::run_scan(handle, thread_app));
         if let Err(e) = spawned {
             // A failed spawn must not leave a forever-scanning handle (spec §7).
             if let Some(h) = SCANS.get(&scan_id) {
@@ -2018,14 +2107,17 @@ pub fn disk_scan_start(app: tauri::AppHandle, scan_ids: Vec<ScanId>) -> CoreResu
         }
         started.push(scan_id);
     }
-    Ok(started)
+    started
 }
 
-/// Flip the per-disk cancel atomic. O(1); the walk drains promptly (checked when
-/// popping the queue AND inside the per-entry loop). No-op for an unknown key.
+/// Cancel a disk's scan AND drop its entry, which frees the tree (the scan
+/// thread holds its own `Arc` and releases it once it drains). Called when a
+/// disk tab closes; before, the entry stayed for the life of the process, so a
+/// 24/7 instance kept every volume ever scanned resident. No-op for an unknown
+/// key.
 #[tauri::command]
 pub fn disk_scan_cancel(scan_id: ScanId) -> CoreResult<()> {
-    if let Some(h) = SCANS.get(&scan_id) {
+    if let Some((_, h)) = SCANS.remove(&scan_id) {
         h.cancel.store(true, Ordering::Relaxed);
     }
     Ok(())

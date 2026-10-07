@@ -129,6 +129,15 @@ pub fn start_gdi_guard(app: AppHandle) {
             use windows::Win32::System::Threading::{
                 GetCurrentProcess, GetGuiResources, GR_GDIOBJECTS,
             };
+            // Recycle effectiveness. A recycle frees the OSD's leaked objects
+            // (186 → 19 measured); if the count is STILL over the threshold a tick
+            // later, the leak is somewhere else and recycling again just rebuilds
+            // a transparent window every minute (~1440 main-thread creates a day,
+            // the create-hang hazard of rule 2) while hiding the real culprit.
+            // Back off exponentially (1 → 60 ticks) instead.
+            let mut recycled_last_tick = false;
+            let mut skip_ticks: u32 = 0;
+            let mut backoff: u32 = 1;
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(60));
                 // Teardown gate: during quit every window call here races tao's and
@@ -174,7 +183,25 @@ pub fn start_gdi_guard(app: AppHandle) {
                     OSD_RELOAD_TRIED.store(false, Ordering::Relaxed);
                 }
 
-                if gdi < GDI_RECYCLE_THRESHOLD && !dead_page {
+                if !dead_page && gdi >= GDI_RECYCLE_THRESHOLD {
+                    if skip_ticks > 0 {
+                        skip_ticks -= 1;
+                    } else if recycled_last_tick {
+                        tracing::error!(
+                            gdi,
+                            backoff_min = backoff,
+                            "OSD recycle freed nothing — the GDI leak is NOT the overlay window; backing off"
+                        );
+                        skip_ticks = backoff;
+                        backoff = (backoff * 2).min(60);
+                    }
+                } else {
+                    backoff = 1;
+                    skip_ticks = 0;
+                }
+                let recycle_now = dead_page || (gdi >= GDI_RECYCLE_THRESHOLD && skip_ticks == 0);
+                recycled_last_tick = recycle_now && !dead_page;
+                if !recycle_now {
                     // Keep-alive + style re-assert (cheap window calls, main thread).
                     let handle = app.clone();
                     let _ = app.run_on_main_thread(move || {
@@ -449,11 +476,22 @@ fn ensure_overlay_window(
     let _ = win.set_ignore_cursor_events(true);
     force_click_through(hwnd_of(&win));
     let w = win.clone();
+    // The waiting happens on a worker; every window touch is marshalled to the
+    // main thread (rule 2). Rewriting GWL_EXSTYLE from the worker raced the main
+    // thread's own style updates (set_through / tao's topmost + ignore-cursor
+    // handling), and the synchronous style-change messages blocked the worker
+    // on the main thread and the WebView2 process anyway.
     tauri::async_runtime::spawn(async move {
         for _ in 0..6 {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            let _ = w.set_ignore_cursor_events(true);
-            force_click_through(hwnd_of(&w));
+            if crate::SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let w2 = w.clone();
+            let _ = w.run_on_main_thread(move || {
+                let _ = w2.set_ignore_cursor_events(true);
+                force_click_through(hwnd_of(&w2));
+            });
         }
     });
     Ok(())

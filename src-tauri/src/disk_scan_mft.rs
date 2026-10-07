@@ -233,11 +233,23 @@ mod imp {
         true
     }
 
+    /// The update-sequence stride. NTFS protects every 512-byte block of a
+    /// record regardless of the disk's sector size (the Linux ntfs3 driver uses
+    /// the same constant). Using `BytesPerSector` instead failed every record on
+    /// 4Kn drives (4096-byte sectors) and sent them to the ~8× slower walk.
+    const FIXUP_STRIDE: usize = 512;
+
     /// Apply the NTFS update-sequence-array fixup IN PLACE to a single record.
-    /// The USA replaces the last 2 bytes of every `bytes_per_sector` sector with a
+    /// The USA replaces the last 2 bytes of every [`FIXUP_STRIDE`] block with a
     /// sequence number; the originals live in the USA. We restore them. Returns
-    /// `false` if the record's USN doesn't match every sector (corrupt / torn).
-    fn apply_fixup(rec: &mut [u8], bytes_per_sector: usize) -> bool {
+    /// `false` if the record's USN doesn't match every block (corrupt / torn).
+    #[cfg(test)]
+    pub(super) fn apply_fixup_for_test(rec: &mut [u8]) -> bool {
+        apply_fixup(rec)
+    }
+
+    fn apply_fixup(rec: &mut [u8]) -> bool {
+        let bytes_per_sector = FIXUP_STRIDE;
         let usa_off = match u16_at(rec, 0x04) {
             Some(v) => v as usize,
             None => return false,
@@ -776,7 +788,7 @@ mod imp {
             || rec_size > 64 * 1024
             || bytes_per_cluster == 0
             || bytes_per_sector == 0
-            || rec_size % bytes_per_sector != 0
+            || !rec_size.is_multiple_of(FIXUP_STRIDE)
             || mft_valid == 0
         {
             return None;
@@ -791,11 +803,24 @@ mod imp {
         if !read_at(vol.0, mft_start * bytes_per_cluster as i64, &mut rec0) {
             return None;
         }
-        if !apply_fixup(&mut rec0, bytes_per_sector) {
+        if !apply_fixup(&mut rec0) {
             return None;
         }
         let extents = mft_extents(&rec0)?;
         if extents.is_empty() {
+            return None;
+        }
+        // Record #0's own $DATA runs must cover the whole valid table. A $MFT
+        // fragmented enough to continue its runs in an $ATTRIBUTE_LIST extension
+        // record leaves them short — reading only these would silently drop every
+        // file past the gap, so take the walk instead.
+        let covered = extents
+            .iter()
+            .map(|e| e.clusters)
+            .sum::<u64>()
+            .saturating_mul(bytes_per_cluster);
+        if covered < mft_valid {
+            tracing::info!("disk: $MFT runs cover {covered} of {mft_valid} bytes; using the walk");
             return None;
         }
 
@@ -882,7 +907,7 @@ mod imp {
                     // skipped, never crash. A flood of them trips the sanity gate.
                     let parsed =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                            if !apply_fixup(rec, bytes_per_sector) {
+                            if !apply_fixup(rec) {
                                 return (false, None, (0u64, 0u64), 0u64);
                             }
                             // Distinguish "free record" (None, not bad) from "in-use
@@ -954,9 +979,12 @@ mod imp {
                             }
                             None => {
                                 // In-use but no usable name/$DATA. Metafiles #0..#15
-                                // legitimately may lack a Win32 name from our parse;
-                                // don't count those as parse failures.
-                                if mft_index >= FIRST_USER_MFT {
+                                // legitimately may lack a Win32 name from our parse,
+                                // and so do EXTENSION records (their names live in
+                                // the base record): neither is a parse failure. A
+                                // heavily fragmented volume's extension records
+                                // used to trip the bad-record fallback to the walk.
+                                if mft_index >= FIRST_USER_MFT && base_ref == 0 {
                                     bad_records += 1;
                                 }
                             }
@@ -1050,6 +1078,18 @@ mod imp {
             bytes_alloc = bytes_alloc.saturating_add(ri.alloc);
         }
 
+        // Pass-1 side arrays are dead from here on; free them before pass 2
+        // allocates the arena (~0.5 GB at 10M records otherwise held twice).
+        drop((
+            ext_data,
+            spilled_data,
+            own_alloc,
+            own_logical,
+            own_files,
+            chunk,
+            top_files,
+        ));
+
         // --- Pass 2: build the arena from parent references -------------------
         build_arena(
             records,
@@ -1072,7 +1112,7 @@ mod imp {
     /// on cancel / sanity failure.
     #[allow(clippy::too_many_arguments)]
     fn build_arena(
-        records: Vec<Option<RecordInfo>>,
+        mut records: Vec<Option<RecordInfo>>,
         root_display: &str,
         cancel: &AtomicBool,
         handle: &ScanHandle,
@@ -1246,6 +1286,9 @@ mod imp {
         let mut by_parent: HashMap<u32, Vec<Leaf>> = HashMap::new();
 
         for mft in FIRST_USER_MFT..n as u64 {
+            if mft % 65_536 == 0 && cancel.load(Ordering::Relaxed) {
+                return None;
+            }
             let Some(rec) = records.get(mft as usize).and_then(|r| r.as_ref()) else {
                 continue;
             };
@@ -1284,13 +1327,22 @@ mod imp {
             if rec.hardlink {
                 flags |= FLAG_HARDLINK;
             }
+            let (logical, alloc) = (rec.logical, rec.alloc);
+            // Files are terminal: nothing reads a file record after this, so move
+            // the name out instead of cloning every one of millions.
+            let name = records[mft as usize]
+                .as_mut()
+                .map(|r| std::mem::take(&mut r.name))
+                .unwrap_or_default();
             by_parent.entry(parent_id).or_default().push(Leaf {
-                name: rec.name.clone(),
-                logical: rec.logical,
-                alloc: rec.alloc,
+                name,
+                logical,
+                alloc,
                 flags,
             });
         }
+        drop(records);
+        drop(node_of);
 
         for (parent_id, mut leaves) in by_parent {
             if cancel.load(Ordering::Relaxed) {
@@ -1366,7 +1418,7 @@ mod imp {
 
         Some(BuiltArena {
             nodes,
-            names: interner.table.clone(),
+            names: interner.table,
             files_seen,
             dirs_seen,
             bytes_logical,
@@ -1396,4 +1448,30 @@ pub(crate) fn try_build_arena_from_mft(
         imp::build(walk_root, root_display, cancel, handle)
     }))
     .unwrap_or(None)
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod fixup_tests {
+    use super::imp::apply_fixup_for_test as apply_fixup;
+
+    /// A 1 KB record as a 4Kn drive stores it: still two 512-byte protected
+    /// blocks (usa_count 3).
+    #[test]
+    fn fixup_uses_512_byte_blocks() {
+        let mut rec = vec![0u8; 1024];
+        rec[0x04..0x06].copy_from_slice(&0x30u16.to_le_bytes()); // USA offset
+        rec[0x06..0x08].copy_from_slice(&3u16.to_le_bytes()); // check + 2 originals
+        rec[0x30..0x32].copy_from_slice(&0xABCDu16.to_le_bytes()); // check value
+        rec[0x32..0x34].copy_from_slice(&0x1111u16.to_le_bytes()); // original, block 0
+        rec[0x34..0x36].copy_from_slice(&0x2222u16.to_le_bytes()); // original, block 1
+        rec[510..512].copy_from_slice(&0xABCDu16.to_le_bytes());
+        rec[1022..1024].copy_from_slice(&0xABCDu16.to_le_bytes());
+        assert!(apply_fixup(&mut rec));
+        assert_eq!(&rec[510..512], &0x1111u16.to_le_bytes());
+        assert_eq!(&rec[1022..1024], &0x2222u16.to_le_bytes());
+        // A torn block (tail != check) is rejected.
+        let mut torn = rec.clone();
+        torn[0x30..0x32].copy_from_slice(&0x5555u16.to_le_bytes());
+        assert!(!apply_fixup(&mut torn));
+    }
 }

@@ -121,6 +121,36 @@ fn write_disk_log(buf: &[u8]) {
     }
 }
 
+/// Startup lines kept forever (version, init, first errors).
+const HEAD_KEEP: usize = 64 * 1024;
+/// How much of the middle is dropped at once when the cap is hit (amortizes
+/// the memmove).
+const DROP_CHUNK: usize = 1024 * 1024;
+const GAP_MARK: &[u8] = b"\n[... older log lines dropped (4 MB ring) ...]\n";
+
+/// Append to the bounded log: once full, drop the OLDEST lines after the
+/// startup head. It used to keep the first 4 MB and discard everything after,
+/// so a 24/7 instance's debug export contained nothing from the last days —
+/// exactly the part a bug report needs.
+fn push_ring(b: &mut Vec<u8>, buf: &[u8]) {
+    if b.len() + buf.len() > MAX_LOG_BYTES && b.len() > HEAD_KEEP {
+        let head_end = b[..HEAD_KEEP]
+            .iter()
+            .rposition(|&c| c == b'\n')
+            .map_or(HEAD_KEEP, |i| i + 1);
+        let want = (b.len() + buf.len() - MAX_LOG_BYTES).max(DROP_CHUNK);
+        let mut cut = (head_end + want).min(b.len());
+        // End the cut on a line boundary.
+        if let Some(nl) = b[cut..].iter().position(|&c| c == b'\n') {
+            cut += nl + 1;
+        }
+        // The cut always starts at the head and outruns the marker, so an earlier
+        // marker is replaced: exactly one ever stands in the gap.
+        b.splice(head_end..cut, GAP_MARK.iter().copied());
+    }
+    b.extend_from_slice(buf);
+}
+
 /// Tracing writer that tees output to stderr and the in-memory [`LOG_BUFFER`].
 pub struct TeeWriter;
 
@@ -129,13 +159,7 @@ impl Write for TeeWriter {
         let _ = std::io::stderr().write_all(buf);
         write_disk_log(buf);
         if let Ok(mut b) = LOG_BUFFER.lock() {
-            if b.len() + buf.len() <= MAX_LOG_BYTES {
-                b.extend_from_slice(buf);
-            } else if b.len() < MAX_LOG_BYTES {
-                let take = MAX_LOG_BYTES - b.len();
-                b.extend_from_slice(&buf[..take]);
-                b.extend_from_slice(b"\n[log truncated: 4 MB cap reached]\n");
-            }
+            push_ring(&mut b, buf);
         }
         Ok(buf.len())
     }
@@ -215,4 +239,29 @@ fn export_debug_logs_impl(app: tauri::AppHandle, folder_name: String) -> CoreRes
     let path = dir.to_string_lossy().into_owned();
     tracing::info!("exported debug logs to {path}");
     Ok(path)
+}
+
+#[cfg(test)]
+mod ring_tests {
+    use super::*;
+
+    #[test]
+    fn ring_keeps_the_head_and_the_newest_lines() {
+        let mut b = Vec::new();
+        push_ring(&mut b, b"START\n");
+        let line = vec![b'x'; 99];
+        for i in 0..60_000u32 {
+            let mut l = format!("{i:06} ").into_bytes();
+            l.extend_from_slice(&line);
+            l.push(b'\n');
+            push_ring(&mut b, &l);
+        }
+        assert!(b.len() <= MAX_LOG_BYTES);
+        assert!(b.starts_with(b"START\n"));
+        let text = String::from_utf8_lossy(&b);
+        assert!(text.contains("059999 "), "newest line kept");
+        assert!(text.contains("\n000100 "), "startup head kept");
+        assert!(!text.contains("\n010000 "), "old middle dropped");
+        assert_eq!(text.matches("older log lines dropped").count(), 1);
+    }
 }

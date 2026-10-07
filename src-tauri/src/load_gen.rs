@@ -56,7 +56,7 @@ impl CpuLoad {
 
         let stop = Arc::new(AtomicBool::new(false));
         let handles = (0..n)
-            .map(|i| {
+            .filter_map(|i| {
                 let stop = Arc::clone(&stop);
                 std::thread::Builder::new()
                     .name(format!("cpu-load-{i}"))
@@ -75,7 +75,11 @@ impl CpuLoad {
                             std::hint::black_box(acc);
                         }
                     })
-                    .expect("spawn cpu-load worker")
+                    // Fewer workers (less load) rather than a panic: `.expect`
+                    // here leaked the workers already running at 100 % and
+                    // skipped the affinity restore in Drop.
+                    .map_err(|e| tracing::warn!("cpu-load worker {i} failed to spawn: {e}"))
+                    .ok()
             })
             .collect();
         Self {

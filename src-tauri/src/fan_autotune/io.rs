@@ -140,6 +140,10 @@ pub struct AutoTuneResult {
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AbortInfo {
+    /// Aborted by the thermal runaway guard: fans were just driven to 100 % and
+    /// must stay there for a cool-down (not sent to the frontend).
+    #[serde(skip)]
+    pub emergency: bool,
     pub phase: String,
     pub reason_zh: String,
     pub reason_en: String,

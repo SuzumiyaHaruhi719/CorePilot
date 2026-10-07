@@ -1,203 +1,94 @@
-// SMU mailbox protocol for AMD Ryzen (clean-room).
+// What CorePilot sends to the AMD SMU, and which CPUs it may send it to.
 //
-// These are HARDWARE-INTERFACE FACTS — SMN mailbox register addresses, SMU
-// message IDs, the request/response handshake, and the Curve-Optimizer argument
-// bit-packing. Facts/interfaces aren't copyrightable; this is an original
-// implementation written from the documented register map, not a port of any
-// GPL source.
-//
-// Ring-0 register access (PCI config dword r/w on the data-fabric device, which
-// reaches the SMN index/data pair) is abstracted behind ISmnAccess so this file
-// stays pure protocol logic — the privileged backend (PawnIO) plugs in separately.
+// The SMU mailbox itself is driven by the RyzenSMU PawnIO module (see
+// RyzenSmuHost.cs); this file only holds the handful of RSMU message IDs the
+// tuning UI uses, the argument encoding, the value bounds, and the CPU gate.
+// Message IDs and bit layouts are hardware-interface facts, written here from
+// the observed AM5 desktop behaviour.
 
 using System;
+using System.Runtime.Intrinsics.X86;
 
 namespace Sensord.Smu;
 
-/// <summary>One SMU mailbox: the three SMN dword addresses it is driven through.</summary>
-public readonly record struct SmuMailbox(uint MsgAddr, uint RspAddr, uint ArgAddr);
-
-/// <summary>Result of an SMU mailbox transaction (the value the SMU writes to RSP).</summary>
-public enum SmuStatus : byte
-{
-    Ok = 0x01,
-    Failed = 0xFF,
-    UnknownCommand = 0xFE,
-    RejectedPrereq = 0xFD,
-    RejectedBusy = 0xFC,
-    // Local (not from the SMU): the handshake never completed.
-    TimeoutReady = 0x10,
-    TimeoutResponse = 0x11,
-    AccessFailed = 0x12,
-}
-
-/// <summary>
-/// Privileged SMN register access + bus serialization. Implemented by the ring-0
-/// backend (PawnIO). All SMU traffic shares one system-wide PCI mutex, so callers
-/// take <see cref="LockBus"/> for the duration of a whole transaction.
-/// </summary>
-public interface ISmnAccess
-{
-    /// <summary>Read one SMN dword (via PCI cfg index/data on dev 0:0:0). False on failure.</summary>
-    bool ReadRegister(uint smnAddress, out uint value);
-
-    /// <summary>Write one SMN dword. False on failure.</summary>
-    bool WriteRegister(uint smnAddress, uint value);
-
-    /// <summary>Acquire the global PCI/SMN bus lock; dispose to release.</summary>
-    IDisposable LockBus();
-}
-
-/// <summary>
-/// SMN mailbox addresses and SMU message IDs for Zen 4 / Zen 5 (Granite Ridge =
-/// Ryzen 9000, our 9950X3D). Zen 5 shares Zen 4's RSMU/MP1 layout; only HSMP moved.
-/// </summary>
+/// <summary>RSMU message IDs used by the tuning UI. Valid on AM5 desktop dies
+/// only — see <see cref="CpuGate"/>.</summary>
 public static class Zen5
 {
-    public const int ArgCount = 6;
-
-    // SMN index/data registers live in the data-fabric device's PCI config space.
-    public const uint PciIndexRegister = 0x60;
-    public const uint PciDataRegister = 0x64;
-
-    public static readonly SmuMailbox Rsmu = new(0x03B10524, 0x03B10570, 0x03B10A40);
-    public static readonly SmuMailbox Mp1 = new(0x03B10530, 0x03B1057C, 0x03B109C4);
-    public static readonly SmuMailbox Hsmp = new(0x03B10934, 0x03B10980, 0x03B109E0);
-
-    // RSMU message IDs.
-    public const uint MsgGetSmuVersion = 0x02;
-    public const uint MsgGetTableVersion = 0x05;
-    public const uint MsgGetDramBaseAddress = 0x04;
-    public const uint MsgTransferTableToDram = 0x03;
-
-    // Curve Optimizer (per-core DLDO PSM margin) + all-core.
     public const uint MsgSetCoMarginPerCore = 0x06;
     public const uint MsgSetCoMarginAllCores = 0x07;
-    public const uint MsgGetCoMargin = 0xD5;
-
-    // PBO / DPTC limits.
     public const uint MsgSetPptLimit = 0x56;
     public const uint MsgSetTdcLimit = 0x57;
     public const uint MsgSetEdcLimit = 0x58;
-    public const uint MsgSetTctlMax = 0x59;
     public const uint MsgSetPboScalar = 0x5B;
-    public const uint MsgGetPboScalar = 0x6D;
-
-    // Manual OC (advanced; gated in UI).
-    public const uint MsgEnableOcMode = 0x5D;
-    public const uint MsgDisableOcMode = 0x5E;
-    public const uint MsgSetFreqAllCores = 0x5F;
-    public const uint MsgSetCpuVid = 0x61;
 }
 
-/// <summary>Bit-packing + unit conversions for SMU command arguments (Zen 4/5).</summary>
+/// <summary>Argument encoding + accepted ranges.</summary>
 public static class SmuEncoding
 {
     /// <summary>Curve-Optimizer margin range on Zen 4 and newer.</summary>
     public const int CoMarginMin = -50;
     public const int CoMarginMax = 50;
 
-    /// <summary>
-    /// Pack a logical core address into the high nibbles used by the per-core CO
-    /// command: [31:28]=CCD, [27:24]=CCX (0 on Zen5), [23:20]=core within CCX.
-    /// </summary>
+    /// <summary>Lowest limits we will write. Zero (which the old [0, 1000] clamp
+    /// let through) throttles the CPU to a crawl for the rest of the boot.</summary>
+    public const double PptMinWatts = 45;
+    public const double CurrentMinAmps = 30;
+    public const double LimitMax = 1000;
+
+    public const int ScalarMin = 1;
+    public const int ScalarMax = 10;
+
+    /// <summary>Per-core CO address in the argument's high nibbles:
+    /// [31:28] CCD, [27:24] CCX (0 on these dies), [23:20] core within the CCX.</summary>
     public static uint CoreMask(int ccd, int ccx, int core) =>
         ((uint)(ccd & 0xF) << 28) | ((uint)(ccx & 0xF) << 24) | ((uint)(core & 0xF) << 20);
 
-    /// <summary>
-    /// Build the per-core CO command argument: core address in the high bits, the
-    /// signed margin as 16-bit two's-complement in the low 16. Margin is clamped.
-    /// </summary>
-    public static uint CoMarginArg(uint coreMask, int margin)
-    {
-        int clamped = Math.Clamp(margin, CoMarginMin, CoMarginMax);
-        return (coreMask & 0xFFF00000u) | (uint)(clamped & 0xFFFF);
-    }
-
-    /// <summary>SVI3 (Zen4/5) VID → volts.</summary>
-    public static double VidToVolts(uint vid) => 0.245 + vid * 0.005;
-
-    /// <summary>SVI3 volts → VID (clamped at the 0.245 V floor).</summary>
-    public static uint VoltsToVid(double volts) =>
-        volts < 0.245 ? 0u : (uint)Math.Round((volts - 0.245) / 0.005);
+    /// <summary>Per-core CO argument: core address high, signed margin as 16-bit
+    /// two's complement low.</summary>
+    public static uint CoMarginArg(uint coreMask, int margin) =>
+        (coreMask & 0xFFF00000u) | (uint)(margin & 0xFFFF);
 }
 
 /// <summary>
-/// Drives the SMU request/response handshake over an <see cref="ISmnAccess"/>.
-/// Sequence per transaction (under the bus lock): wait until RSP is non-zero
-/// (previous command done) → clear RSP → write the argument dwords → write the
-/// message id → wait until RSP is non-zero again → read status → on OK, read the
-/// argument dwords back.
+/// The CPUs whose RSMU table the IDs above match. On Zen 2 / Zen 3 the RyzenSMU
+/// module loads just as happily, but 0x56 there is the HTC (Tctl) limit and the
+/// scalar / EDC IDs land on unrelated functions, so every write is refused
+/// unless the die is one of these.
 /// </summary>
-public sealed class SmuMailboxClient
+public static class CpuGate
 {
-    private const int MaxArgs = Zen5.ArgCount;
-    private const int PollAttempts = 8192;
-
-    private readonly ISmnAccess _smn;
-
-    public SmuMailboxClient(ISmnAccess smn) => _smn = smn ?? throw new ArgumentNullException(nameof(smn));
-
-    /// <summary>
-    /// Send <paramref name="message"/> on <paramref name="mailbox"/> with up to six
-    /// argument dwords (padded/truncated to six). On success the SMU's reply is
-    /// copied back into <paramref name="args"/>.
-    /// </summary>
-    public SmuStatus Send(SmuMailbox mailbox, uint message, uint[] args)
+    private static readonly (int Family, int Model, string Name)[] Supported =
     {
-        if (mailbox.MsgAddr == 0 || mailbox.RspAddr == 0 || mailbox.ArgAddr == 0 || message == 0)
-            return SmuStatus.UnknownCommand;
+        (0x19, 0x61, "Raphael / Dragon Range (Ryzen 7000)"),
+        (0x1A, 0x44, "Granite Ridge / Fire Range (Ryzen 9000)"),
+    };
 
-        var payload = new uint[MaxArgs];
-        if (args != null)
-            Array.Copy(args, payload, Math.Min(args.Length, MaxArgs));
+    /// <summary>Null when writes are allowed; otherwise a short English reason.</summary>
+    public static readonly string? UnsupportedReason = Check();
 
-        using (_smn.LockBus())
+    public static bool Allowed => UnsupportedReason == null;
+
+    private static string? Check()
+    {
+        if (!X86Base.IsSupported)
+            return "cpuid unavailable";
+        (int _, int ebx, int ecx, int edx) = X86Base.CpuId(0, 0);
+        string vendor = string.Concat(Ascii(ebx), Ascii(edx), Ascii(ecx));
+        if (vendor != "AuthenticAMD")
+            return $"vendor {vendor} not supported";
+        (int eax, _, _, _) = X86Base.CpuId(1, 0);
+        int baseFamily = (eax >> 8) & 0xF;
+        int family = baseFamily == 0xF ? baseFamily + ((eax >> 20) & 0xFF) : baseFamily;
+        int model = baseFamily == 0xF ? (((eax >> 16) & 0xF) << 4) | ((eax >> 4) & 0xF) : (eax >> 4) & 0xF;
+        foreach (var s in Supported)
         {
-            if (!WaitResponse(mailbox))
-                return SmuStatus.TimeoutReady;
-
-            if (!_smn.WriteRegister(mailbox.RspAddr, 0))
-                return SmuStatus.AccessFailed;
-
-            for (uint i = 0; i < MaxArgs; i++)
-            {
-                if (!_smn.WriteRegister(mailbox.ArgAddr + i * 4, payload[i]))
-                    return SmuStatus.AccessFailed;
-            }
-
-            if (!_smn.WriteRegister(mailbox.MsgAddr, message))
-                return SmuStatus.AccessFailed;
-
-            if (!WaitResponse(mailbox))
-                return SmuStatus.TimeoutResponse;
-
-            if (!_smn.ReadRegister(mailbox.RspAddr, out uint status))
-                return SmuStatus.AccessFailed;
-
-            var result = (SmuStatus)(byte)status;
-            if (result == SmuStatus.Ok && args != null)
-            {
-                int n = Math.Min(args.Length, MaxArgs);
-                for (int i = 0; i < n; i++)
-                {
-                    if (!_smn.ReadRegister(mailbox.ArgAddr + (uint)i * 4, out uint v))
-                        return SmuStatus.AccessFailed;
-                    args[i] = v;
-                }
-            }
-            return result;
+            if (s.Family == family && s.Model == model)
+                return null;
         }
+        return $"cpu family 0x{family:X} model 0x{model:X} not supported";
     }
 
-    /// <summary>Spin until the response register reads back non-zero, or give up.</summary>
-    private bool WaitResponse(SmuMailbox mailbox)
-    {
-        for (int i = 0; i < PollAttempts; i++)
-        {
-            if (_smn.ReadRegister(mailbox.RspAddr, out uint v) && v != 0)
-                return true;
-        }
-        return false;
-    }
+    private static string Ascii(int reg) =>
+        new(new[] { (char)(reg & 0xFF), (char)((reg >> 8) & 0xFF), (char)((reg >> 16) & 0xFF), (char)((reg >> 24) & 0xFF) });
 }

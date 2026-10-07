@@ -29,10 +29,10 @@ use windows::Win32::System::Performance::{
 };
 use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN;
 use windows::Win32::System::Threading::{
-    GetProcessAffinityMask, GetProcessHandleCount, IsWow64Process2, OpenProcess, OpenProcessToken,
-    QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_SYNCHRONIZE,
-    PROCESS_TERMINATE,
+    GetProcessAffinityMask, GetProcessHandleCount, IsProcessCritical, IsWow64Process2, OpenProcess,
+    OpenProcessToken, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
+    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,7 +174,29 @@ pub fn guard_critical_pid(pid: u32) -> CoreResult<()> {
             return Err(CoreError::Msg(format!("拒绝操作关键系统进程: {name}")));
         }
     }
+    // The name list misses processes Windows marks critical at runtime (e.g. the
+    // svchost hosting DcomLaunch): terminating one is a CRITICAL_PROCESS_DIED
+    // bugcheck. Ask the kernel instead of guessing from the name.
+    if is_process_critical(pid) {
+        return Err(CoreError::Msg(format!(
+            "拒绝操作关键系统进程 (PID {pid}，终止会导致蓝屏)"
+        )));
+    }
     Ok(())
+}
+
+/// `IsProcessCritical` for `pid`. `false` when the process can't be opened —
+/// then the mutating call that follows fails on its own access check anyway.
+fn is_process_critical(pid: u32) -> bool {
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut critical = windows::core::BOOL(0);
+        let ok = IsProcessCritical(handle, &mut critical).is_ok();
+        let _ = CloseHandle(handle);
+        ok && critical.as_bool()
+    }
 }
 
 /// Persistent PDH query for per-process GPU utilization.
@@ -350,18 +372,18 @@ pub(crate) struct GpuSnapshot {
     pub(crate) per_engine: HashMap<String, f64>,
 }
 
-/// Everything the single background GPU collect produces: per-PID engine data
-/// (+ aggregate + per-engine totals) plus per-PID dedicated VRAM.
+/// What the single background GPU collect produces: per-PID engine data plus
+/// the aggregate and per-engine totals. (Per-PID VRAM is NOT here: its only
+/// reader is the process list, so it is read when rows are built — see
+/// [`gpu_vram_map`].)
 pub(crate) struct GpuFullSnapshot {
     pub(crate) engine: GpuSnapshot,
-    pub(crate) vram: HashMap<u32, u64>,
 }
 
 impl Default for GpuFullSnapshot {
     fn default() -> Self {
         GpuFullSnapshot {
             engine: empty_engine_snapshot(),
-            vram: HashMap::new(),
         }
     }
 }
@@ -508,15 +530,11 @@ pub(crate) fn gpu_map() -> GpuSnapshot {
     }
 }
 
-/// One full GPU sample for the background telemetry collector: the per-PID +
-/// aggregate + per-engine snapshot (one `\GPU Engine(*)` collect) plus per-PID
-/// dedicated VRAM (one `\GPU Process Memory(*)` collect). This is the ONLY place
-/// these two wildcard collects run now; every command reads the published snapshot.
+/// One GPU sample for the background telemetry collector: the per-PID +
+/// aggregate + per-engine snapshot from one `\GPU Engine(*)` collect. The ONLY
+/// place that collect runs; every command reads the published snapshot.
 pub(crate) fn collect_gpu() -> GpuFullSnapshot {
-    GpuFullSnapshot {
-        engine: gpu_map(),
-        vram: gpu_vram_map(),
-    }
+    GpuFullSnapshot { engine: gpu_map() }
 }
 
 /// Whole-GPU per-engine utilization query, kept separate from [`GPU_QUERY`] so
@@ -643,18 +661,23 @@ pub fn thread_counts() -> CoreResult<HashMap<u32, u32>> {
     Ok(map)
 }
 
-/// Per-process dedicated VRAM (bytes) keyed by PID, via the PDH
-/// `\GPU Process Memory(*)\Dedicated Usage` counter — the same source Windows
-/// Task Manager uses. NVML does NOT report per-process VRAM on consumer (WDDM)
-/// GPUs, so PDH is the portable path. Dedicated Usage is a raw gauge (not a rate),
-/// so a single collection suffices; we open + close a short-lived query per
-/// snapshot. Returns an empty map on any failure (the column then shows "—").
-pub(crate) fn gpu_vram_map() -> HashMap<u32, u64> {
-    let mut map: HashMap<u32, u64> = HashMap::new();
+/// The `\GPU Process Memory(*)\Dedicated Usage` query, opened once. It used to be
+/// opened, expanded, collected and closed every second, 24/7, by the telemetry
+/// thread for a reader (the process list) that is rarely on screen.
+struct VramQuery {
+    query: PDH_HQUERY,
+    ctr: PDH_HCOUNTER,
+}
+// SAFETY: PDH handles are only touched behind VRAM_QUERY's mutex.
+unsafe impl Send for VramQuery {}
+
+static VRAM_QUERY: Lazy<Mutex<Option<VramQuery>>> = Lazy::new(|| Mutex::new(open_vram_query()));
+
+fn open_vram_query() -> Option<VramQuery> {
     unsafe {
         let mut query = PDH_HQUERY::default();
         if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != PDH_SUCCESS {
-            return map;
+            return None;
         }
         let path: Vec<u16> = r"\GPU Process Memory(*)\Dedicated Usage"
             .encode_utf16()
@@ -663,20 +686,36 @@ pub(crate) fn gpu_vram_map() -> HashMap<u32, u64> {
         let mut ctr = PDH_HCOUNTER::default();
         if PdhAddEnglishCounterW(query, PCWSTR(path.as_ptr()), 0, &mut ctr) != PDH_SUCCESS {
             let _ = PdhCloseQuery(query);
-            return map;
+            return None;
         }
-        if PdhCollectQueryData(query) != PDH_SUCCESS {
-            let _ = PdhCloseQuery(query);
+        Some(VramQuery { query, ctr })
+    }
+}
+
+/// Per-process dedicated VRAM (bytes) keyed by PID — the same source Windows
+/// Task Manager uses. NVML does NOT report per-process VRAM on consumer (WDDM)
+/// GPUs, so PDH is the portable path. Dedicated Usage is a raw gauge (not a
+/// rate), so each collect stands alone: reading it when rows are built gives the
+/// same values the 1 Hz collector did, only fresher. Empty map on any failure
+/// (the column then shows "—").
+pub(crate) fn gpu_vram_map() -> HashMap<u32, u64> {
+    let mut map: HashMap<u32, u64> = HashMap::new();
+    let guard = VRAM_QUERY.lock();
+    let Some(q) = guard.as_ref() else {
+        return map;
+    };
+    unsafe {
+        if PdhCollectQueryData(q.query) != PDH_SUCCESS {
             return map;
         }
         let mut size: u32 = 0;
         let mut count: u32 = 0;
-        let rc = PdhGetFormattedCounterArrayW(ctr, PDH_FMT_DOUBLE, &mut size, &mut count, None);
+        let rc = PdhGetFormattedCounterArrayW(q.ctr, PDH_FMT_DOUBLE, &mut size, &mut count, None);
         if rc == PDH_MORE_DATA && size > 0 {
             let mut buf = vec![0u8; size as usize];
             let items_ptr = buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
             if PdhGetFormattedCounterArrayW(
-                ctr,
+                q.ctr,
                 PDH_FMT_DOUBLE,
                 &mut size,
                 &mut count,
@@ -701,14 +740,30 @@ pub(crate) fn gpu_vram_map() -> HashMap<u32, u64> {
                 }
             }
         }
-        let _ = PdhCloseQuery(query);
     }
     map
 }
 
 /// Refresh and snapshot all processes. `logical` is the logical-CPU count
 /// used to normalize sysinfo's per-core CPU% into a Task-Manager-style total%.
-pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<ProcInfo> {
+/// What a row needs from sysinfo, copied out under the `state.sys` lock so the
+/// per-row OS work (handle cache, token/SID lookup, version info — slow on a
+/// network-share exe or an unreachable domain controller) runs after the lock
+/// is released. Before, that work stalled the CPU/memory snapshot every OSD,
+/// taskbar and recorder reader depends on.
+pub struct RawProc {
+    pid: u32,
+    name: String,
+    exe: Option<std::path::PathBuf>,
+    cpu_usage: f32,
+    memory: u64,
+    cpu_time_ms: u64,
+    parent: u32,
+}
+
+/// Refresh sysinfo's process table and copy out what [`build_rows`] needs.
+/// The only part of the process list that needs `state.sys`.
+pub fn collect(sys: &mut System) -> Vec<RawProc> {
     // The default refresh also asks Windows for per-process I/O counters, but
     // this view never reads them; avoiding that syscall keeps the main sampler
     // from paying for disk accounting on every visible process row.
@@ -720,21 +775,39 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
             .with_memory()
             .with_exe(UpdateKind::OnlyIfNotSet),
     );
+    sys.processes()
+        .iter()
+        .map(|(pid, process)| RawProc {
+            pid: pid.as_u32(),
+            name: process.name().to_string_lossy().to_string(),
+            exe: process
+                .exe()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(Path::to_path_buf),
+            cpu_usage: process.cpu_usage(),
+            memory: process.memory(),
+            cpu_time_ms: process.accumulated_cpu_time(),
+            parent: process.parent().map(|p| p.as_u32()).unwrap_or(0),
+        })
+        .collect()
+}
+
+/// Turn collected rows into the IPC shape. No `state.sys` needed.
+pub fn build_rows(raw: Vec<RawProc>, threads: &HashMap<u32, u32>, logical: f32) -> Vec<ProcInfo> {
     // Per-process GPU utilization/attribution + dedicated VRAM come from the
     // background telemetry collector (ONE shared collect), not a per-call PDH
-    // collect under the sys lock — that multi-second collect is what used to
-    // freeze the process list (and, via the shared blocking pool, everything else).
+    // collect — that multi-second collect is what used to freeze the process
+    // list (and, via the shared blocking pool, everything else).
     let snap = crate::telemetry::gpu_snapshot();
     let gpu = &snap.engine;
-    let gpu_vram = &snap.vram;
+    let gpu_vram = gpu_vram_map();
     // PIDs seen this refresh, used afterwards to prune the detail cache.
     let mut live_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    let out: Vec<ProcInfo> = sys
-        .processes()
-        .iter()
-        .map(|(pid, process)| {
-            let id = pid.as_u32();
-            let cpu = process.cpu_usage() / logical;
+    let out: Vec<ProcInfo> = raw
+        .into_iter()
+        .map(|r| {
+            let id = r.pid;
+            let cpu = r.cpu_usage / logical;
             let gpu_pct = gpu.util.get(&id).copied().unwrap_or(0.0);
             // Processes not in the attribution map get None/None.
             let (gpu_engine, gpu_adapter) = match gpu.attribution.get(&id) {
@@ -747,34 +820,25 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
             let power = (cpu * 0.6 + gpu_pct * 0.4).min(100.0);
             // Reuse one limited-information handle per PID; only volatile affinity
             // and handle count are queried on each refresh.
-            let details = process_details(id, process.accumulated_cpu_time());
+            let details = process_details(id, r.cpu_time_ms);
             live_pids.insert(id);
-            let exe = process.exe();
-            // Full exe path (used for both the friendly description and the
-            // per-exe icon lookup on the frontend). `None` when inaccessible.
-            let exe_path = exe.and_then(|p| {
-                if p.as_os_str().is_empty() {
-                    None
-                } else {
-                    Some(p.to_string_lossy().to_string())
-                }
-            });
-            let mut name = process.name().to_string_lossy().to_string();
-            let mut exe_path = exe_path;
+            let mut name = r.name;
+            let mut exe_path = r.exe.as_ref().map(|p| p.to_string_lossy().to_string());
             // sysinfo intentionally does not re-query an existing PID's image on
-            // Windows. A recycled PID can therefore retain the dead process's
-            // name/path; the detail cache detects that case and supplies fresh values.
+            // Windows, so a recycled PID keeps the dead process's name/path. The
+            // detail cache holds the path read from the live handle; prefer it.
             if let Some(path) = details.image_path.as_deref() {
                 exe_path = Some(path.to_owned());
                 name = path.rsplit(['\\', '/']).next().unwrap_or(path).to_owned();
             }
             let is_critical = is_critical_name(&name);
             let settable = settable_for(id) && !is_critical;
+            let description = description_for(exe_path.as_deref().map(Path::new));
             ProcInfo {
                 pid: id,
                 name,
                 cpu,
-                mem: process.memory(),
+                mem: r.memory,
                 threads: threads.get(&id).copied().unwrap_or(0),
                 gpu: gpu_pct,
                 gpu_mem: gpu_vram.get(&id).copied(),
@@ -786,14 +850,14 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
                 platform: details.platform,
                 gpu_engine,
                 gpu_adapter,
-                description: description_for(exe),
+                description,
                 // A process is only "settable" if we can both open it for
                 // SET_INFORMATION *and* aren't refusing it as Windows-critical
                 // (lsass/winlogon/services/…). Without the name check, SeDebug
                 // lets OpenProcess succeed on those, so they'd look assignable in
                 // the UI yet silently fail at the guard — confusing the user.
                 settable,
-                parent_pid: process.parent().map(|p| p.as_u32()).unwrap_or(0),
+                parent_pid: r.parent,
                 exe_path,
             }
         })
@@ -807,6 +871,41 @@ pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<
         .retain(|pid, _| live_pids.contains(pid));
 
     out
+}
+
+/// One-shot list (collect + build) for callers that own a `System` (the CLI).
+pub fn list(sys: &mut System, threads: &HashMap<u32, u32>, logical: f32) -> Vec<ProcInfo> {
+    build_rows(collect(sys), threads, logical)
+}
+
+/// Release cached handles of processes that have exited. Called while the
+/// roster isn't being enumerated (window in the tray): those handles otherwise
+/// keep every exited process as a zombie kernel object, with its PID reserved,
+/// until the list is next shown.
+pub fn sweep_exited() {
+    let mut cache = DETAIL_CACHE.lock();
+    let before = cache.len();
+    cache.retain(|_, entry| unsafe { WaitForSingleObject(entry.handle, 0) == WAIT_TIMEOUT });
+    if cache.len() != before {
+        let live: std::collections::HashSet<u32> = cache.keys().copied().collect();
+        drop(cache);
+        SETTABLE_CACHE.lock().retain(|pid, _| live.contains(pid));
+    }
+}
+
+/// Original arguments of `pid` (argv without the image), for an image relaunch
+/// that behaves like the original. Empty when the command line can't be read.
+pub fn command_line_args(pid: u32) -> Vec<std::ffi::OsString> {
+    let spid = sysinfo::Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[spid]),
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    sys.process(spid)
+        .map(|p| p.cmd().iter().skip(1).cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Terminate a process (End task). Refuses critical system processes.
@@ -865,6 +964,9 @@ struct DetailCacheEntry {
     handle: HANDLE,
     user: Option<String>,
     platform: Option<String>,
+    /// Image path read from the live handle when the entry was opened. Kept (not
+    /// returned once) so every refresh uses it over sysinfo's possibly-stale one.
+    image_path: Option<String>,
 }
 
 // The cache mutex is the sole access path, so moving this entry between threads is safe.
@@ -1114,7 +1216,7 @@ fn resolve_platform(handle: HANDLE) -> Option<String> {
 }
 
 /// Open a process once, capturing stable identity fields.
-fn open_detail_entry(pid: u32) -> Option<(DetailCacheEntry, Option<String>)> {
+fn open_detail_entry(pid: u32) -> Option<DetailCacheEntry> {
     unsafe {
         // SYNCHRONIZE is mandatory, not decorative: without it WaitForSingleObject
         // on this handle returns WAIT_FAILED (access denied), the liveness probe in
@@ -1128,13 +1230,12 @@ fn open_detail_entry(pid: u32) -> Option<(DetailCacheEntry, Option<String>)> {
             pid,
         )
         .ok()?;
-        let path = query_image_path(handle);
-        let entry = DetailCacheEntry {
+        Some(DetailCacheEntry {
             handle,
             user: resolve_user(handle),
             platform: resolve_platform(handle),
-        };
-        Some((entry, path))
+            image_path: query_image_path(handle),
+        })
     }
 }
 
@@ -1156,7 +1257,6 @@ fn query_image_path(handle: HANDLE) -> Option<String> {
 /// Read volatile details from the cached handle. CPU time comes from sysinfo's
 /// already-collected sample, avoiding a second GetProcessTimes syscall.
 fn process_details(pid: u32, accumulated_cpu_ms: u64) -> ProcDetails {
-    let mut image_path = None;
     let handle = {
         let mut cache = DETAIL_CACHE.lock();
         let stale = cache
@@ -1169,8 +1269,7 @@ fn process_details(pid: u32, accumulated_cpu_ms: u64) -> ProcDetails {
             SETTABLE_CACHE.lock().remove(&pid);
         }
         if !cache.contains_key(&pid) {
-            if let Some((entry, path)) = open_detail_entry(pid) {
-                image_path = path;
+            if let Some(entry) = open_detail_entry(pid) {
                 cache.insert(pid, entry);
             }
         }
@@ -1179,7 +1278,6 @@ fn process_details(pid: u32, accumulated_cpu_ms: u64) -> ProcDetails {
     let Some(handle) = handle else {
         return ProcDetails {
             cpu_time: accumulated_cpu_ms / 1000,
-            image_path,
             ..Default::default()
         };
     };
@@ -1198,9 +1296,15 @@ fn process_details(pid: u32, accumulated_cpu_ms: u64) -> ProcDetails {
             0
         };
         let cache = DETAIL_CACHE.lock();
-        let (user, platform) = cache
+        let (user, platform, image_path) = cache
             .get(&pid)
-            .map(|entry| (entry.user.clone(), entry.platform.clone()))
+            .map(|entry| {
+                (
+                    entry.user.clone(),
+                    entry.platform.clone(),
+                    entry.image_path.clone(),
+                )
+            })
             .unwrap_or_default();
         ProcDetails {
             affinity,
@@ -1217,6 +1321,17 @@ fn process_details(pid: u32, accumulated_cpu_ms: u64) -> ProcDetails {
 mod tests {
     use super::*;
 
+    /// The persistent VRAM query must keep working across collects (it used to
+    /// be reopened every time). Needs a GPU with processes using VRAM.
+    #[test]
+    #[ignore]
+    fn vram_query_survives_repeated_collects() {
+        let first = gpu_vram_map();
+        let second = gpu_vram_map();
+        println!("vram pids: {} then {}", first.len(), second.len());
+        assert!(!first.is_empty() && !second.is_empty());
+    }
+
     /// Regression guard: the cached handle must carry SYNCHRONIZE. Opened without
     /// it, `WaitForSingleObject` returns WAIT_FAILED instead of WAIT_TIMEOUT, so
     /// `process_details` treats every live process as a recycled PID and reopens
@@ -1224,8 +1339,7 @@ mod tests {
     /// lock — turning the handle cache into the freeze it was meant to prevent.
     #[test]
     fn cached_handle_can_be_waited_on() {
-        let (entry, _path) =
-            open_detail_entry(std::process::id()).expect("own process must be openable");
+        let entry = open_detail_entry(std::process::id()).expect("own process must be openable");
         // Our own process is alive, so the probe must time out (= not stale).
         assert_eq!(
             unsafe { WaitForSingleObject(entry.handle, 0) },

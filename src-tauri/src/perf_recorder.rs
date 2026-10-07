@@ -68,6 +68,20 @@ const MIN_RENDERED_SECS: f64 = 30.0;
 /// pathological detection storm can't grow sample buffers without limit.
 const MAX_CONCURRENT: usize = 4;
 
+/// Stored samples per session before it is thinned (4 h at 5 Hz, ~24 MB). A
+/// session only ends when its process exits, and anything under a store's
+/// install folder counts as a game — an always-on Steam tool kept growing
+/// ~140 MB a day. Past the cap every other stored sample is dropped and the
+/// store stride doubles, so memory stays bounded. Ceiling: summaries of
+/// sessions longer than the cap are computed over a uniform subsample (the
+/// chart was already downsampled to `CHART_POINTS`).
+const MAX_STORED_SAMPLES: usize = 72_000;
+
+/// Gaps between consecutive samples longer than this (sleep/hibernate with the
+/// game still running) are not integrated into energy or counted as played
+/// time: one post-resume sample used to add avg-watts × the whole sleep.
+const MAX_SAMPLE_GAP_MS: f64 = 60_000.0;
+
 /// Recording configuration pushed from the frontend. The frontend owns the
 /// stores; it lowercases exe names and hands us flat lists so the recorder never
 /// has to parse the tauri-store. Defaults: recording ON, empty lists (mirrors
@@ -215,6 +229,11 @@ struct ActiveSession {
     /// like a game" evidence the finalize filter checks (each ≙ one
     /// [`SAMPLE_PERIOD`] of game-rate rendering).
     rendered_samples: u32,
+    /// Store every `stride`-th tick's sample (doubles each time the series is
+    /// thinned, see [`MAX_STORED_SAMPLES`]).
+    stride: u64,
+    /// Ticks sampled so far.
+    ticks: u64,
 }
 
 /// **Push recorder config from the frontend.** The frontend calls this on mount
@@ -262,7 +281,7 @@ fn cpu_name(app: &AppHandle) -> Option<String> {
 fn gpu_name() -> Option<String> {
     let g = crate::gpu::gpu_oc_info_snapshot();
     if g.available && !g.name.is_empty() {
-        Some(g.name)
+        Some(g.name.clone())
     } else {
         None
     }
@@ -538,7 +557,7 @@ fn energy_wh(samples: &[PerfSampleOut]) -> Option<f64> {
     let mut any = false;
     for pair in samples.windows(2) {
         let dt = pair[1].t - pair[0].t;
-        if !dt.is_finite() || dt <= 0.0 {
+        if !dt.is_finite() || dt <= 0.0 || dt > MAX_SAMPLE_GAP_MS {
             continue;
         }
         let a = sum_power(&pair[0]);
@@ -643,6 +662,15 @@ fn downsample_rust(samples: Vec<PerfSampleOut>) -> Vec<PerfSampleOut> {
 /// persist + display. Empty and junk sessions are discarded. Best-effort: an
 /// emit failure is logged, never fatal. `pid` is the session's process id
 /// (its key in the recorder's map).
+/// Played time in ms: the span of the samples minus any sleep-sized gaps.
+fn active_ms(samples: &[PerfSampleOut]) -> f64 {
+    samples
+        .windows(2)
+        .map(|p| p[1].t - p[0].t)
+        .filter(|dt| dt.is_finite() && *dt > 0.0 && *dt <= MAX_SAMPLE_GAP_MS)
+        .sum()
+}
+
 fn finalize(app: &AppHandle, pid: u32, session: ActiveSession) {
     if session.samples.is_empty() {
         return; // nothing worth keeping
@@ -668,13 +696,21 @@ fn finalize(app: &AppHandle, pid: u32, session: ActiveSession) {
     }
     let ended_at = now_epoch_ms();
     let summary = summarize_rust(&session.samples);
+    // Wall time from start to end, minus sleep the game sat through.
+    let slept = (ended_at - session.started_at) - active_ms(&session.samples);
+    let played_ms = (ended_at - session.started_at)
+        - if slept > MAX_SAMPLE_GAP_MS {
+            slept
+        } else {
+            0.0
+        };
     let payload = SessionPayload {
         meta: SessionMeta {
             exe: session.exe,
             path: session.path,
             started_at: session.started_at,
             ended_at,
-            duration_sec: ((ended_at - session.started_at) / 1000.0).round().max(0.0) as u64,
+            duration_sec: (played_ms / 1000.0).round().max(0.0) as u64,
             cpu_name: session.cpu_name,
             gpu_name: session.gpu_name,
         },
@@ -697,6 +733,8 @@ fn start(app: &AppHandle, exe: &str, pid: u32) -> ActiveSession {
         gpu_name: gpu_name(),
         samples: Vec::new(),
         rendered_samples: 0,
+        stride: 1,
+        ticks: 0,
     }
 }
 
@@ -715,24 +753,19 @@ fn start(app: &AppHandle, exe: &str, pid: u32) -> ActiveSession {
 /// 5. Sample every live session — foreground or background — so the time
 ///    series has no holes.
 fn tick(app: &AppHandle, active: &mut HashMap<u32, ActiveSession>) {
-    let fg = crate::fps::foreground_info_now();
-    let (enabled, white, black, osd_white) = {
-        let cfg = CONFIG.lock();
-        (
-            cfg.enabled,
-            cfg.white.clone(),
-            cfg.black.clone(),
-            cfg.osd_white.clone(),
-        )
-    };
-
-    // 1. Recording disabled — finalize all active sessions and stop.
-    if !enabled {
+    // 1. Recording disabled — finalize all active sessions and stop. Checked
+    //    BEFORE the foreground probe, which otherwise ran 5×/s for nothing, and
+    //    publishing the zero here: returning early used to leave the count stuck,
+    //    keeping NVML on its 200 ms cadence and the updater warning about
+    //    "recording" sessions that no longer existed.
+    if !CONFIG.lock().enabled {
         for (pid, cur) in active.drain() {
             finalize(app, pid, cur);
         }
+        ACTIVE_SESSIONS.store(0, Ordering::Relaxed);
         return;
     }
+    let fg = crate::fps::foreground_info_now();
 
     // 2. Reap exited processes → finalize their reports.
     let dead: Vec<u32> = active
@@ -746,11 +779,6 @@ fn tick(app: &AppHandle, active: &mut HashMap<u32, ActiveSession>) {
         }
     }
 
-    // 3. Blacklist wins over everything: drop (silently — the user said NEVER
-    //    record this) any session whose exe is now blacklisted. Handles both a
-    //    list edit mid-session and a false positive being killed live.
-    active.retain(|_, s| !black.iter().any(|n| *n == s.exe));
-
     // Normalize the foreground exe the way both the backend and Task-Manager rows
     // produce it (trimmed + lowercased) for case-insensitive list matching.
     let exe_lc: Option<String> = fg.exe.as_deref().map(|e| e.trim().to_lowercase());
@@ -758,15 +786,20 @@ fn tick(app: &AppHandle, active: &mut HashMap<u32, ActiveSession>) {
     // The record white/black list takes precedence over auto-detection:
     //   - black → NEVER record.
     //   - white / OSD whitelist → force-record (even if NOT auto-detected).
-    let rec_black = exe_lc
-        .as_ref()
-        .is_some_and(|e| black.iter().any(|n| n == e));
-    let rec_white = exe_lc
-        .as_ref()
-        .is_some_and(|e| white.iter().any(|n| n == e));
-    let osd_whitelisted = exe_lc
-        .as_ref()
-        .is_some_and(|e| osd_white.iter().any(|n| n == e));
+    // Matched under the lock instead of cloning three lists 5×/s.
+    let (rec_black, rec_white, osd_whitelisted) = {
+        let cfg = CONFIG.lock();
+        // 3. Blacklist wins over everything: drop (silently — the user said
+        //    NEVER record this) any session whose exe is now blacklisted. Handles
+        //    both a list edit mid-session and a false positive being killed live.
+        active.retain(|_, s| !cfg.black.contains(&s.exe));
+        let listed = |list: &[String]| exe_lc.as_ref().is_some_and(|e| list.iter().any(|n| n == e));
+        (
+            listed(&cfg.black),
+            listed(&cfg.white),
+            listed(&cfg.osd_white),
+        )
+    };
 
     // 4. Start a session for a newly-foregrounded recordable target. Existing
     //    sessions keep running untouched (no finalize-on-switch).
@@ -789,11 +822,30 @@ fn tick(app: &AppHandle, active: &mut HashMap<u32, ActiveSession>) {
         if s.fps.is_some_and(|f| f >= crate::fps::GAME_FPS_MIN) {
             live.rendered_samples += 1;
         }
-        live.samples.push(s);
+        live.ticks += 1;
+        if live.ticks % live.stride == 0 {
+            live.samples.push(s);
+            if live.samples.len() >= MAX_STORED_SAMPLES {
+                thin(&mut live.samples);
+                live.stride *= 2;
+            }
+        }
     }
 
     // Publish the count for readers outside this thread (see ACTIVE_SESSIONS).
     ACTIVE_SESSIONS.store(active.len(), Ordering::Relaxed);
+}
+
+/// Keep every other sample (the newest always survives, so the session's end
+/// time stays exact).
+fn thin(samples: &mut Vec<PerfSampleOut>) {
+    let last = samples.len().saturating_sub(1);
+    let mut i = 0;
+    samples.retain(|_| {
+        let keep = i % 2 == 0 || i == last;
+        i += 1;
+        keep
+    });
 }
 
 /// Start the long-lived recorder thread. Idempotent — safe to call once from
@@ -861,5 +913,37 @@ mod parity_tests {
         let q = quantize_sample(sample(1.234, Some(12.3456), None));
         assert_eq!(q.t, 1.0);
         assert_eq!(q.fps, Some(12.35));
+    }
+
+    fn at(t: f64, w: f64) -> PerfSampleOut {
+        PerfSampleOut {
+            t,
+            cpu_power: Some(w),
+            ..Default::default()
+        }
+    }
+
+    /// A sleep with the game still running must not add watts × the sleep.
+    #[test]
+    fn energy_and_played_time_skip_sleep_gaps() {
+        // 100 W for 2 s, an 8 h sleep, 100 W for 2 s more.
+        let eight_h = 8.0 * 3_600_000.0;
+        let samples = vec![
+            at(0.0, 100.0),
+            at(2_000.0, 100.0),
+            at(2_000.0 + eight_h, 100.0),
+            at(4_000.0 + eight_h, 100.0),
+        ];
+        let wh = energy_wh(&samples).unwrap();
+        assert!((wh - 100.0 * 4.0 / 3600.0).abs() < 1e-9, "{wh}");
+        assert_eq!(active_ms(&samples), 4_000.0);
+    }
+
+    #[test]
+    fn thinning_halves_and_keeps_the_newest() {
+        let mut v: Vec<PerfSampleOut> = (0..10).map(|i| at(i as f64, 1.0)).collect();
+        thin(&mut v);
+        let ts: Vec<f64> = v.iter().map(|s| s.t).collect();
+        assert_eq!(ts, [0.0, 2.0, 4.0, 6.0, 8.0, 9.0]);
     }
 }

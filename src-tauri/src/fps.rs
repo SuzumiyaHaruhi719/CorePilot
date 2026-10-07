@@ -55,14 +55,15 @@ use serde::Serialize;
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Threading::{
     GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
+    GetClassNameW, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId,
+    GWL_STYLE, WS_CAPTION, WS_MAXIMIZE, WS_THICKFRAME,
 };
 
 /// Microsoft-Windows-DxgKrnl provider GUID (PresentMon's primary present source).
@@ -152,12 +153,40 @@ fn presents_live() -> Option<std::sync::MutexGuard<'static, HashMap<u32, Bucket>
     Some(map)
 }
 
-/// Ensures the ETW trace is started at most once.
+/// Ensures the ETW supervisor thread is started at most once.
 static TRACE_STARTED: OnceLock<()> = OnceLock::new();
 
-/// Keeps the running [`UserTrace`] alive for the process lifetime (dropping it
-/// stops the session). Only set when the trace started successfully.
-static TRACE: OnceLock<ferrisetw::trace::UserTrace> = OnceLock::new();
+/// Keeps the running [`UserTrace`] alive while its session runs (dropping it
+/// stops the session).
+static TRACE: once_cell::sync::Lazy<parking_lot::Mutex<Option<ferrisetw::trace::UserTrace>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+
+/// Set by [`stop_capture`]: the supervisor must not restart a session we
+/// stopped on purpose (exit / update).
+static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Session name override for a second process (the CLI). Force-stopping
+/// [`FPS_SESSION_NAME`] at start is right for the app (it clears a leftover from
+/// an ungraceful exit) — but from the CLI it killed the RUNNING app's session.
+static SESSION_NAME: OnceLock<&'static str> = OnceLock::new();
+
+fn session_name() -> &'static str {
+    SESSION_NAME.get().copied().unwrap_or(FPS_SESSION_NAME)
+}
+
+/// Use `name` instead of [`FPS_SESSION_NAME`]. Call before the first FPS read.
+pub fn use_session_name(name: &'static str) {
+    let _ = SESSION_NAME.set(name);
+}
+
+/// Stop the capture for good (app exit / update teardown).
+pub(crate) fn stop_capture() {
+    STOPPING.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Err(e) = ferrisetw::trace::stop_trace_by_name(session_name()) {
+        tracing::debug!("FPS trace already stopped or unavailable: {e:?}");
+    }
+    TRACE.lock().take();
+}
 
 // NOTE: there is deliberately no `now_filetime()` here any more.
 //
@@ -186,7 +215,10 @@ fn record_present(pid: u32, ts: i64) {
         // bucket freezes forever. Throw the stale domain away instead — a
         // fraction of a second of history is worth far less than a wedged
         // reading, and this is a once-in-a-blue-moon branch.
-        if dq.back().is_some_and(|&last| (last - ts).abs() > RETENTION_TICKS) {
+        if dq
+            .back()
+            .is_some_and(|&last| (last - ts).abs() > RETENTION_TICKS)
+        {
             dq.clear();
         }
 
@@ -222,8 +254,13 @@ fn record_present(pid: u32, ts: i64) {
     }
 }
 
-/// Start the single real-time ETW user-trace (idempotent). Any failure is
-/// swallowed: the map stays empty and FPS reads return `None`.
+/// Start the real-time ETW user-trace under a supervisor (idempotent). The
+/// session used to be started exactly once: if that start failed, or anything
+/// stopped the session later (`logman stop`, the CLI's stale-session cleanup),
+/// FPS read `None` for every process until restart — killing the fps≥20
+/// game-detection heuristic, the OSD's FPS, and the recorder's junk filter
+/// (`etw_alive` false → every launcher session kept). Now it restarts with
+/// backoff (2 s → 60 s), and only an intentional [`stop_capture`] ends it.
 fn ensure_trace_started() {
     TRACE_STARTED.get_or_init(|| {
         // `ProcessTrace` blocks for the whole life of the session, so it gets a
@@ -234,8 +271,34 @@ fn ensure_trace_started() {
         thread::Builder::new()
             .name("corepilot-etw-fps".into())
             .spawn(|| {
-                if let Err(e) = run_trace() {
-                    tracing::warn!("FPS ETW trace unavailable: {e:?}");
+                use std::sync::atomic::Ordering;
+                let mut backoff = Duration::from_secs(2);
+                let mut warned = false;
+                loop {
+                    let started = Instant::now();
+                    let result = run_trace();
+                    TRACE.lock().take();
+                    if STOPPING.load(Ordering::SeqCst)
+                        || crate::SHUTTING_DOWN.load(Ordering::SeqCst)
+                    {
+                        return;
+                    }
+                    if started.elapsed() > Duration::from_secs(60) {
+                        backoff = Duration::from_secs(2);
+                        warned = false;
+                    }
+                    match result {
+                        Err(e) if !warned => {
+                            tracing::warn!("FPS ETW trace unavailable: {e:?}; retrying");
+                            warned = true;
+                        }
+                        Err(e) => tracing::debug!("FPS ETW trace still unavailable: {e:?}"),
+                        Ok(()) => {
+                            tracing::warn!("FPS ETW session stopped from outside; restarting")
+                        }
+                    }
+                    thread::sleep(backoff);
+                    backoff = (backoff * 2).min(Duration::from_secs(60));
                 }
             })
             .ok();
@@ -311,7 +374,7 @@ fn run_trace() -> Result<(), ferrisetw::trace::TraceError> {
     // runs on THIS thread, which has a name; `start_and_process` would hand it to
     // an anonymous thread of ferrisetw's own making.
     let (trace, trace_handle) = match UserTrace::new()
-        .named(FPS_SESSION_NAME.to_string())
+        .named(session_name().to_string())
         .enable(make_provider())
         .start()
     {
@@ -321,15 +384,15 @@ fn run_trace() -> Result<(), ferrisetw::trace::TraceError> {
         Err(_) => {
             stop_stale_session();
             UserTrace::new()
-                .named(FPS_SESSION_NAME.to_string())
+                .named(session_name().to_string())
                 .enable(make_provider())
                 .start()?
         }
     };
     // Park the handle in a static: dropping a `UserTrace` stops its session, and
-    // `ProcessTrace` below would then return immediately. (`run_trace` is gated by
-    // `TRACE_STARTED`, so this `set` is the only one and never fails.)
-    let _ = TRACE.set(trace);
+    // `ProcessTrace` below would then return immediately. The supervisor clears
+    // it when the session ends.
+    *TRACE.lock() = Some(trace);
     // Blocks until the session stops — normally only at shutdown, when the
     // teardown stops `FPS_SESSION_NAME`. That return is not a failure, so it is
     // logged at debug: the `warn!` in `ensure_trace_started` must stay reserved
@@ -373,7 +436,7 @@ fn is_session_not_found(err: &ferrisetw::trace::TraceError) -> bool {
 /// startup path. `logman` stays as a fallback for the case the direct call fails
 /// for a reason other than "no such session".
 fn stop_stale_session() {
-    match ferrisetw::trace::stop_trace_by_name(FPS_SESSION_NAME) {
+    match ferrisetw::trace::stop_trace_by_name(session_name()) {
         // Stopped a leftover session.
         Ok(()) => {}
         // Nothing to stop — the clean-start path. Do NOT spawn logman for this.
@@ -390,8 +453,8 @@ fn stop_stale_session() {
 fn stop_stale_session_via_logman() {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let _ = std::process::Command::new("logman")
-        .args(["stop", FPS_SESSION_NAME, "-ets"])
+    let _ = std::process::Command::new(crate::commands::system_tool("logman"))
+        .args(["stop", session_name(), "-ets"])
         .creation_flags(CREATE_NO_WINDOW)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -429,17 +492,7 @@ fn fps_from_ticks(stamps: &VecDeque<i64>) -> Option<usize> {
 /// PID of the process owning the current foreground window, or `None` when there
 /// is no foreground window (e.g. the desktop is focused) or it can't be resolved.
 fn foreground_pid() -> Option<u32> {
-    let hwnd: HWND = unsafe { GetForegroundWindow() };
-    if hwnd.0.is_null() {
-        return None;
-    }
-    let mut pid: u32 = 0;
-    let tid = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    if tid == 0 || pid == 0 {
-        None
-    } else {
-        Some(pid)
-    }
+    pid_of(unsafe { GetForegroundWindow() })
 }
 
 /// FPS for the process owning the current foreground window, or `None`.
@@ -463,7 +516,7 @@ pub fn osd_fps() -> Option<f64> {
 /// Frame-pacing statistics for the foreground game, derived from the same ETW
 /// present stream as [`osd_fps`]. Every field is `None` when unavailable so the
 /// overlay shows "—" rather than fabricating a value.
-#[derive(Default, Serialize)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FpsStats {
     /// Presents in the last second.
@@ -487,18 +540,42 @@ const LOW01_MIN_FRAMES: usize = 200;
 /// Cheap by construction (rule 1: this runs on the main thread via
 /// [`osd_fps_stats`]) — one clock read, one lock, one copy of a bounded deque,
 /// then pure arithmetic with the lock released.
+/// Last result per PID, keyed by the bucket's (len, oldest, newest) stamps.
+/// [`stats_from_ticks`] is a pure function of the stamps and ETW delivers them
+/// in ~1 s batches, so between batches the recorder (5 Hz per session), the
+/// overlay (3 Hz) and the OSD (1 Hz) were copying up to 5k stamps under the
+/// lock the ETW callback takes on every frame and re-sorting them for the same
+/// answer. Every insert or prune changes at least one part of the key.
+type StatsKey = (usize, i64, i64);
+static STATS_CACHE: Lazy<parking_lot::Mutex<HashMap<u32, (StatsKey, FpsStats)>>> =
+    Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
+
 fn stats_for(pid: u32) -> FpsStats {
     ensure_trace_started();
-    let stamps: Vec<i64> = {
+    let (key, stamps): (StatsKey, Vec<i64>) = {
         let Some(map) = presents_live() else {
             return FpsStats::default();
         };
         let Some(bucket) = map.get(&pid) else {
+            STATS_CACHE.lock().retain(|p, _| map.contains_key(p));
             return FpsStats::default();
         };
-        bucket.stamps.iter().copied().collect()
+        let dq = &bucket.stamps;
+        let key = (
+            dq.len(),
+            dq.front().copied().unwrap_or(0),
+            dq.back().copied().unwrap_or(0),
+        );
+        if let Some((k, stats)) = STATS_CACHE.lock().get(&pid) {
+            if *k == key {
+                return *stats;
+            }
+        }
+        (key, dq.iter().copied().collect())
     };
-    stats_from_ticks(&stamps)
+    let stats = stats_from_ticks(&stamps);
+    STATS_CACHE.lock().insert(pid, (key, stats));
+    stats
 }
 
 /// The frame-pacing math, split out of [`stats_for`] so it is unit-testable over
@@ -688,36 +765,65 @@ fn is_non_game(exe: &str) -> bool {
 /// via the OSD whitelist (which force-records regardless of FPS).
 pub const GAME_FPS_MIN: f64 = 20.0;
 
-/// True when the foreground window covers its ENTIRE monitor (including the strip
-/// the taskbar occupies) — i.e. exclusive- or borderless-fullscreen. A *maximised*
-/// window only fills the work area (taskbar still visible), so it fails this and
-/// is NOT treated as a game — that's what keeps a maximised Paint / browser /
-/// Photos out of auto-detection.
-fn foreground_is_fullscreen() -> bool {
+/// The monitor `hwnd` fills as a borderless-fullscreen window, if it does —
+/// the ONE "is this a fullscreen app window" test, shared by game detection
+/// here and by the taskbar plate (whose copy had drifted: this one used to lack
+/// the style gate, so a maximized OBS or video player with an auto-hide taskbar
+/// — whose work area is the whole monitor — read as a fullscreen game).
+///
+/// Gates, in order: never the desktop/shell/Start/Search hosts or our own
+/// plate (Win11 hosts Start/Search in fullscreen transparent CoreWindows); no
+/// maximized flag, caption or sizing frame (a borderless game has none, every
+/// normal or maximized app has at least one); and the window rect covers the
+/// whole monitor.
+pub(crate) fn fullscreen_monitor(hwnd: HWND) -> Option<HMONITOR> {
     unsafe {
-        let hwnd = GetForegroundWindow();
         if hwnd.0.is_null() {
-            return false;
+            return None;
+        }
+        let mut cls = [0u16; 64];
+        let n = GetClassNameW(hwnd, &mut cls);
+        let c = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
+        const SHELL: &[&str] = &[
+            "Progman",
+            "WorkerW",
+            "Shell_TrayWnd",
+            "Shell_SecondaryTrayWnd",
+            "CorePilotTaskbarMon",
+            "Windows.UI.Core.CoreWindow",
+            "XamlExplorerHostIslandWindow",
+            "ForegroundStaging",
+        ];
+        if SHELL.contains(&c.as_str()) {
+            return None;
+        }
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        if style & (WS_MAXIMIZE.0 | WS_CAPTION.0 | WS_THICKFRAME.0) != 0 {
+            return None;
         }
         let mut wr = RECT::default();
-        if GetWindowRect(hwnd, &mut wr).is_err() {
-            return false;
-        }
+        GetWindowRect(hwnd, &mut wr).ok()?;
         let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         let mut mi = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
         if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
-            return false;
+            return None;
         }
         let m = mi.rcMonitor;
-        const TOL: i32 = 2; // a couple px of slop
-        wr.left <= m.left + TOL
-            && wr.top <= m.top + TOL
-            && wr.right >= m.right - TOL
-            && wr.bottom >= m.bottom - TOL
+        (wr.left <= m.left && wr.top <= m.top && wr.right >= m.right && wr.bottom >= m.bottom)
+            .then_some(hmon)
     }
+}
+
+fn pid_of(hwnd: HWND) -> Option<u32> {
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut pid: u32 = 0;
+    let tid = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    (tid != 0 && pid != 0).then_some(pid)
 }
 
 /// True when the present-event pipeline is producing data RIGHT NOW — i.e. the
@@ -748,7 +854,11 @@ pub async fn foreground_info() -> ForegroundInfo {
 /// Synchronous body of [`foreground_info`], for callers already off the main
 /// thread (the perf recorder).
 pub fn foreground_info_now() -> ForegroundInfo {
-    match foreground_pid() {
+    // ONE foreground read for both the PID and the fullscreen test: the library
+    // check between them can rescan the storefronts for seconds, and a second
+    // read then judged the first app's PID by a different window's geometry.
+    let hwnd = unsafe { GetForegroundWindow() };
+    match pid_of(hwnd) {
         Some(pid) => {
             // One process query; derive both the lowercased name and full path.
             let path = process_image_path(pid);
@@ -774,7 +884,7 @@ pub fn foreground_info_now() -> ForegroundInfo {
             // user alt-tabbed to (Tacview, a browser playing video, …) into a
             // "game", spawning junk perf sessions and splitting the real one.
             let presenting = fps_for(pid).is_some_and(|fps| fps >= GAME_FPS_MIN);
-            let heuristic = presenting && foreground_is_fullscreen();
+            let heuristic = presenting && fullscreen_monitor(hwnd).is_some();
 
             let is_game = not_shell && (in_library || heuristic);
             ForegroundInfo { exe, pid, is_game }

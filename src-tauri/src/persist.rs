@@ -77,8 +77,30 @@ pub(crate) fn write_atomic_bytes(path: &PathBuf, bytes: &[u8]) -> std::io::Resul
 }
 
 fn write_atomic(path: &PathBuf, map: &Map<String, Value>) -> std::io::Result<()> {
-    let bytes = serde_json::to_vec_pretty(&Value::Object(map.clone()))?;
+    // Serialize the map in place (it was deep-cloned into a `Value` first).
+    let bytes = serde_json::to_vec_pretty(map)?;
     write_atomic_bytes(path, &bytes)
+}
+
+/// Whether refreshing the backup with `map` would replace a much richer one —
+/// the signature of a LOGICAL wipe (keys present, reset to defaults), which the
+/// empty-map guard can't see. The launch after such a wipe used to overwrite
+/// the only good backup.
+/// A shrink older than a week is taken as real (the user cleared data), so a
+/// legitimate cleanup can't freeze the backup forever.
+fn backup_would_shrink(bak: &PathBuf, map: &Map<String, Value>) -> bool {
+    let Ok(meta) = fs::metadata(bak) else {
+        return false;
+    };
+    let fresh = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < std::time::Duration::from_secs(7 * 24 * 3600));
+    let new = serde_json::to_vec_pretty(map)
+        .map(|b| b.len() as u64)
+        .unwrap_or(0);
+    fresh && meta.len() >= 4096 && new * 2 < meta.len()
 }
 
 /// Parse `path` as the flat store object. `None` when missing, unreadable, or
@@ -108,7 +130,9 @@ fn load(path: PathBuf) -> Persist {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let quarantine = path.with_file_name(format!("corepilot.store.corrupt-{ts}.json"));
-        match fs::rename(&path, &quarantine) {
+        // Copy if the rename is refused (file held open): the next save rewrites
+        // the live file, and the corrupt original must survive that.
+        match fs::rename(&path, &quarantine).or_else(|_| fs::copy(&path, &quarantine).map(|_| ())) {
             Ok(()) => tracing::error!(
                 "persist: {FILE} is corrupt — quarantined to {:?}, attempting backup restore",
                 quarantine.file_name().unwrap_or_default()
@@ -125,7 +149,16 @@ fn load(path: PathBuf) -> Persist {
                 let _ = write_atomic(&path, &m);
                 m
             }
-            None => Map::new(), // genuinely fresh install (or both files lost)
+            None => {
+                if bak.exists() {
+                    // A corrupt backup too: keep it for forensics before the
+                    // next refresh replaces it.
+                    let q = bak.with_file_name("corepilot.store.bak-corrupt.json");
+                    let _ = fs::rename(&bak, &q);
+                    tracing::error!("persist: backup is unreadable too; starting empty");
+                }
+                Map::new() // genuinely fresh install (or both files lost)
+            }
         },
     };
 
@@ -133,7 +166,11 @@ fn load(path: PathBuf) -> Persist {
         wake: Mutex::new(false),
         cv: Condvar::new(),
     });
-    if !map.is_empty() {
+    if !map.is_empty() && backup_would_shrink(&bak, &map) {
+        tracing::warn!(
+            "persist: store is far smaller than its backup (possible wipe); keeping the backup"
+        );
+    } else if !map.is_empty() {
         // Backup refresh is deliberately detached: first paint only needs the live file
         // parsed; fsyncing the evidence copy here caused avoidable startup stalls.
         //
@@ -181,17 +218,36 @@ fn state(app: &AppHandle) -> &'static Mutex<Persist> {
     })
 }
 
+/// Quiet period after the last set before writing (a slider drag coalesces to
+/// one latest-wins write), and the most a steady stream of sets may postpone
+/// it — the debounce used to have no ceiling.
+const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
+const MAX_DEFER: std::time::Duration = std::time::Duration::from_secs(2);
+/// Retry delays after a failed write. AV, indexers and cloud sync briefly hold
+/// the tmp or live file; the change used to sit in memory until the NEXT set,
+/// and a hard reset before that lost it.
+const RETRY: [u64; 5] = [1, 2, 5, 10, 30];
+
 fn writer_loop(signal: Arc<WriteSignal>) {
+    let mut failures = 0usize;
     loop {
         let mut wake = signal.wake.lock().expect("persist signal poisoned");
-        while !*wake {
-            wake = signal.cv.wait(wake).expect("persist signal poisoned");
+        if failures == 0 {
+            while !*wake {
+                wake = signal.cv.wait(wake).expect("persist signal poisoned");
+            }
+        } else if !*wake {
+            let delay = std::time::Duration::from_secs(RETRY[(failures - 1).min(RETRY.len() - 1)]);
+            wake = signal
+                .cv
+                .wait_timeout(wake, delay)
+                .expect("persist signal poisoned")
+                .0;
         }
         *wake = false;
 
-        // Reset the quiet-period deadline whenever another set arrives; otherwise a
-        // slider drag still emits one fsync per condvar wake instead of one latest-wins write.
-        let mut deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        let hard = std::time::Instant::now() + MAX_DEFER;
+        let mut deadline = (std::time::Instant::now() + DEBOUNCE).min(hard);
         loop {
             let now = std::time::Instant::now();
             if now >= deadline {
@@ -207,14 +263,20 @@ fn writer_loop(signal: Arc<WriteSignal>) {
             }
             if *wake {
                 *wake = false;
-                deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+                deadline = (std::time::Instant::now() + DEBOUNCE).min(hard);
             }
         }
         drop(wake);
         if let Some(mutex) = STATE.get() {
             if let Ok(mut st) = mutex.lock() {
-                if let Err(e) = flush_persist(&mut st) {
-                    tracing::error!("persist: deferred write failed: {e}");
+                match flush_persist(&mut st) {
+                    Ok(()) => failures = 0,
+                    Err(e) => {
+                        failures += 1;
+                        tracing::error!(
+                            "persist: deferred write failed (attempt {failures}, will retry): {e}"
+                        );
+                    }
                 }
             }
         }
@@ -263,10 +325,18 @@ pub fn flush() {
 /// Async + blocking-pool: the FIRST call loads (and possibly restores) the file
 /// from disk; sync Tauri commands run on the main thread and disk IO there is
 /// the recurring freeze class.
+///
+/// `Err` when the store can't be read at all (poisoned lock, panicked load).
+/// That used to read as `None` = "absent", and the frontend then hydrated
+/// defaults and wrote them over the real data; it must keep what it has
+/// instead.
 #[tauri::command]
-pub async fn persist_get(app: AppHandle, name: String) -> Option<Value> {
-    crate::commands::run_blocking_default("persist_get", move || {
-        state(&app).lock().ok()?.map.get(&name).cloned()
+pub async fn persist_get(app: AppHandle, name: String) -> Result<Option<Value>, String> {
+    crate::commands::run_blocking_err("persist_get", move || {
+        let st = state(&app)
+            .lock()
+            .map_err(|_| "store unavailable".to_string())?;
+        Ok(st.map.get(&name).cloned())
     })
     .await
 }
@@ -567,6 +637,33 @@ mod tests {
         );
         // Live file rewritten valid.
         assert!(read_map(&path).is_some());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A logical wipe (keys reset to tiny defaults) must not overwrite a rich,
+    /// recent backup on the next launch.
+    #[test]
+    fn wiped_store_keeps_the_rich_backup() {
+        let dir = std::env::temp_dir().join(format!("cp-persist-wipe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(FILE);
+        let bak = path.with_extension("json.bak");
+
+        let mut rich = Map::new();
+        rich.insert(
+            "corepilot-fan-profiles".into(),
+            Value::String("x".repeat(20_000)),
+        );
+        write_atomic(&bak, &rich).unwrap();
+        let mut wiped = Map::new();
+        wiped.insert("corepilot-fan-profiles".into(), Value::String("{}".into()));
+        write_atomic(&path, &wiped).unwrap();
+
+        let p = load(path.clone());
+        assert_eq!(p.map.len(), 1);
+        let kept = read_map(&bak).unwrap();
+        assert_eq!(kept, rich, "backup must survive the wipe");
         let _ = fs::remove_dir_all(&dir);
     }
 }
