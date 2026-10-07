@@ -204,6 +204,56 @@ static GPU_DEMAND_MS: AtomicU64 = AtomicU64::new(0);
 static GPU_LIGHT_DEMAND_MS: AtomicU64 = AtomicU64::new(0);
 static GPU_THREAD: std::sync::Once = std::sync::Once::new();
 
+/// Device facts that cannot change while one NVML session lives: name, driver
+/// version, power-limit range, max graphics clock, acoustic-threshold range.
+/// They were re-read on every full snapshot — ~6 of its ~17 NVML calls, at 5 Hz
+/// during every recorded game. Cleared whenever NVML (re)initialises.
+#[derive(Clone)]
+struct GpuStatic {
+    name: String,
+    driver_version: String,
+    /// `Ok((min_w, max_w))`, or `Err(unsupported)`.
+    power_range: Result<(f64, f64), bool>,
+    max_graphics_clock: u32,
+    acoustic_min: Option<u32>,
+    acoustic_max: Option<u32>,
+}
+
+static GPU_STATIC: Lazy<Mutex<Option<GpuStatic>>> = Lazy::new(|| Mutex::new(None));
+
+fn read_static(device: &Device) -> GpuStatic {
+    GpuStatic {
+        name: device.name().unwrap_or_default(),
+        driver_version: device.nvml().sys_driver_version().unwrap_or_default(),
+        power_range: match device.power_management_limit_constraints() {
+            Ok(c) => Ok((mw_to_w(c.min_limit), mw_to_w(c.max_limit))),
+            Err(e) => Err(is_unsupported(&e)),
+        },
+        max_graphics_clock: max_graphics_clock(device),
+        acoustic_min: device
+            .temperature_threshold(TemperatureThreshold::AcousticMin)
+            .ok(),
+        acoustic_max: device
+            .temperature_threshold(TemperatureThreshold::AcousticMax)
+            .ok(),
+    }
+}
+
+/// The cached facts, read on first use per NVML session. A transient failure
+/// (empty name, a non-"unsupported" power-range error) is not cached, so the
+/// next snapshot retries instead of freezing a wrong value.
+fn static_info(device: &Device) -> GpuStatic {
+    if let Some(s) = GPU_STATIC.lock().clone() {
+        return s;
+    }
+    let s = read_static(device);
+    let complete = !s.name.is_empty() && !matches!(s.power_range, Err(false));
+    if complete {
+        *GPU_STATIC.lock() = Some(s.clone());
+    }
+    s
+}
+
 /// The two fields `gpu_temp_power` needs. `None` means the NVML read failed, so
 /// the caller falls back to the sidecar instead of believing a fabricated 0.
 #[derive(Clone, Copy, Default)]
@@ -262,7 +312,12 @@ fn with_device<T>(f: impl FnOnce(&mut Device<'_>) -> T) -> Result<T, String> {
             return Err("NVML不可用 / NVML unavailable".into());
         }
         match Nvml::init() {
-            Ok(n) => *state = NvmlState::Ready(n),
+            Ok(n) => {
+                // A new session (first start, or after a driver reset/TDR): the
+                // device facts may differ, so re-read them.
+                *GPU_STATIC.lock() = None;
+                *state = NvmlState::Ready(n);
+            }
             Err(e) => {
                 *state = mark_failed(was_lost || is_gpu_lost(&e), backoff);
                 return Err(format!("NVML不可用 / NVML unavailable: {e}"));
@@ -390,15 +445,21 @@ fn max_graphics_clock(device: &Device) -> u32 {
 /// Return the latest worker-published snapshot. Readers only clone an `Arc`;
 /// NVML calls happen on `corepilot-gpu-nvml`, not on the UI or sampler thread.
 #[tauri::command]
-pub async fn gpu_oc_info() -> GpuOcInfo {
-    crate::commands::run_blocking_default("gpu_oc_info", gpu_oc_info_snapshot).await
+pub async fn gpu_oc_info() -> Arc<GpuOcInfo> {
+    // An O(1) Arc read: no blocking-pool hop needed (async keeps it off the
+    // main thread).
+    gpu_oc_info_snapshot()
 }
 
 /// Synchronous body of [`gpu_oc_info`], for callers already off the main thread
 /// (overlay sampler, perf recorder, CLI).
-pub fn gpu_oc_info_snapshot() -> GpuOcInfo {
+///
+/// Returns the shared `Arc` (serde writes it exactly like the value): every
+/// reader used to deep-clone the whole struct, strings included, at 5 Hz from
+/// the recorder, 3 Hz from the overlay and 1 Hz from the taskbar plate.
+pub fn gpu_oc_info_snapshot() -> Arc<GpuOcInfo> {
     request_snapshot();
-    GPU_SNAPSHOT.lock().clone().as_ref().clone()
+    GPU_SNAPSHOT.lock().clone()
 }
 
 fn build_gpu_info() -> GpuOcInfo {
@@ -410,8 +471,9 @@ fn build_gpu_info() -> GpuOcInfo {
             ..Default::default()
         };
 
-        info.name = device.name().unwrap_or_default();
-        info.driver_version = device.nvml().sys_driver_version().unwrap_or_default();
+        let st = static_info(device);
+        info.name = st.name;
+        info.driver_version = st.driver_version;
 
         info.graphics_clock = device.clock_info(Clock::Graphics).unwrap_or(0);
         info.mem_clock = device.clock_info(Clock::Memory).unwrap_or(0);
@@ -438,17 +500,15 @@ fn build_gpu_info() -> GpuOcInfo {
         // Power limit + constraints. `supports_power_limit` is true only if both the
         // enforced limit and the constraints are readable (and not NotSupported).
         let enforced = device.enforced_power_limit();
-        let constraints = device.power_management_limit_constraints();
         info.supports_power_limit = !matches!(&enforced, Err(e) if is_unsupported(e))
-            && !matches!(&constraints, Err(e) if is_unsupported(e))
-            && enforced.is_ok()
-            && constraints.is_ok();
+            && st.power_range.is_ok()
+            && enforced.is_ok();
         if let Ok(limit) = enforced {
             info.power_limit_w = mw_to_w(limit);
         }
-        if let Ok(c) = constraints {
-            info.power_limit_min_w = mw_to_w(c.min_limit);
-            info.power_limit_max_w = mw_to_w(c.max_limit);
+        if let Ok((min_w, max_w)) = st.power_range {
+            info.power_limit_min_w = min_w;
+            info.power_limit_max_w = max_w;
         }
 
         // Fan: probe fan 0. NotSupported (or no fans) => manual control unavailable.
@@ -468,7 +528,7 @@ fn build_gpu_info() -> GpuOcInfo {
 
         // Locked-clocks support: presence of supported graphics clocks is the
         // proxy. A non-zero max also feeds the UI's slider range.
-        info.max_graphics_clock_mhz = max_graphics_clock(device);
+        info.max_graphics_clock_mhz = st.max_graphics_clock;
         // Core-clock locking (NVML) is replaced by NVAPI clock OFFSETS — the lock
         // crippled GeForce to its minimum; offsets are the real Afterburner control.
         info.supports_locked_clocks = false;
@@ -486,12 +546,8 @@ fn build_gpu_info() -> GpuOcInfo {
         // single time with a no-op set, caching the result.
         if let Ok(cur) = device.temperature_threshold(TemperatureThreshold::AcousticCurr) {
             info.temp_limit_c = cur;
-            info.temp_limit_min_c = device
-                .temperature_threshold(TemperatureThreshold::AcousticMin)
-                .unwrap_or(TEMP_LIMIT_FLOOR);
-            info.temp_limit_max_c = device
-                .temperature_threshold(TemperatureThreshold::AcousticMax)
-                .unwrap_or(90);
+            info.temp_limit_min_c = st.acoustic_min.unwrap_or(TEMP_LIMIT_FLOOR);
+            info.temp_limit_max_c = st.acoustic_max.unwrap_or(90);
             {
                 let mut def = DEFAULT_TEMP_LIMIT.lock();
                 if def.is_none() {
@@ -779,5 +835,26 @@ fn finish(requested: usize, failures: Vec<String>) -> Result<(), String> {
         Err(failures.join("; "))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod static_cache_tests {
+    use super::*;
+
+    /// Real NVIDIA GPU: two snapshots agree on the cached device facts, and the
+    /// cache filled on the first one.
+    #[test]
+    #[ignore]
+    fn static_facts_are_cached_and_stable() {
+        let a = build_gpu_info();
+        assert!(a.available, "needs an NVIDIA GPU");
+        assert!(GPU_STATIC.lock().is_some());
+        let b = build_gpu_info();
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.driver_version, b.driver_version);
+        assert_eq!(a.power_limit_max_w, b.power_limit_max_w);
+        assert_eq!(a.max_graphics_clock_mhz, b.max_graphics_clock_mhz);
+        println!("{} driver {} power {}..{} W, max {} MHz", a.name, a.driver_version, a.power_limit_min_w, a.power_limit_max_w, a.max_graphics_clock_mhz);
     }
 }

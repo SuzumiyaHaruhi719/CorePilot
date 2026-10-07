@@ -262,7 +262,7 @@ fn cpu_name(app: &AppHandle) -> Option<String> {
 fn gpu_name() -> Option<String> {
     let g = crate::gpu::gpu_oc_info_snapshot();
     if g.available && !g.name.is_empty() {
-        Some(g.name)
+        Some(g.name.clone())
     } else {
         None
     }
