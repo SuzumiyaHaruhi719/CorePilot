@@ -496,7 +496,9 @@ fn reason_for(target: &OverlayTarget, mode: OverlayMode) -> (String, String) {
             let v = target.blocked_by.as_deref().unwrap_or_default();
             (
                 format!("⚠️ {v} 内核反作弊正在运行，已禁用注入，改用窗口叠加（避免封号）"),
-                format!("⚠️ {v} kernel anti-cheat is running; injection disabled, using window overlay"),
+                format!(
+                    "⚠️ {v} kernel anti-cheat is running; injection disabled, using window overlay"
+                ),
             )
         }
         OverlayMode::Window if target.anticheat => (
@@ -569,7 +571,9 @@ fn inject_dll(app: &AppHandle, pid: u32) -> Result<(), String> {
         return Err("检测到反作弊保护，已拒绝注入（避免封号）".to_string());
     }
     if let Some(vendor) = crate::overlay::kernel_anticheat_running() {
-        return Err(format!("检测到 {vendor} 内核反作弊正在运行，已拒绝注入（避免封号）"));
+        return Err(format!(
+            "检测到 {vendor} 内核反作弊正在运行，已拒绝注入（避免封号）"
+        ));
     }
     if pid == std::process::id() || !crate::overlay::is_native(pid) {
         return Err("目标不是 64 位游戏进程，已拒绝注入".to_string());
@@ -706,6 +710,9 @@ mod tests {
     #[test]
     fn kernel_anticheat_probe_runs() {
         // Real SCM query; must not panic. Prints what this machine has running.
-        println!("kernel AC running: {:?}", crate::overlay::kernel_anticheat_running());
+        println!(
+            "kernel AC running: {:?}",
+            crate::overlay::kernel_anticheat_running()
+        );
     }
 }

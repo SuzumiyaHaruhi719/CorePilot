@@ -1052,7 +1052,15 @@ mod imp {
 
         // Pass-1 side arrays are dead from here on; free them before pass 2
         // allocates the arena (~0.5 GB at 10M records otherwise held twice).
-        drop((ext_data, spilled_data, own_alloc, own_logical, own_files, chunk, top_files));
+        drop((
+            ext_data,
+            spilled_data,
+            own_alloc,
+            own_logical,
+            own_files,
+            chunk,
+            top_files,
+        ));
 
         // --- Pass 2: build the arena from parent references -------------------
         build_arena(

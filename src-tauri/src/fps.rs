@@ -186,7 +186,10 @@ fn record_present(pid: u32, ts: i64) {
         // bucket freezes forever. Throw the stale domain away instead — a
         // fraction of a second of history is worth far less than a wedged
         // reading, and this is a once-in-a-blue-moon branch.
-        if dq.back().is_some_and(|&last| (last - ts).abs() > RETENTION_TICKS) {
+        if dq
+            .back()
+            .is_some_and(|&last| (last - ts).abs() > RETENTION_TICKS)
+        {
             dq.clear();
         }
 

@@ -55,10 +55,22 @@ static DIRTY: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::ne
 /// on auto — the BIOS curve we can no longer hand it back to. 100 % without a
 /// reading.
 const FAILSAFE_CURVE: [CurvePoint; 4] = [
-    CurvePoint { temp_c: 40.0, duty: 35.0 },
-    CurvePoint { temp_c: 60.0, duty: 55.0 },
-    CurvePoint { temp_c: 75.0, duty: 80.0 },
-    CurvePoint { temp_c: 85.0, duty: 100.0 },
+    CurvePoint {
+        temp_c: 40.0,
+        duty: 35.0,
+    },
+    CurvePoint {
+        temp_c: 60.0,
+        duty: 55.0,
+    },
+    CurvePoint {
+        temp_c: 75.0,
+        duty: 80.0,
+    },
+    CurvePoint {
+        temp_c: 85.0,
+        duty: 100.0,
+    },
 ];
 
 /// Per-fan configuration last pushed from the frontend.
@@ -504,7 +516,10 @@ fn apply_once() {
     let mut last = LAST.lock();
     let mut curve_duty = CURVE_DUTY.lock();
     // A dirty header with no config of its own still needs managing.
-    for id in dirty.iter().filter(|id| !cfgs.iter().any(|c| &c.control_id == *id)) {
+    for id in dirty
+        .iter()
+        .filter(|id| !cfgs.iter().any(|c| &c.control_id == *id))
+    {
         drive_failsafe(id, failsafe, &mut last);
     }
     for c in &cfgs {

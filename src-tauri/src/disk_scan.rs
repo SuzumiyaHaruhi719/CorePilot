@@ -2008,8 +2008,7 @@ fn start_scans(app: tauri::AppHandle, scan_ids: Vec<ScanId>) -> Vec<ScanId> {
     let mut started = Vec::new();
     for scan_id in scan_ids {
         if let Some(existing) = SCANS.get(&scan_id) {
-            if existing.status() == ScanStatus::Scanning
-                && !existing.cancel.load(Ordering::Relaxed)
+            if existing.status() == ScanStatus::Scanning && !existing.cancel.load(Ordering::Relaxed)
             {
                 started.push(scan_id);
                 continue;

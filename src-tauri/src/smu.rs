@@ -63,14 +63,18 @@ static REPLIES: Lazy<(Mutex<HashMap<u32, SmuApplyResult>>, Condvar)> =
 /// Read `smuStatus` / `smuReply` out of one sidecar line (parsed once by
 /// `crate::sidecar`); anything else is ignored.
 pub(crate) fn ingest(v: &serde_json::Value) {
-    let str_of = |o: &serde_json::Value, k: &str| o.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let str_of =
+        |o: &serde_json::Value, k: &str| o.get(k).and_then(|x| x.as_str()).map(str::to_string);
     if let Some(st) = v.get("smuStatus") {
         let mut s = STATUS.lock();
         s.pawn_io = st.get("pawnIo").and_then(|x| x.as_bool()).unwrap_or(false);
         s.loaded = st.get("loaded").and_then(|x| x.as_bool()).unwrap_or(false);
         s.version = st.get("version").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
         s.version_str = str_of(st, "versionStr").unwrap_or_default();
-        s.supported = st.get("supported").and_then(|x| x.as_bool()).unwrap_or(false);
+        s.supported = st
+            .get("supported")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
         s.unsupported_reason = str_of(st, "unsupportedReason");
     } else if let Some(rp) = v.get("smuReply") {
         let result = SmuApplyResult {
@@ -175,14 +179,15 @@ mod tests {
     /// The correlation: a reply only satisfies the writer whose id it echoes.
     #[test]
     fn reply_is_matched_by_id() {
-        let line = |id: u32, ok: bool| {
-            serde_json::json!({"smuReply": {"cmd": "ppt", "ok": ok, "detail": format!("r{id}"), "id": id}})
-        };
+        let line = |id: u32, ok: bool| serde_json::json!({"smuReply": {"cmd": "ppt", "ok": ok, "detail": format!("r{id}"), "id": id}});
         ingest(&line(9001, false));
         ingest(&line(9002, true));
         let (map, _) = &*REPLIES;
         let m = map.lock();
-        assert_eq!(m.get(&9002).map(|r| (r.ok, r.detail.as_str())), Some((true, "r9002")));
+        assert_eq!(
+            m.get(&9002).map(|r| (r.ok, r.detail.as_str())),
+            Some((true, "r9002"))
+        );
         assert_eq!(m.get(&9001).map(|r| r.ok), Some(false));
         drop(m);
         assert!(status().last_reply_ok);

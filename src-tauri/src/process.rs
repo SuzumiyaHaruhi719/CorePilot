@@ -30,10 +30,9 @@ use windows::Win32::System::Performance::{
 use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN;
 use windows::Win32::System::Threading::{
     GetProcessAffinityMask, GetProcessHandleCount, IsProcessCritical, IsWow64Process2, OpenProcess,
-    OpenProcessToken,
-    QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_SYNCHRONIZE,
-    PROCESS_TERMINATE,
+    OpenProcessToken, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
+    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -1283,7 +1282,13 @@ fn process_details(pid: u32, accumulated_cpu_ms: u64) -> ProcDetails {
         let cache = DETAIL_CACHE.lock();
         let (user, platform, image_path) = cache
             .get(&pid)
-            .map(|entry| (entry.user.clone(), entry.platform.clone(), entry.image_path.clone()))
+            .map(|entry| {
+                (
+                    entry.user.clone(),
+                    entry.platform.clone(),
+                    entry.image_path.clone(),
+                )
+            })
             .unwrap_or_default();
         ProcDetails {
             affinity,

@@ -153,7 +153,9 @@ pub fn send(line: &str) -> bool {
         Err(TrySendError::Full(_)) => {
             let now = unix_secs();
             if now.saturating_sub(FULL_WARNED_AT.swap(now, Ordering::Relaxed)) >= 60 {
-                tracing::warn!("sensord command queue full; dropping commands (sidecar not reading stdin)");
+                tracing::warn!(
+                    "sensord command queue full; dropping commands (sidecar not reading stdin)"
+                );
             }
             false
         }
@@ -235,10 +237,7 @@ pub fn refresh_interval() {
 
 fn spawn() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let path = exe
-        .parent()
-        .ok_or("no exe dir")?
-        .join(SIDECAR_EXE);
+    let path = exe.parent().ok_or("no exe dir")?.join(SIDECAR_EXE);
     if !path.exists() {
         return Err(format!("{} missing", path.display()));
     }
@@ -311,7 +310,11 @@ fn spawn() -> Result<(), String> {
 fn writer_loop(mut stdin: ChildStdin, rx: Receiver<String>) {
     for mut line in rx {
         line.push('\n');
-        if stdin.write_all(line.as_bytes()).and_then(|()| stdin.flush()).is_err() {
+        if stdin
+            .write_all(line.as_bytes())
+            .and_then(|()| stdin.flush())
+            .is_err()
+        {
             break;
         }
     }
@@ -358,7 +361,10 @@ fn on_exit(generation: u64, clean: bool, lived: Duration) {
         sh.failures = 0;
         sh.next_spawn_at = None;
         if !clean {
-            tracing::warn!("sensord exited uncleanly after {} s; respawning", lived.as_secs());
+            tracing::warn!(
+                "sensord exited uncleanly after {} s; respawning",
+                lived.as_secs()
+            );
         }
     }
 }
@@ -368,14 +374,19 @@ fn note_failure(sh: &mut Shared, why: &str) {
     let delay = sh.backoff;
     sh.next_spawn_at = Some(Instant::now() + delay);
     sh.backoff = (sh.backoff * 2).min(BACKOFF_MAX);
-    if sh.failures == WARN_AFTER_FAILURES || (sh.failures > WARN_AFTER_FAILURES && delay == BACKOFF_MAX) {
+    if sh.failures == WARN_AFTER_FAILURES
+        || (sh.failures > WARN_AFTER_FAILURES && delay == BACKOFF_MAX)
+    {
         tracing::warn!(
             failures = sh.failures,
             "sensord keeps failing ({why}); next try in {} s",
             delay.as_secs()
         );
     } else {
-        tracing::debug!("sensord start failed ({why}); retry in {} ms", delay.as_millis());
+        tracing::debug!(
+            "sensord start failed ({why}); retry in {} ms",
+            delay.as_millis()
+        );
     }
 }
 
@@ -499,11 +510,18 @@ mod tests {
         assert!(LINES.load(Ordering::Relaxed) > 0, "no lines from sensord");
         let refused = crate::smu::apply_limit("ppt", 10.0);
         assert!(!refused.ok);
-        assert!(refused.detail.starts_with("out of range"), "{}", refused.detail);
+        assert!(
+            refused.detail.starts_with("out of range"),
+            "{}",
+            refused.detail
+        );
         let pid = SHARED.lock().pid;
         let t = Instant::now();
         graceful_stop(Duration::from_secs(3));
-        assert!(t.elapsed() < Duration::from_secs(3), "stop fell back to terminate");
+        assert!(
+            t.elapsed() < Duration::from_secs(3),
+            "stop fell back to terminate"
+        );
         assert!(!crate::fps::pid_alive(pid), "sensord still running");
         ensure();
         assert_eq!(SHARED.lock().state, State::Stopped, "respawned after stop");

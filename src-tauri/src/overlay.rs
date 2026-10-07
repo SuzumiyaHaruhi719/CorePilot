@@ -217,7 +217,8 @@ const KERNEL_ANTICHEAT_SERVICES: &[(&str, &str)] = &[
 
 /// How long a kernel-AC probe result is reused (an SCM query per service).
 const KERNEL_AC_TTL: Duration = Duration::from_secs(30);
-static KERNEL_AC: Lazy<Mutex<Option<(Instant, Option<&'static str>)>>> = Lazy::new(|| Mutex::new(None));
+static KERNEL_AC: Lazy<Mutex<Option<(Instant, Option<&'static str>)>>> =
+    Lazy::new(|| Mutex::new(None));
 
 /// The vendor name of a running kernel anti-cheat, if any.
 pub fn kernel_anticheat_running() -> Option<&'static str> {
@@ -246,8 +247,8 @@ fn probe_kernel_anticheat() -> Option<&'static str> {
                 continue; // not installed
             };
             let mut status = SERVICE_STATUS::default();
-            let running =
-                QueryServiceStatus(svc, &mut status).is_ok() && status.dwCurrentState == SERVICE_RUNNING;
+            let running = QueryServiceStatus(svc, &mut status).is_ok()
+                && status.dwCurrentState == SERVICE_RUNNING;
             let _ = CloseServiceHandle(svc);
             if running {
                 hit = Some(*vendor);
@@ -333,7 +334,9 @@ pub fn classify_target(pid: u32) -> OverlayTarget {
     let is_fg = fg.pid == pid;
     let game = pid != std::process::id() && is_fg && fg.is_game;
     let exe = if is_fg { fg.exe } else { None };
-    let allowed = exe.as_deref().is_some_and(crate::overlay_inject::is_allowed);
+    let allowed = exe
+        .as_deref()
+        .is_some_and(crate::overlay_inject::is_allowed);
     let blocked_by = kernel_anticheat_running().map(str::to_string);
     let anticheat = facts.anticheat || blocked_by.is_some();
     OverlayTarget {

@@ -380,7 +380,10 @@ pub fn smu_status() -> crate::smu::SmuStatus {
 /// Per-core Curve Optimizer margin (±50, enforced in sensord).
 #[tauri::command]
 pub async fn smu_apply_co(ccd: i32, core: i32, margin: i32) -> crate::smu::SmuApplyResult {
-    run_blocking_default("smu_apply_co", move || crate::smu::apply_co(ccd, core, margin)).await
+    run_blocking_default("smu_apply_co", move || {
+        crate::smu::apply_co(ccd, core, margin)
+    })
+    .await
 }
 
 /// All-core Curve Optimizer margin.
@@ -392,7 +395,10 @@ pub async fn smu_apply_co_all(margin: i32) -> crate::smu::SmuApplyResult {
 /// PBO limit. `kind` ∈ {ppt, tdc, edc}; `value` W (PPT) or A (TDC/EDC).
 #[tauri::command]
 pub async fn smu_apply_limit(kind: String, value: f64) -> crate::smu::SmuApplyResult {
-    run_blocking_default("smu_apply_limit", move || crate::smu::apply_limit(&kind, value)).await
+    run_blocking_default("smu_apply_limit", move || {
+        crate::smu::apply_limit(&kind, value)
+    })
+    .await
 }
 
 /// PBO scalar (1×–10×).

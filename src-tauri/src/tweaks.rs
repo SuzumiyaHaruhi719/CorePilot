@@ -401,33 +401,32 @@ const START_TOKENS: &[&str] = &["auto", "demand", "disabled", "delayed-auto"];
 fn validate_snapshot(id: &str, snaps: &[Snapshot]) -> CoreResult<()> {
     let allowed = targets(id);
     for snap in snaps {
-        let ok = match snap {
-            Snapshot::Reg {
-                key,
-                name,
-                ty,
-                data,
-            } => {
-                allowed.iter().any(|t| {
-                    matches!(t, Target::Reg(k, n) if k.eq_ignore_ascii_case(key) && n == name)
-                }) && match (ty.as_deref(), data) {
+        let ok =
+            match snap {
+                Snapshot::Reg {
+                    key,
+                    name,
+                    ty,
+                    data,
+                } => allowed.iter().any(
+                    |t| matches!(t, Target::Reg(k, n) if k.eq_ignore_ascii_case(key) && n == name),
+                ) && match (ty.as_deref(), data) {
                     (None, None) => true,
                     (Some("REG_DWORD"), Some(d)) => d.parse::<u32>().is_ok(),
                     (Some("REG_SZ"), Some(d)) => !d.contains(['\0', '\n', '\r']),
                     _ => false,
+                },
+                Snapshot::Service { name, start } => {
+                    allowed
+                        .iter()
+                        .any(|t| matches!(t, Target::Service(n) if n.eq_ignore_ascii_case(name)))
+                        && start.as_deref().is_none_or(|s| START_TOKENS.contains(&s))
                 }
-            }
-            Snapshot::Service { name, start } => {
-                allowed
-                    .iter()
-                    .any(|t| matches!(t, Target::Service(n) if n.eq_ignore_ascii_case(name)))
-                    && start.as_deref().is_none_or(|s| START_TOKENS.contains(&s))
-            }
-            Snapshot::Power { guid } => {
-                allowed.iter().any(|t| matches!(t, Target::Power))
-                    && guid.as_deref().is_none_or(is_guid)
-            }
-        };
+                Snapshot::Power { guid } => {
+                    allowed.iter().any(|t| matches!(t, Target::Power))
+                        && guid.as_deref().is_none_or(is_guid)
+                }
+            };
         if !ok {
             return Err(CoreError::Msg(format!(
                 "还原数据与优化项 {id} 不符，已拒绝还原"
@@ -857,7 +856,10 @@ mod revert_validation_tests {
             (Some("REG_DWORD"), None),
         ] {
             let snaps = vec![reg(EXPLORER, "SmartScreenEnabled", ty, data)];
-            assert!(validate_snapshot("smartscreen_off", &snaps).is_err(), "{ty:?} {data:?}");
+            assert!(
+                validate_snapshot("smartscreen_off", &snaps).is_err(),
+                "{ty:?} {data:?}"
+            );
         }
         let bad_start = vec![Snapshot::Service {
             name: "SysMain".into(),

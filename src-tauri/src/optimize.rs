@@ -383,7 +383,10 @@ mod clean_tests {
         assert_eq!(acc.bytes, 6);
         assert!(!junction.exists(), "junction should be unlinked");
         assert!(!root.join("sub").exists());
-        assert_eq!(std::fs::read(outside.join("keep.txt")).unwrap(), b"precious");
+        assert_eq!(
+            std::fs::read(outside.join("keep.txt")).unwrap(),
+            b"precious"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

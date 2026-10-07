@@ -82,8 +82,8 @@ pub(crate) fn proc_snapshot(app: &AppHandle) -> Result<Arc<Vec<ProcInfo>>, Strin
     let now = monotonic_ms();
     PROC_DEMAND_MS.store(now, Ordering::Relaxed);
     let published = PROC_PUBLISHED_MS.load(Ordering::Acquire);
-    let cold = published == u64::MAX
-        || now.saturating_sub(published) > STALE_AFTER.as_millis() as u64;
+    let cold =
+        published == u64::MAX || now.saturating_sub(published) > STALE_AFTER.as_millis() as u64;
     // Start BEFORE the cold wait below: on the very first call there is no
     // sampler yet, so nothing would ever bump PROC_GEN and we would burn the
     // whole timeout waiting on a thread that does not exist.
@@ -148,58 +148,58 @@ pub fn start(app: AppHandle) {
             .spawn(move || {
                 let mut idle_ticks: u32 = 0;
                 loop {
-                let started = Instant::now();
+                    let started = Instant::now();
 
-                let state = app.state::<AppState>();
-                let logical = state.topo.logical_count.max(1) as f32;
-                let demand = PROC_DEMAND_MS.load(Ordering::Relaxed);
-                let wanted = monotonic_ms().saturating_sub(demand) <= 2_000
-                    && demand != SERVED_COLD_MS.load(Ordering::Relaxed);
-                // Process enumeration is on-demand: while no consumer asks for
-                // rows, avoid Toolhelp/OpenProcess callbacks that used to burn
-                // roughly 10% CPU even when the task-manager tab was hidden.
-                // Keep the Toolhelp walk outside `state.sys`; otherwise a slow
-                // anti-cheat/Defender callback would block overview and recorder
-                // commands even though the sampler owns the refresh.
-                let threads = wanted.then(|| process::thread_counts().unwrap_or_default());
-                // Only sysinfo's own refresh holds `state.sys`; building the rows
-                // (per-PID handle/token/version-info work) happens after release,
-                // so the metrics snapshot never waits on it.
-                let (raw, metrics) = {
-                    let mut sys = state.sys.lock();
-                    let raw = threads.is_some().then(|| process::collect(&mut sys));
-                    (raw, sysmon::sample(&mut sys))
-                };
-                *METRICS_SNAPSHOT.lock() = Arc::new(metrics);
-                match (raw, threads) {
-                    (Some(raw), Some(threads)) => {
-                        let procs = process::build_rows(raw, &threads, logical);
-                        *PROC_SNAPSHOT.lock() = Arc::new(procs);
-                        PROC_PUBLISHED_MS.store(monotonic_ms(), Ordering::Release);
-                        if COLD_DEMAND_MS.load(Ordering::Relaxed) == demand {
-                            SERVED_COLD_MS.store(demand, Ordering::Relaxed);
+                    let state = app.state::<AppState>();
+                    let logical = state.topo.logical_count.max(1) as f32;
+                    let demand = PROC_DEMAND_MS.load(Ordering::Relaxed);
+                    let wanted = monotonic_ms().saturating_sub(demand) <= 2_000
+                        && demand != SERVED_COLD_MS.load(Ordering::Relaxed);
+                    // Process enumeration is on-demand: while no consumer asks for
+                    // rows, avoid Toolhelp/OpenProcess callbacks that used to burn
+                    // roughly 10% CPU even when the task-manager tab was hidden.
+                    // Keep the Toolhelp walk outside `state.sys`; otherwise a slow
+                    // anti-cheat/Defender callback would block overview and recorder
+                    // commands even though the sampler owns the refresh.
+                    let threads = wanted.then(|| process::thread_counts().unwrap_or_default());
+                    // Only sysinfo's own refresh holds `state.sys`; building the rows
+                    // (per-PID handle/token/version-info work) happens after release,
+                    // so the metrics snapshot never waits on it.
+                    let (raw, metrics) = {
+                        let mut sys = state.sys.lock();
+                        let raw = threads.is_some().then(|| process::collect(&mut sys));
+                        (raw, sysmon::sample(&mut sys))
+                    };
+                    *METRICS_SNAPSHOT.lock() = Arc::new(metrics);
+                    match (raw, threads) {
+                        (Some(raw), Some(threads)) => {
+                            let procs = process::build_rows(raw, &threads, logical);
+                            *PROC_SNAPSHOT.lock() = Arc::new(procs);
+                            PROC_PUBLISHED_MS.store(monotonic_ms(), Ordering::Release);
+                            if COLD_DEMAND_MS.load(Ordering::Relaxed) == demand {
+                                SERVED_COLD_MS.store(demand, Ordering::Relaxed);
+                            }
+                            // Publish, then bump: releases any cold caller parked in
+                            // `proc_snapshot` waiting for THIS refresh.
+                            PROC_GEN.fetch_add(1, Ordering::Release);
                         }
-                        // Publish, then bump: releases any cold caller parked in
-                        // `proc_snapshot` waiting for THIS refresh.
-                        PROC_GEN.fetch_add(1, Ordering::Release);
-                    }
-                    _ => {
-                        idle_ticks += 1;
-                        if idle_ticks % IDLE_SWEEP_EVERY == 0 {
-                            process::sweep_exited();
+                        _ => {
+                            idle_ticks += 1;
+                            if idle_ticks % IDLE_SWEEP_EVERY == 0 {
+                                process::sweep_exited();
+                            }
                         }
                     }
-                }
 
-                // Sensors: reads the GPU snapshot (telemetry.rs) + PDH + sidecar;
-                // does not touch `state.sys`.
-                *SENSORS_SNAPSHOT.lock() = Arc::new(sensors::sample());
+                    // Sensors: reads the GPU snapshot (telemetry.rs) + PDH + sidecar;
+                    // does not touch `state.sys`.
+                    *SENSORS_SNAPSHOT.lock() = Arc::new(sensors::sample());
 
-                let elapsed = started.elapsed();
-                let remaining = SAMPLE_INTERVAL.saturating_sub(elapsed).max(MIN_GAP);
-                // park_timeout preserves the normal cadence but lets the first
-                // process-list request wake us immediately after an idle gap.
-                std::thread::park_timeout(remaining);
+                    let elapsed = started.elapsed();
+                    let remaining = SAMPLE_INTERVAL.saturating_sub(elapsed).max(MIN_GAP);
+                    // park_timeout preserves the normal cadence but lets the first
+                    // process-list request wake us immediately after an idle gap.
+                    std::thread::park_timeout(remaining);
                 }
             });
         match spawned {

@@ -38,27 +38,26 @@ const PDH_SUCCESS: u32 = 0;
 /// `DXGI_ADAPTER_FLAG_SOFTWARE` raw bit, used to skip the Microsoft Basic Render adapter.
 const DXGI_SOFTWARE_FLAG: u32 = DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32;
 
-
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SensorSample {
-    pub gpu_pct: Option<f32>,        // overall GPU utilization %, 0..100
-    pub gpu_name: Option<String>,    // primary adapter description
-    pub vram_used: Option<u64>,      // dedicated VRAM used, bytes
-    pub vram_total: Option<u64>,     // dedicated VRAM total, bytes
-    pub disk_pct: Option<f32>,       // disk active time %, 0..100 (cap at 100)
-    pub disk_read: Option<u64>,      // bytes/sec
-    pub disk_write: Option<u64>,     // bytes/sec
-    pub net_up: Option<u64>,         // bytes/sec
-    pub net_down: Option<u64>,       // bytes/sec
-    pub cpu_power: Option<f32>,      // watts
-    pub gpu_power: Option<f32>,      // watts
-    pub cpu_temp: Option<f32>,       // °C
-    pub gpu_temp: Option<f32>,       // °C
-    pub cpu_clock: Option<f64>,      // live CPU clock, MHz (base × % perf)
-    // The deep SMU/CPU sensor list (~100–180 entries, 6–10 KB serialized) used to
-    // ride along here on every 1 Hz poll for its one reader; it is now the
-    // separate `cpu_sensors` command.
+    pub gpu_pct: Option<f32>,     // overall GPU utilization %, 0..100
+    pub gpu_name: Option<String>, // primary adapter description
+    pub vram_used: Option<u64>,   // dedicated VRAM used, bytes
+    pub vram_total: Option<u64>,  // dedicated VRAM total, bytes
+    pub disk_pct: Option<f32>,    // disk active time %, 0..100 (cap at 100)
+    pub disk_read: Option<u64>,   // bytes/sec
+    pub disk_write: Option<u64>,  // bytes/sec
+    pub net_up: Option<u64>,      // bytes/sec
+    pub net_down: Option<u64>,    // bytes/sec
+    pub cpu_power: Option<f32>,   // watts
+    pub gpu_power: Option<f32>,   // watts
+    pub cpu_temp: Option<f32>,    // °C
+    pub gpu_temp: Option<f32>,    // °C
+    pub cpu_clock: Option<f64>,   // live CPU clock, MHz (base × % perf)
+                                  // The deep SMU/CPU sensor list (~100–180 entries, 6–10 KB serialized) used to
+                                  // ride along here on every 1 Hz poll for its one reader; it is now the
+                                  // separate `cpu_sensors` command.
 }
 
 /// A PDH query handle plus the counters opened against it. PDH handles are raw
@@ -202,7 +201,10 @@ const READING_MAX_AGE: Duration = Duration::from_secs(5);
 /// newest line is older than [`READING_MAX_AGE`].
 pub fn latest_readings() -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
     let s = *SIDECAR.lock();
-    if !s.received_at.is_some_and(|t| t.elapsed() <= READING_MAX_AGE) {
+    if !s
+        .received_at
+        .is_some_and(|t| t.elapsed() <= READING_MAX_AGE)
+    {
         return (None, None, None, None);
     }
     (s.cpu_temp, s.cpu_power, s.gpu_temp, s.gpu_power)
