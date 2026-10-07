@@ -54,7 +54,7 @@ fn tr(en: bool, en_s: &'static str, zh_s: &'static str) -> &'static str {
 /// Run a console command silently and capture stdout (lossy UTF-8). Returns
 /// `None` when the process could not be spawned at all.
 fn run_capture(program: &str, args: &[&str]) -> Option<std::process::Output> {
-    Command::new(program)
+    Command::new(crate::commands::system_tool(program))
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
         .output()

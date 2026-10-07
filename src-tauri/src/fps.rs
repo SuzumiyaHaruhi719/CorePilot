@@ -390,7 +390,7 @@ fn stop_stale_session() {
 fn stop_stale_session_via_logman() {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let _ = std::process::Command::new("logman")
+    let _ = std::process::Command::new(crate::commands::system_tool("logman"))
         .args(["stop", FPS_SESSION_NAME, "-ets"])
         .creation_flags(CREATE_NO_WINDOW)
         .stdout(std::process::Stdio::null())

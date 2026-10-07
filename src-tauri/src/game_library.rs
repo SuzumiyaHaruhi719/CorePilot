@@ -285,7 +285,7 @@ fn scan_gog() -> Vec<GameEntry> {
 fn reg_query(key: &str, extra: &[&str]) -> String {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new("reg")
+    std::process::Command::new(crate::commands::system_tool("reg"))
         .arg("query")
         .arg(key)
         .args(extra)

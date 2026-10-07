@@ -220,6 +220,22 @@ where
         .map_err(|e| CoreError::Msg(format!("blocking task failed: {e}")))?
 }
 
+/// Absolute path of a Windows helper tool (`reg`, `sc`, `powercfg`, …). A bare
+/// name goes through `CreateProcess`'s search order, which looks in the
+/// application's own directory first — and this process runs elevated, so a
+/// `reg.exe` planted next to a portable install would run as admin.
+pub(crate) fn system_tool(name: &str) -> std::path::PathBuf {
+    let root = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    match name {
+        "explorer" => root.join("explorer.exe"),
+        "powershell" => root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
+        _ => root.join("System32").join(format!("{name}.exe")),
+    }
+}
+
 /// Duration above which a blocking-capable command body logs a warning. The
 /// recurring "未响应" freezes were sync commands stalling the main thread for
 /// seconds; now that they run on the blocking pool, this keeps naming the slow
@@ -419,7 +435,7 @@ pub async fn reveal_in_explorer(path: String) -> CoreResult<()> {
         }
         // `explorer /select,"<full path>"` — pass verbatim via raw_arg so the path
         // (which may contain spaces) is quoted correctly for explorer's parser.
-        std::process::Command::new("explorer.exe")
+        std::process::Command::new(system_tool("explorer"))
             .raw_arg(format!("/select,\"{p}\""))
             .creation_flags(0x0800_0000)
             .spawn()
@@ -510,7 +526,7 @@ pub async fn get_autostart() -> bool {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            std::process::Command::new("schtasks")
+            std::process::Command::new(system_tool("schtasks"))
                 .args(["/query", "/tn", AUTOSTART_TASK])
                 .creation_flags(0x0800_0000) // CREATE_NO_WINDOW — never flash a console
                 .output()
@@ -545,7 +561,7 @@ fn create_autostart_task() -> Result<(), String> {
     // raw_arg writes the command line verbatim, so we emit `/tr "\"<exe>\""`
     // → schtasks stores the action as a quoted path. (Command's own arg
     // escaping of embedded quotes is version-fragile, hence raw_arg.)
-    let mut cmd = std::process::Command::new("schtasks");
+    let mut cmd = std::process::Command::new(system_tool("schtasks"));
     cmd.raw_arg("/create")
         .raw_arg("/f")
         .raw_arg("/tn")
@@ -591,7 +607,7 @@ pub fn repair_autostart_path() {
         };
         let exe = exe.to_string_lossy().to_string();
 
-        let Ok(out) = std::process::Command::new("schtasks")
+        let Ok(out) = std::process::Command::new(system_tool("schtasks"))
             .args(["/query", "/tn", AUTOSTART_TASK, "/fo", "LIST", "/v"])
             .creation_flags(NO_WINDOW)
             .output()
@@ -636,7 +652,7 @@ pub async fn set_autostart(enable: bool) -> Result<(), String> {
             if enable {
                 create_autostart_task()?;
             } else {
-                let out = std::process::Command::new("schtasks")
+                let out = std::process::Command::new(system_tool("schtasks"))
                     .args(["/delete", "/f", "/tn", AUTOSTART_TASK])
                     .creation_flags(NO_WINDOW)
                     .output()

@@ -28,7 +28,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Run a console helper and map a non-zero exit (or spawn failure) to an error
 /// carrying stderr/stdout. Used for the commands that MUST succeed.
 fn run(program: &str, args: &[&str]) -> CoreResult<()> {
-    let out = Command::new(program)
+    let out = Command::new(crate::commands::system_tool(program))
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
@@ -54,7 +54,7 @@ fn run(program: &str, args: &[&str]) -> CoreResult<()> {
 /// Best-effort variant: run but ignore failure (e.g. deleting a value that isn't
 /// there during revert, or stopping an already-stopped service).
 fn run_soft(program: &str, args: &[&str]) {
-    let _ = Command::new(program)
+    let _ = Command::new(crate::commands::system_tool(program))
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
         .output();
@@ -64,7 +64,7 @@ fn run_soft(program: &str, args: &[&str]) {
 /// failure yields `(false, "")`. Used to *read* current system state (reg query
 /// / sc qc / powercfg) when snapshotting, where failure simply means "unknown".
 fn run_capture(program: &str, args: &[&str]) -> (bool, String) {
-    match Command::new(program)
+    match Command::new(crate::commands::system_tool(program))
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
@@ -113,6 +113,11 @@ const MMCSS_PROFILE: &str =
     r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile";
 const POWER_BALANCED: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
 const POWER_ULTIMATE: &str = "e9a42b02-d5df-448d-aa00-03f14749eb61";
+/// Fixed GUID for CorePilot's copy of the Ultimate Performance template. A
+/// GUID-less `-duplicatescheme` minted a new plan on every apply (they piled up
+/// in the control panel) and then activated the hidden template instead of the
+/// copy; duplicating to one fixed GUID is idempotent (a repeat fails harmlessly).
+const POWER_ULTIMATE_COPY: &str = "c09e7a11-0e5a-4d1f-b2c3-e9a42b02d5df";
 
 // --- reversible-state snapshot / restore ---------------------------------------
 //
@@ -319,68 +324,117 @@ fn is_known_tweak(id: &str) -> bool {
 
 // --- which targets each tweak touches -------------------------------------------
 
-/// The exact set of targets a tweak modifies, so we can snapshot them before
-/// applying and restore them on revert. MUST stay in sync with `tweak_apply`.
-fn targets_for(id: &str) -> Vec<Snapshot> {
-    // We reuse the `Snapshot` enum as the *descriptor* of what to capture (the
-    // value fields are filled in by the capture step), so this just lists the
-    // keys/services/power each id touches.
-    let reg = |key: &str, name: &str| capture_reg(key, name);
+/// One thing a tweak may change. This table is the single source for BOTH the
+/// pre-apply capture and the revert allow-list: `tweak_revert` refuses any
+/// snapshot entry not listed here for that id. Without that, revert wrote
+/// whatever registry key/service the caller sent — from an elevated process,
+/// e.g. a service `ImagePath`, i.e. SYSTEM code execution for any compromised
+/// frontend. MUST stay in sync with `tweak_apply`.
+#[derive(Debug, Clone, Copy)]
+enum Target {
+    Reg(&'static str, &'static str),
+    Service(&'static str),
+    Power,
+}
+
+const PRIORITY_CONTROL: &str = r"HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl";
+const HVCI: &str =
+    r"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity";
+const EXPLORER: &str = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer";
+const WU_AU: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU";
+const GAME_CONFIG: &str = r"HKCU\System\GameConfigStore";
+const GAME_DVR_POLICY: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR";
+
+fn targets(id: &str) -> &'static [Target] {
+    use Target::{Power, Reg, Service};
     match id {
         // ---- SAFE ----
-        "mmcss_gaming" => vec![
-            reg(MMCSS_PROFILE, "SystemResponsiveness"),
-            reg(MMCSS_GAMES, "GPU Priority"),
-            reg(MMCSS_GAMES, "Priority"),
-            reg(MMCSS_GAMES, "Scheduling Category"),
-            reg(MMCSS_GAMES, "SFIO Priority"),
+        "mmcss_gaming" => &[
+            Reg(MMCSS_PROFILE, "SystemResponsiveness"),
+            Reg(MMCSS_GAMES, "GPU Priority"),
+            Reg(MMCSS_GAMES, "Priority"),
+            Reg(MMCSS_GAMES, "Scheduling Category"),
+            Reg(MMCSS_GAMES, "SFIO Priority"),
         ],
-        "network_throttling_off" => vec![reg(MMCSS_PROFILE, "NetworkThrottlingIndex")],
-        "foreground_boost" => vec![reg(
-            r"HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl",
-            "Win32PrioritySeparation",
-        )],
-        "menu_delay_0" => vec![reg(r"HKCU\Control Panel\Desktop", "MenuShowDelay")],
+        "network_throttling_off" => &[Reg(MMCSS_PROFILE, "NetworkThrottlingIndex")],
+        "foreground_boost" => &[Reg(PRIORITY_CONTROL, "Win32PrioritySeparation")],
+        "menu_delay_0" => &[Reg(r"HKCU\Control Panel\Desktop", "MenuShowDelay")],
         // fsutil's disablelastaccess lives in the registry; capture it so revert
         // restores the prior policy byte instead of assuming "2".
-        "ntfs_lastaccess_off" => vec![reg(
+        "ntfs_lastaccess_off" => &[Reg(
             r"HKLM\SYSTEM\CurrentControlSet\Control\FileSystem",
             "NtfsDisableLastAccessUpdate",
         )],
-        "telemetry_off" => vec![
-            capture_service("DiagTrack"),
-            capture_service("dmwappushservice"),
+        "telemetry_off" => &[Service("DiagTrack"), Service("dmwappushservice")],
+        "ultimate_power_plan" => &[Power],
+        "game_dvr_off" => &[
+            Reg(GAME_CONFIG, "GameDVR_Enabled"),
+            Reg(GAME_DVR_POLICY, "AllowGameDVR"),
         ],
-        "ultimate_power_plan" => vec![capture_power()],
-        "game_dvr_off" => vec![
-            reg(r"HKCU\System\GameConfigStore", "GameDVR_Enabled"),
-            reg(
-                r"HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR",
-                "AllowGameDVR",
-            ),
-        ],
-
         // ---- DANGER ----
         // Defender realtime monitoring is toggled via Set-MpPreference, not a
         // directly captured key; no reliable snapshot target, so revert falls
         // back to re-enabling (documented default) as before.
-        "defender_rt_off" => vec![],
-        "vbs_off" => vec![reg(
-            r"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity",
-            "Enabled",
-        )],
-        "smartscreen_off" => vec![reg(
-            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer",
-            "SmartScreenEnabled",
-        )],
-        "sysmain_off" => vec![capture_service("SysMain")],
-        "search_off" => vec![capture_service("WSearch")],
-        "auto_update_off" => vec![reg(
-            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU",
-            "NoAutoUpdate",
-        )],
-        _ => vec![],
+        "defender_rt_off" => &[],
+        "vbs_off" => &[Reg(HVCI, "Enabled")],
+        "smartscreen_off" => &[Reg(EXPLORER, "SmartScreenEnabled")],
+        "sysmain_off" => &[Service("SysMain")],
+        "search_off" => &[Service("WSearch")],
+        "auto_update_off" => &[Reg(WU_AU, "NoAutoUpdate")],
+        _ => &[],
     }
+}
+
+fn capture(target: Target) -> Snapshot {
+    match target {
+        Target::Reg(key, name) => capture_reg(key, name),
+        Target::Service(name) => capture_service(name),
+        Target::Power => capture_power(),
+    }
+}
+
+/// Start-type tokens `sc config start=` accepts (and `capture_service` emits).
+const START_TOKENS: &[&str] = &["auto", "demand", "disabled", "delayed-auto"];
+
+/// Refuse a snapshot that names anything `id` doesn't touch, or carries a value
+/// shape our capture can't have produced.
+fn validate_snapshot(id: &str, snaps: &[Snapshot]) -> CoreResult<()> {
+    let allowed = targets(id);
+    for snap in snaps {
+        let ok = match snap {
+            Snapshot::Reg {
+                key,
+                name,
+                ty,
+                data,
+            } => {
+                allowed.iter().any(|t| {
+                    matches!(t, Target::Reg(k, n) if k.eq_ignore_ascii_case(key) && n == name)
+                }) && match (ty.as_deref(), data) {
+                    (None, None) => true,
+                    (Some("REG_DWORD"), Some(d)) => d.parse::<u32>().is_ok(),
+                    (Some("REG_SZ"), Some(d)) => !d.contains(['\0', '\n', '\r']),
+                    _ => false,
+                }
+            }
+            Snapshot::Service { name, start } => {
+                allowed
+                    .iter()
+                    .any(|t| matches!(t, Target::Service(n) if n.eq_ignore_ascii_case(name)))
+                    && start.as_deref().is_none_or(|s| START_TOKENS.contains(&s))
+            }
+            Snapshot::Power { guid } => {
+                allowed.iter().any(|t| matches!(t, Target::Power))
+                    && guid.as_deref().is_none_or(is_guid)
+            }
+        };
+        if !ok {
+            return Err(CoreError::Msg(format!(
+                "还原数据与优化项 {id} 不符，已拒绝还原"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Capture the targets for `id` and serialize them to a JSON snapshot string that
@@ -390,7 +444,7 @@ fn targets_for(id: &str) -> Vec<Snapshot> {
 /// frontend stores verbatim and which makes revert take the documented-default
 /// fallback path.
 fn snapshot_before_apply(id: &str) -> String {
-    let snaps = targets_for(id);
+    let snaps: Vec<Snapshot> = targets(id).iter().map(|t| capture(*t)).collect();
     if snaps.is_empty() {
         return String::new();
     }
@@ -399,8 +453,8 @@ fn snapshot_before_apply(id: &str) -> String {
 
 // --- restore from snapshot ------------------------------------------------------
 
-/// Restore one captured target to its exact prior value. Best-effort.
-fn restore_one(snap: &Snapshot) {
+/// Restore one captured target to its exact prior value.
+fn restore_one(snap: &Snapshot) -> CoreResult<()> {
     match snap {
         Snapshot::Reg {
             key,
@@ -408,51 +462,61 @@ fn restore_one(snap: &Snapshot) {
             ty,
             data,
         } => match (ty, data) {
-            (Some(ty), Some(data)) => {
-                // Restore the exact prior type+data.
-                let _ = reg_add(key, name, ty, data);
+            // Restore the exact prior type+data.
+            (Some(ty), Some(data)) => reg_add(key, name, ty, data),
+            // Value did not exist before — remove what the tweak added (absent
+            // already is fine, hence best-effort).
+            _ => {
+                reg_del(key, name);
+                Ok(())
             }
-            // Value did not exist before — remove what the tweak added.
-            _ => reg_del(key, name),
         },
         Snapshot::Service { name, start } => {
             if let Some(start) = start {
-                let _ = sc_config(name, start);
+                sc_config(name, start)?;
                 // If we are re-enabling a service, also (best-effort) start it so
                 // behaviour matches the documented-default revert path.
                 if start != "disabled" {
                     run_soft("sc", &["start", name]);
                 }
             }
+            Ok(())
         }
-        Snapshot::Power { guid } => {
-            if let Some(guid) = guid {
-                if is_guid(guid) {
-                    let _ = powercfg(&["-setactive", guid]);
-                }
-            }
-        }
+        Snapshot::Power { guid } => match guid {
+            Some(guid) if is_guid(guid) => powercfg(&["-setactive", guid]),
+            _ => Ok(()),
+        },
     }
 }
 
-/// Try to revert from the JSON `snapshot` captured at apply time and passed back
-/// by the frontend. Returns true if the snapshot was non-empty and parsed into at
-/// least one restorable target (so the caller skips the documented-default
-/// fallback). An empty or unparseable string returns false → fallback.
-fn restore_from_snapshot(snapshot: &str) -> bool {
+/// Revert from the JSON `snapshot` captured at apply time and passed back by the
+/// frontend. `Ok(false)` = no usable snapshot (empty / unparseable / no targets),
+/// so the caller takes the documented-default fallback. Every target is
+/// attempted; failures are collected and reported together instead of claiming
+/// "已还原" while e.g. HVCI stayed off.
+fn restore_from_snapshot(id: &str, snapshot: &str) -> CoreResult<bool> {
     if snapshot.trim().is_empty() {
-        return false;
+        return Ok(false);
     }
     let Ok(snaps) = serde_json::from_str::<Vec<Snapshot>>(snapshot) else {
-        return false;
+        return Ok(false);
     };
     if snaps.is_empty() {
-        return false;
+        return Ok(false);
     }
-    for snap in &snaps {
-        restore_one(snap);
+    validate_snapshot(id, &snaps)?;
+    let failures: Vec<String> = snaps
+        .iter()
+        .filter_map(|s| restore_one(s).err().map(|e| e.to_string()))
+        .collect();
+    if failures.is_empty() {
+        Ok(true)
+    } else {
+        Err(CoreError::Msg(format!(
+            "部分设置未能还原: {}",
+            failures.join("；")
+        )))
     }
-    true
 }
 
 // --- apply / revert dispatch ---------------------------------------------------
@@ -468,12 +532,23 @@ fn restore_from_snapshot(snapshot: &str) -> bool {
 /// error and no snapshot — the system was at worst partially changed, and reverting
 /// it would need a snapshot we never handed out, so the frontend leaves the toggle
 /// off.
+///
+/// A multi-step tweak that fails partway is rolled back from that same snapshot
+/// before the error is returned — otherwise the system was left half-changed and
+/// a retry snapshotted the half-changed state as "prior", losing the original.
+///
+/// Async + blocking pool: every arm spawns `reg`/`sc`/`powercfg`/`powershell`
+/// (rule 1 — a sync command would run them on the main thread).
 #[tauri::command]
-pub fn tweak_apply(id: String) -> CoreResult<String> {
+pub async fn tweak_apply(id: String) -> CoreResult<String> {
+    crate::commands::run_blocking(move || tweak_apply_blocking(&id)).await
+}
+
+fn tweak_apply_blocking(id: &str) -> CoreResult<String> {
     // Capture-then-mutate. Done first so the returned snapshot reflects the
     // pre-apply state even for a tweak that only partially succeeds.
-    let snapshot = snapshot_before_apply(&id);
-    let applied: CoreResult<()> = match id.as_str() {
+    let snapshot = snapshot_before_apply(id);
+    let applied: CoreResult<()> = match id {
         // ---- SAFE ----
         "mmcss_gaming" => {
             reg_add(MMCSS_PROFILE, "SystemResponsiveness", "REG_DWORD", "10")?;
@@ -510,9 +585,12 @@ pub fn tweak_apply(id: String) -> CoreResult<String> {
             Ok(())
         }
         "ultimate_power_plan" => {
-            // Duplicate may already exist; that's fine — just activate it.
-            run_soft("powercfg", &["-duplicatescheme", POWER_ULTIMATE]);
-            powercfg(&["-setactive", POWER_ULTIMATE])
+            // The copy may already exist from an earlier apply; that's fine.
+            run_soft(
+                "powercfg",
+                &["-duplicatescheme", POWER_ULTIMATE, POWER_ULTIMATE_COPY],
+            );
+            powercfg(&["-setactive", POWER_ULTIMATE_COPY])
         }
         "game_dvr_off" => {
             reg_add(
@@ -560,9 +638,15 @@ pub fn tweak_apply(id: String) -> CoreResult<String> {
 
         other => Err(CoreError::Msg(format!("未知的优化项: {other}"))),
     };
-    // Propagate any apply error; otherwise hand back the captured snapshot so the
-    // frontend can persist it and pass it to a later revert.
-    applied.map(|()| snapshot)
+    if let Err(e) = applied {
+        if let Err(rollback) = restore_from_snapshot(id, &snapshot) {
+            tracing::warn!("tweak {id}: rollback after failed apply also failed: {rollback}");
+        }
+        return Err(e);
+    }
+    // Hand back the captured snapshot so the frontend can persist it and pass it
+    // to a later revert.
+    Ok(snapshot)
 }
 
 /// Revert the tweak, restoring the EXACT pre-apply state from the `snapshot` that
@@ -572,18 +656,22 @@ pub fn tweak_apply(id: String) -> CoreResult<String> {
 /// build that didn't return one) it falls back to writing Windows' documented
 /// defaults below.
 #[tauri::command]
-pub fn tweak_revert(id: String, snapshot: String) -> CoreResult<()> {
+pub async fn tweak_revert(id: String, snapshot: String) -> CoreResult<()> {
+    crate::commands::run_blocking(move || tweak_revert_blocking(&id, &snapshot)).await
+}
+
+fn tweak_revert_blocking(id: &str, snapshot: &str) -> CoreResult<()> {
     // Validate the id against the known set first so an unknown id still errors
     // the same way it always did, even with no snapshot present.
-    if !is_known_tweak(&id) {
+    if !is_known_tweak(id) {
         return Err(CoreError::Msg(format!("未知的优化项: {id}")));
     }
     // True reversible restore from the pre-apply snapshot, if we have a usable one.
-    if restore_from_snapshot(&snapshot) {
+    if restore_from_snapshot(id, snapshot)? {
         return Ok(());
     }
     // No snapshot → documented-default fallback (legacy behaviour).
-    match id.as_str() {
+    match id {
         // ---- SAFE ----
         "mmcss_gaming" => {
             reg_add(MMCSS_PROFILE, "SystemResponsiveness", "REG_DWORD", "20")?;
@@ -666,20 +754,127 @@ pub fn tweak_revert(id: String, snapshot: String) -> CoreResult<()> {
     }
 }
 
+/// Exit code our restore-point script uses for "Checkpoint-Computer returned but
+/// no new point exists" (Windows' 24 h rate limit, or System Protection off).
+const RESTORE_POINT_NOT_CREATED: i32 = 3;
+
 /// Create a System Restore point before the user applies tweaks. Windows
-/// rate-limits these to one per ~24h by default; a rate-limited call is reported
-/// as a (non-fatal) message the UI can surface.
+/// rate-limits these to one per ~24 h and `Checkpoint-Computer` then SUCCEEDS
+/// with only a (localised) warning — so we compare the newest restore point's
+/// sequence number before and after instead of trusting the exit status.
+///
+/// Async + blocking pool: this is a VSS checkpoint, often tens of seconds.
 #[tauri::command]
-pub fn create_restore_point() -> CoreResult<()> {
-    // Ensure protection is on for C: then checkpoint.
-    run_soft(
-        "powershell",
-        &[
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Enable-ComputerRestore -Drive 'C:\\'",
-        ],
-    );
-    ps("Checkpoint-Computer -Description 'CorePilot 优化前' -RestorePointType MODIFY_SETTINGS")
+pub async fn create_restore_point() -> CoreResult<()> {
+    crate::commands::run_blocking(create_restore_point_blocking).await
+}
+
+fn create_restore_point_blocking() -> CoreResult<()> {
+    const SCRIPT: &str = "$d = $env:SystemDrive + '\\'; \
+        Enable-ComputerRestore -Drive $d -ErrorAction SilentlyContinue; \
+        $b = (Get-ComputerRestorePoint -ErrorAction SilentlyContinue | Measure-Object -Property SequenceNumber -Maximum).Maximum; \
+        Checkpoint-Computer -Description 'CorePilot 优化前' -RestorePointType MODIFY_SETTINGS -WarningAction SilentlyContinue; \
+        $a = (Get-ComputerRestorePoint -ErrorAction SilentlyContinue | Measure-Object -Property SequenceNumber -Maximum).Maximum; \
+        if ($a -eq $b) { exit 3 }";
+    let out = Command::new(crate::commands::system_tool("powershell"))
+        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| CoreError::Msg(format!("powershell 启动失败: {e}")))?;
+    match out.status.code() {
+        Some(0) => Ok(()),
+        Some(RESTORE_POINT_NOT_CREATED) => Err(CoreError::Msg(
+            "未新建还原点：Windows 每 24 小时只允许创建一个，或系统保护已关闭".into(),
+        )),
+        _ => {
+            let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Err(CoreError::Msg(format!("创建还原点失败: {msg}")))
+        }
+    }
+}
+
+#[cfg(test)]
+mod revert_validation_tests {
+    use super::*;
+
+    fn reg(key: &str, name: &str, ty: Option<&str>, data: Option<&str>) -> Snapshot {
+        Snapshot::Reg {
+            key: key.into(),
+            name: name.into(),
+            ty: ty.map(Into::into),
+            data: data.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn accepts_what_capture_produces() {
+        let snaps = vec![
+            reg(HVCI, "Enabled", Some("REG_DWORD"), Some("1")),
+            reg(&HVCI.to_lowercase(), "Enabled", None, None),
+        ];
+        assert!(validate_snapshot("vbs_off", &snaps).is_ok());
+        let svc = vec![Snapshot::Service {
+            name: "diagtrack".into(),
+            start: Some("delayed-auto".into()),
+        }];
+        assert!(validate_snapshot("telemetry_off", &svc).is_ok());
+        let power = vec![Snapshot::Power {
+            guid: Some(POWER_BALANCED.into()),
+        }];
+        assert!(validate_snapshot("ultimate_power_plan", &power).is_ok());
+    }
+
+    #[test]
+    fn rejects_targets_outside_the_tweak() {
+        // Another tweak's key.
+        let foreign = vec![reg(WU_AU, "NoAutoUpdate", Some("REG_DWORD"), Some("0"))];
+        assert!(validate_snapshot("vbs_off", &foreign).is_err());
+        // The SYSTEM-execution primitive.
+        let image_path = vec![reg(
+            r"HKLM\SYSTEM\CurrentControlSet\Services\DiagTrack",
+            "ImagePath",
+            Some("REG_EXPAND_SZ"),
+            Some(r"C:\evil.exe"),
+        )];
+        assert!(validate_snapshot("telemetry_off", &image_path).is_err());
+        let svc = vec![Snapshot::Service {
+            name: "WinDefend".into(),
+            start: Some("disabled".into()),
+        }];
+        assert!(validate_snapshot("sysmain_off", &svc).is_err());
+        let power = vec![Snapshot::Power {
+            guid: Some(POWER_BALANCED.into()),
+        }];
+        assert!(validate_snapshot("vbs_off", &power).is_err());
+    }
+
+    #[test]
+    fn rejects_value_shapes_capture_cannot_produce() {
+        for (ty, data) in [
+            (Some("REG_EXPAND_SZ"), Some("x")),
+            (Some("REG_DWORD"), Some("abc")),
+            (Some("REG_SZ"), Some("a\nb")),
+            (Some("REG_DWORD"), None),
+        ] {
+            let snaps = vec![reg(EXPLORER, "SmartScreenEnabled", ty, data)];
+            assert!(validate_snapshot("smartscreen_off", &snaps).is_err(), "{ty:?} {data:?}");
+        }
+        let bad_start = vec![Snapshot::Service {
+            name: "SysMain".into(),
+            start: Some("boot".into()),
+        }];
+        assert!(validate_snapshot("sysmain_off", &bad_start).is_err());
+        let bad_guid = vec![Snapshot::Power {
+            guid: Some("not-a-guid".into()),
+        }];
+        assert!(validate_snapshot("ultimate_power_plan", &bad_guid).is_err());
+    }
+
+    #[test]
+    fn every_known_tweak_but_defender_declares_targets() {
+        for id in KNOWN_TWEAKS {
+            assert_eq!(targets(id).is_empty(), *id == "defender_rt_off", "{id}");
+        }
+        assert!(is_guid(POWER_ULTIMATE_COPY));
+    }
 }

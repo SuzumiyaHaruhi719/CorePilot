@@ -245,7 +245,7 @@ pub fn clean_temp() -> CleanResult {
 }
 
 pub fn flush_dns() -> CoreResult<()> {
-    let status = std::process::Command::new("ipconfig")
+    let status = std::process::Command::new(crate::commands::system_tool("ipconfig"))
         .arg("/flushdns")
         .creation_flags(CREATE_NO_WINDOW)
         .status()
@@ -261,7 +261,7 @@ const PLAN_BALANCED: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
 const PLAN_HIGH: &str = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
 
 fn run_powercfg(args: &[&str]) -> CoreResult<()> {
-    let status = std::process::Command::new("powercfg")
+    let status = std::process::Command::new(crate::commands::system_tool("powercfg"))
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
         .status()
@@ -283,7 +283,7 @@ pub fn set_power_plan(plan: &str) -> CoreResult<()> {
 }
 
 pub fn get_power_plan() -> CoreResult<String> {
-    let output = std::process::Command::new("powercfg")
+    let output = std::process::Command::new(crate::commands::system_tool("powercfg"))
         .args(["/getactivescheme"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
