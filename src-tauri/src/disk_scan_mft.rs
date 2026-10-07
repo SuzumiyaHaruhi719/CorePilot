@@ -1050,6 +1050,10 @@ mod imp {
             bytes_alloc = bytes_alloc.saturating_add(ri.alloc);
         }
 
+        // Pass-1 side arrays are dead from here on; free them before pass 2
+        // allocates the arena (~0.5 GB at 10M records otherwise held twice).
+        drop((ext_data, spilled_data, own_alloc, own_logical, own_files, chunk, top_files));
+
         // --- Pass 2: build the arena from parent references -------------------
         build_arena(
             records,
@@ -1072,7 +1076,7 @@ mod imp {
     /// on cancel / sanity failure.
     #[allow(clippy::too_many_arguments)]
     fn build_arena(
-        records: Vec<Option<RecordInfo>>,
+        mut records: Vec<Option<RecordInfo>>,
         root_display: &str,
         cancel: &AtomicBool,
         handle: &ScanHandle,
@@ -1246,6 +1250,9 @@ mod imp {
         let mut by_parent: HashMap<u32, Vec<Leaf>> = HashMap::new();
 
         for mft in FIRST_USER_MFT..n as u64 {
+            if mft % 65_536 == 0 && cancel.load(Ordering::Relaxed) {
+                return None;
+            }
             let Some(rec) = records.get(mft as usize).and_then(|r| r.as_ref()) else {
                 continue;
             };
@@ -1284,13 +1291,22 @@ mod imp {
             if rec.hardlink {
                 flags |= FLAG_HARDLINK;
             }
+            let (logical, alloc) = (rec.logical, rec.alloc);
+            // Files are terminal: nothing reads a file record after this, so move
+            // the name out instead of cloning every one of millions.
+            let name = records[mft as usize]
+                .as_mut()
+                .map(|r| std::mem::take(&mut r.name))
+                .unwrap_or_default();
             by_parent.entry(parent_id).or_default().push(Leaf {
-                name: rec.name.clone(),
-                logical: rec.logical,
-                alloc: rec.alloc,
+                name,
+                logical,
+                alloc,
                 flags,
             });
         }
+        drop(records);
+        drop(node_of);
 
         for (parent_id, mut leaves) in by_parent {
             if cancel.load(Ordering::Relaxed) {
@@ -1366,7 +1382,7 @@ mod imp {
 
         Some(BuiltArena {
             nodes,
-            names: interner.table.clone(),
+            names: interner.table,
             files_seen,
             dirs_seen,
             bytes_logical,

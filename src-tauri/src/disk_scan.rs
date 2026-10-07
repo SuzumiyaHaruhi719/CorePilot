@@ -739,6 +739,20 @@ pub struct ScanProgress {
 /// iterate the whole map while holding an entry lock.
 static SCANS: Lazy<DashMap<ScanId, Arc<ScanHandle>>> = Lazy::new(DashMap::new);
 
+/// Emit `disk-scan://progress` for `handle` only while it is still the handle
+/// registered for its key. A scan that was closed (`disk_scan_cancel`) or
+/// replaced by a restart keeps running until it notices its cancel flag; its
+/// late "cancelled" frame must not land on top of the fresh scan's progress.
+pub(crate) fn emit_progress(app: &tauri::AppHandle, handle: &Arc<ScanHandle>, p: ScanProgress) {
+    use tauri::Emitter;
+    let current = SCANS
+        .get(&handle.scan_id)
+        .is_some_and(|h| Arc::ptr_eq(&h, handle));
+    if current {
+        let _ = app.emit("disk-scan://progress", p);
+    }
+}
+
 /// Whether any volume scan is still running. Used by the self-updater to warn
 /// that installing now throws away an in-flight scan (a full MFT pass is ~15 s
 /// of work the user would have to redo). A warning, not a block.
@@ -1637,7 +1651,6 @@ mod win {
             std::thread::Builder::new()
                 .name(format!("corepilot-scan-mft-emit-{}", handle.scan_id))
                 .spawn(move || {
-                    use tauri::Emitter;
                     let mut last = ScanProgressKey::default();
                     while !mft_done.load(Ordering::Relaxed) {
                         std::thread::sleep(PROGRESS_THROTTLE);
@@ -1645,7 +1658,7 @@ mod win {
                         let key = ScanProgressKey::from(&p);
                         if key != last {
                             last = key;
-                            let _ = app.emit("disk-scan://progress", p);
+                            emit_progress(&app, &handle, p);
                         }
                     }
                 })
@@ -1725,8 +1738,7 @@ mod win {
         handle.publish(Arc::new(DiskTree { nodes, names }));
         handle.set_status(ScanStatus::Done);
 
-        use tauri::Emitter;
-        let _ = app.emit("disk-scan://progress", handle.build_progress());
+        emit_progress(&app, &handle, handle.build_progress());
         true
     }
 
@@ -1771,8 +1783,7 @@ mod win {
             // as Cancelled rather than running the walk on a cancelled scan.
             handle.publish(Arc::new(DiskTree::default()));
             handle.set_status(ScanStatus::Cancelled);
-            use tauri::Emitter;
-            let _ = app.emit("disk-scan://progress", handle.build_progress());
+            emit_progress(&app, &handle, handle.build_progress());
             return;
         }
 
@@ -1821,7 +1832,6 @@ mod win {
             std::thread::Builder::new()
                 .name(format!("corepilot-scan-emit-{}", handle.scan_id))
                 .spawn(move || {
-                    use tauri::Emitter;
                     let mut last = ScanProgressKey::default();
                     while !walk_done.load(Ordering::Relaxed) {
                         std::thread::sleep(PROGRESS_THROTTLE);
@@ -1829,7 +1839,7 @@ mod win {
                         let key = ScanProgressKey::from(&p);
                         if key != last {
                             last = key;
-                            let _ = app.emit("disk-scan://progress", p);
+                            emit_progress(&app, &handle, p);
                         }
                     }
                 })
@@ -1901,8 +1911,7 @@ mod win {
             let _ = h.join();
         }
         {
-            use tauri::Emitter;
-            let _ = app.emit("disk-scan://progress", handle.build_progress());
+            emit_progress(&app, &handle, handle.build_progress());
         }
     }
 }
@@ -1980,15 +1989,28 @@ pub async fn disk_list_volumes() -> CoreResult<Vec<VolumeInfo>> {
 
 /// Start scanning each requested disk. Inserts a `ScanHandle` and spawns one
 /// dedicated owner thread per disk (NOT the `spawn_blocking` pool). Returns the
-/// keys immediately — O(1) from the caller's view. A `scan_id` that is already
-/// scanning is left untouched (idempotent re-start is `disk_scan_rescan`, Phase 5).
+/// keys immediately. A `scan_id` that is already scanning (and not cancelled) is
+/// left untouched; a finished or cancelled one is replaced by a fresh scan, so
+/// "cancel + start" is a restart.
+///
+/// Async + blocking pool: resolving the walk root and filesystem calls
+/// `GetVolumeInformationW` / `GetVolumeNameForVolumeMountPointW`, which block
+/// for seconds on a spinning-up USB disk or a stale mapped drive (rule 1).
 #[tauri::command]
-pub fn disk_scan_start(app: tauri::AppHandle, scan_ids: Vec<ScanId>) -> CoreResult<Vec<ScanId>> {
+pub async fn disk_scan_start(
+    app: tauri::AppHandle,
+    scan_ids: Vec<ScanId>,
+) -> CoreResult<Vec<ScanId>> {
+    crate::commands::run_blocking(move || Ok(start_scans(app, scan_ids))).await
+}
+
+fn start_scans(app: tauri::AppHandle, scan_ids: Vec<ScanId>) -> Vec<ScanId> {
     let mut started = Vec::new();
     for scan_id in scan_ids {
-        // Skip a scan that is already in flight for this key.
         if let Some(existing) = SCANS.get(&scan_id) {
-            if existing.status() == ScanStatus::Scanning {
+            if existing.status() == ScanStatus::Scanning
+                && !existing.cancel.load(Ordering::Relaxed)
+            {
                 started.push(scan_id);
                 continue;
             }
@@ -2002,12 +2024,15 @@ pub fn disk_scan_start(app: tauri::AppHandle, scan_ids: Vec<ScanId>) -> CoreResu
             walk_root,
             file_system,
         ));
-        SCANS.insert(scan_id.clone(), Arc::clone(&handle));
+        // Replacing an entry whose old scan is still draining: make sure it stops.
+        if let Some(old) = SCANS.insert(scan_id.clone(), Arc::clone(&handle)) {
+            old.cancel.store(true, Ordering::Relaxed);
+        }
 
-        let app = app.clone();
+        let thread_app = app.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("corepilot-scan-{scan_id}"))
-            .spawn(move || win::run_scan(handle, app));
+            .spawn(move || win::run_scan(handle, thread_app));
         if let Err(e) = spawned {
             // A failed spawn must not leave a forever-scanning handle (spec §7).
             if let Some(h) = SCANS.get(&scan_id) {
@@ -2018,14 +2043,17 @@ pub fn disk_scan_start(app: tauri::AppHandle, scan_ids: Vec<ScanId>) -> CoreResu
         }
         started.push(scan_id);
     }
-    Ok(started)
+    started
 }
 
-/// Flip the per-disk cancel atomic. O(1); the walk drains promptly (checked when
-/// popping the queue AND inside the per-entry loop). No-op for an unknown key.
+/// Cancel a disk's scan AND drop its entry, which frees the tree (the scan
+/// thread holds its own `Arc` and releases it once it drains). Called when a
+/// disk tab closes; before, the entry stayed for the life of the process, so a
+/// 24/7 instance kept every volume ever scanned resident. No-op for an unknown
+/// key.
 #[tauri::command]
 pub fn disk_scan_cancel(scan_id: ScanId) -> CoreResult<()> {
-    if let Some(h) = SCANS.get(&scan_id) {
+    if let Some((_, h)) = SCANS.remove(&scan_id) {
         h.cancel.store(true, Ordering::Relaxed);
     }
     Ok(())
