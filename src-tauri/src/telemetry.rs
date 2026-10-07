@@ -46,9 +46,9 @@ pub fn start() {
             .name("corepilot-telemetry".into())
             .spawn(|| loop {
                 let started = Instant::now();
-                // `collect_gpu` never panics: PDH failures yield empty maps.
-                let snap = Arc::new(collect_gpu());
-                *GPU_SNAPSHOT.lock() = snap;
+                crate::commands::guarded_tick("telemetry", || {
+                    *GPU_SNAPSHOT.lock() = Arc::new(collect_gpu());
+                });
                 let elapsed = started.elapsed();
                 std::thread::sleep(INTERVAL.saturating_sub(elapsed).max(MIN_GAP));
             });

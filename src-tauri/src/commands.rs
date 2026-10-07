@@ -236,6 +236,16 @@ pub(crate) fn system_tool(name: &str) -> std::path::PathBuf {
     }
 }
 
+/// Run one tick of a 24/7 background loop, surviving a panic in it. Those
+/// loops (sampler, telemetry) had no supervision: one panic ended the thread
+/// and its snapshot froze forever while every reader kept serving it. The panic
+/// itself is still recorded by the hook in `lib.rs`.
+pub(crate) fn guarded_tick(name: &'static str, f: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
+        tracing::error!("{name}: tick panicked; continuing");
+    }
+}
+
 /// Duration above which a blocking-capable command body logs a warning. The
 /// recurring "未响应" freezes were sync commands stalling the main thread for
 /// seconds; now that they run on the blocking pool, this keeps naming the slow

@@ -138,26 +138,28 @@ fn for_each_module(pid: u32, mut visit: impl FnMut(&str)) {
     }
 }
 
-/// Detect the graphics API `pid` is rendering with, from its loaded modules.
-pub fn detect_graphics_api(pid: u32) -> GraphicsApi {
-    if pid == 0 {
-        return GraphicsApi::Unknown;
-    }
-    // Collect which markers are present, then resolve by priority order.
-    let mut found = [false; 6];
+/// Graphics API and anti-cheat presence from ONE module snapshot (they were two
+/// full ToolHelp walks of the game per classification).
+fn scan_modules(pid: u32) -> (GraphicsApi, bool) {
+    let mut found = [false; API_MARKERS.len()];
+    let mut anticheat = false;
     for_each_module(pid, |name| {
         for (i, (marker, _)) in API_MARKERS.iter().enumerate() {
             if name == *marker {
                 found[i] = true;
             }
         }
+        if !anticheat && ANTICHEAT_MODULE_MARKERS.iter().any(|m| name.contains(m)) {
+            anticheat = true;
+        }
     });
-    API_MARKERS
+    let api = API_MARKERS
         .iter()
         .enumerate()
         .find(|(i, _)| found[*i])
         .map(|(_, (_, api))| *api)
-        .unwrap_or(GraphicsApi::Unknown)
+        .unwrap_or(GraphicsApi::Unknown);
+    (api, anticheat)
 }
 
 /// True when `pid` has a known anti-cheat module loaded. Injecting into such a
@@ -320,9 +322,10 @@ pub fn classify_target(pid: u32) -> OverlayTarget {
         .filter(|(at, _)| now.duration_since(*at) < CLASSIFICATION_CACHE_TTL)
         .map(|(_, facts)| *facts);
     let facts = cached.unwrap_or_else(|| {
+        let (api, anticheat) = scan_modules(pid);
         let facts = ModuleFacts {
-            api: detect_graphics_api(pid),
-            anticheat: is_anticheat_protected(pid),
+            api,
+            anticheat,
             native: is_native(pid),
         };
         let mut cache = CLASSIFICATION_CACHE.lock();
