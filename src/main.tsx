@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useState } from "react"
+import { Component, StrictMode, useEffect, useState, type ReactNode } from "react"
 import { createRoot } from "react-dom/client"
 import { AnimatePresence, motion } from "motion/react"
 import "uplot/dist/uPlot.min.css"
@@ -14,11 +14,36 @@ import { Games } from "./pages/Games"
 import { Thermals } from "./pages/Thermals"
 import { Tuning } from "./pages/Tuning"
 import { System } from "./pages/System"
+import { Cron } from "./pages/Cron"
 import { Disk } from "./pages/Disk"
 import { Settings } from "./pages/Settings"
 import { Osd } from "./osd/Osd"
+import { logUi } from "./lib/ipc"
+import { tf } from "./lib/store"
 
-const PAGES = { overview: Overview, processes: Processes, cores: Cores, games: Games, thermals: Thermals, tuning: Tuning, system: System, disk: Disk, settings: Settings }
+/** A page that throws (unexpected data on some other PC) logs and offers a retry
+ *  instead of blanking the whole window. */
+class PageBoundary extends Component<{ page: string; children: ReactNode }, { err: Error | null }> {
+  state = { err: null as Error | null }
+  static getDerivedStateFromError(err: Error) { return { err } }
+  componentDidCatch(err: Error, info: { componentStack?: string | null }) { logUi("error", `page ${this.props.page} crashed: ${err.stack ?? err}${info.componentStack ?? ""}`) }
+  componentDidUpdate(prev: { page: string }) { if (prev.page !== this.props.page && this.state.err) this.setState({ err: null }) }
+  render() {
+    if (!this.state.err) return this.props.children
+    return (
+      <div className="panel pad col" style={{ margin: 32, gap: 10 }}>
+        <b>{tf("这个页面出错了", "This page hit an error")}</b>
+        <span className="faint selectable" style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{String(this.state.err.message)}</span>
+        <span className="faint" style={{ fontSize: 12 }}>{tf("已写入调试日志（设置 → 导出调试日志）。", "Written to the debug log (Settings → Export debug logs).")}</span>
+        <div><button className="btn primary" onClick={() => this.setState({ err: null })}>{tf("重试", "Retry")}</button></div>
+      </div>
+    )
+  }
+}
+addEventListener("error", (e) => logUi("error", `uncaught: ${e.message} @ ${e.filename}:${e.lineno}:${e.colno}`))
+addEventListener("unhandledrejection", (e) => logUi("error", `unhandled rejection: ${e.reason?.stack ?? String(e.reason)}`))
+
+const PAGES = { overview: Overview, processes: Processes, cores: Cores, games: Games, thermals: Thermals, tuning: Tuning, system: System, cron: Cron, disk: Disk, settings: Settings }
 
 function App() {
   const [ready, setReady] = useState(false)
@@ -30,7 +55,7 @@ function App() {
   const P = PAGES[page]
   return (
     <>
-      {ready && <Shell><P /></Shell>}
+      {ready && <Shell><PageBoundary page={page}><P /></PageBoundary></Shell>}
       <AnimatePresence>
         {!ready && (
           <motion.div className="boot" exit={{ opacity: 0, transition: { duration: 0.35, ease: [0.16, 1, 0.3, 1] } }}>

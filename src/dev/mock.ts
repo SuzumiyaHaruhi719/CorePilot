@@ -27,12 +27,24 @@ const procs = (): Proc[] => NAMES.map(([name, description, base], i) => ({
   pid: 1000 + i * 37, name, description, cpu: Math.max(0, base * wave(3 + i, 0.6, 1.4, i)), mem: (base * 0.4 + 0.08 + (i % 5) * 0.06) * GB,
   threads: 8 + ((i * 13) % 90), gpu: name === "cs2.exe" ? wave(4, 88, 98) : name === "obs64.exe" ? 6 : name === "dwm.exe" ? 2 : 0, gpuMem: name === "cs2.exe" ? 7.2 * GB : name === "chrome.exe" && i === 1 ? 0.6 * GB : null,
   power: base * 2.2, affinity: name === "cs2.exe" ? topo.ccds[0].mask : "4294967295", user: /^(System|Registry|csrss|svchost|MsMpEng|audiodg)/.test(name) ? "SYSTEM" : "Thomas",
-  handles: 200 + i * 31, cpuTime: 30 + i * 400, platform: "64位", gpuEngine: name === "cs2.exe" ? "3D" : null, gpuAdapter: null, settable: !/^(System|Registry|csrss)/.test(name),
+  handles: 200 + i * 31, cpuTime: 30 + i * 400, platform: "64位", gpuEngine: name === "cs2.exe" ? "3D" : name === "obs64.exe" ? "Video Encode" : null, gpuEngines: name === "cs2.exe" ? [["3D", 92]] : name === "obs64.exe" ? [["Video Encode", 54], ["3D", 6]] : [], gpuAdapter: null, settable: !/^(System|Registry|csrss)/.test(name),
   parentPid: 4, exePath: name.endsWith(".exe") ? `C:\\Program Files\\${name.replace(".exe", "")}\\${name}` : null,
 }))
 
 const fanCh = [["/lpc/0/control/0", "CPU 风扇"], ["/lpc/0/control/1", "水泵"], ["/lpc/0/control/2", "机箱前置 1"], ["/lpc/0/control/3", "机箱前置 2"], ["/lpc/0/control/4", "机箱后置"]]
 const store = (k: string) => localStorage.getItem(`mock:${k}`)
+// legacy "corepilot-*" keys shaped like a real upgraded profile (exercises lib/migrate.ts)
+const wrap = (state: unknown) => JSON.stringify({ state, version: 1 })
+const LEGACY: Record<string, string> = {
+  "corepilot-settings": wrap({ language: "zh", themeStyle: "cyberpunk", glow: "intense", perfRecording: true, closeToTray: true }),
+  "corepilot-osd": wrap({ enabled: true, style: "horizontal", position: "tc", scale: 1, opacity: 0, rounded: false, metrics: ["fps", "fps.low1", "cpu.util", "cpu.temp", "gpu.util", "gpu.temp", "gpu.power", "mem.util", "net.up", "net.down"] }),
+  "corepilot-groups": wrap({ groups: [
+    { id: "g0", name: "CCD0", hue: 182, mask: { $bigint: "65535" }, priority: 32768, patterns: ["cs2.exe", "eldenring.exe", "starcitizen.exe"] },
+    { id: "g1", name: "全核", hue: 274, mask: { $bigint: "4294967295" }, priority: 32, patterns: [] },
+    { id: "g2", name: "CCD1", hue: 12, mask: { $bigint: "4294901760" }, priority: 32, patterns: ["discord.exe", "chrome.exe", "spotify.exe", "obs64.exe", "steamwebhelper.exe", "code.exe"] },
+  ] }),
+  "corepilot-ui": wrap({ optimizeOnStartup: true }),
+}
 
 function tree(): TreeNode[] {
   const nodes: TreeNode[] = []
@@ -74,7 +86,13 @@ const sessions = [0, 1, 2].map(session)
 let scanStarted = 0
 
 mockWindows("main")
+/** optimization commands take real time in the app; mimic it so their animations show */
+const SLOW: Record<string, number> = { free_working_sets: 900, flush_modified: 300, purge_standby: 700, clean_temp: 1300, flush_dns: 500, tweak_apply: 250, set_power_plan: 600 }
 mockIPC((cmd, args) => {
+  if (SLOW[cmd]) return new Promise((r) => setTimeout(r, SLOW[cmd])).then(() => reply(cmd, args))
+  return reply(cmd, args)
+}, { shouldMockEvents: true })
+function reply(cmd: string, args: unknown) {
   const a = (args ?? {}) as Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
   const per = Array.from({ length: 32 }, (_, i) => Math.min(100, Math.max(0, wave(2 + (i % 7), i % 16 < 8 ? 25 : 2, i % 16 < 8 ? 85 : 30, i))))
   switch (cmd) {
@@ -111,16 +129,19 @@ mockIPC((cmd, args) => {
     case "get_autostart": return true
     case "ui_occluded": return false
     case "startup_directive": return null
-    case "persist_get": return store(a.name)
+    case "persist_get": return store(a.name) ?? LEGACY[a.name] ?? null
     case "persist_set": localStorage.setItem(`mock:${a.name}`, a.value); return null
     case "perf_session_ids": return sessions.map((s) => s.id)
     case "perf_session_load": return JSON.stringify(sessions.find((s) => s.id === a.id) ?? null)
     case "export_debug_logs": return "C:\\Users\\Thomas\\Downloads\\CorePilot-logs"
     case "plugin:app|version": return "0.5.0"
     case "osd_target_monitor": return [0, 0, 1920, 1080]
+    case "game_display_name": return ({ "aces.exe": "War Thunder", "dcs.exe": "DCS World", "cs2.exe": "Counter-Strike 2" } as Record<string, string>)[String(a.exe).toLowerCase()] ?? String(a.exe).replace(/\.exe$/i, "")
+    case "automation_status": return { history: [{ at: Date.now() - 60000, id: "purge_standby", task: "purge_standby", ok: true, detail: "空闲内存 +2310 MB" }], next: { trim_ws: 1260 }, mem: { free: 2.1e9, standby: 21e9, modified: 0.4e9, total: 64e9 } }
+    case "leak_report": return { minutes: 42, neededMinutes: 15, suspects: [{ pid: 4120, name: "Discord.exe", path: null, privateBytes: 2.4e9, growthBytes: 1.1e9, slopeMbPerMin: 26.4, minutes: 42, trend: Array.from({ length: 42 }, (_, i) => 1300 + i * 26 + Math.sin(i) * 9) }], growers: [], kernel: { paged: 0.9e9, nonpaged: 0.62e9, commit: 38e9, commitLimit: 74e9, nonpagedSlopeMbPerMin: 0.04, pagedSlopeMbPerMin: 0.1, nonpagedTrend: [], leak: false } }
     default: return null
   }
-}, { shouldMockEvents: true })
+}
 
 function prog(scanId: string, status: string, k: number) {
   return { scanId, root: `${scanId}:\\`, status, filesSeen: k * 183_211, dirsSeen: k * 9100, bytesAlloc: Math.min(12, k) / 12 * 0.88e12, bytesLogical: 0, skipped: 0, nodeCount: k * 190000, generation: k, truncated: false, disconnected: false, currentPath: `${scanId}:\\Program Files (x86)\\Steam\\steamapps\\common\\…\\${k}.pak`, elapsedMs: k * 300, error: null }

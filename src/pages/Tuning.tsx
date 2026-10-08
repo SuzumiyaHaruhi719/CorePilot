@@ -1,9 +1,10 @@
 import { useMemo, useState, type CSSProperties } from "react"
-import { Cpu, MonitorCog, RotateCcw, ShieldAlert } from "lucide-react"
+import { ChevronRight, Cpu, MonitorCog, RotateCcw, ShieldAlert } from "lucide-react"
 import { api, type CpuSensor, type GpuInfo, type GpuOc, type SmuReply, type SmuStatus } from "../lib/ipc"
-import { act, useLive, useProfiles, useT } from "../lib/store"
+import { act, useLive, useProfiles, useSettings, useT } from "../lib/store"
 import { bytes, isNum } from "../lib/util"
-import { AsyncButton, confirmDialog, Empty, Field, Meter, Page, PageHead, Panel, Range, Readout, Switch, usePoll } from "../ui/kit"
+import { motion } from "motion/react"
+import { AsyncButton, confirmDialog, EASE, Empty, Field, Meter, Page, PageHead, Panel, Range, Readout, Switch, usePoll } from "../ui/kit"
 
 // ------------------------------------------------------------ GPU
 function Knob({ label, unit, value, min, max, step = 1, onChange, enabled = true, hint, color }: { label: string; unit: string; value: number; min: number; max: number; step?: number; onChange: (v: number) => void; enabled?: boolean; hint?: string; color?: string }) {
@@ -54,7 +55,7 @@ function Gpu() {
     setDraft(null)
   }
   return (
-    <Panel title={g.name} color="var(--gpu)" className="fill ticks" right={<span className="faint" style={{ fontSize: 12 }}>{t("驱动", "Driver")} {g.driverVersion}</span>}>
+    <Panel title={g.name} color="var(--gpu)" className="fill" right={<span className="faint" style={{ fontSize: 12 }}>{t("驱动", "Driver")} {g.driverVersion}</span>}>
       <div className="grid" style={{ gridTemplateColumns: "repeat(6, minmax(0,1fr))", marginBottom: 20 }}>
         <div className="col" style={{ "--gap": "6px" } as CSSProperties}><span className="label">{t("核心", "Core")}</span><Readout v={g.graphicsClock} u="MHz" size="md" /></div>
         <div className="col" style={{ "--gap": "6px" } as CSSProperties}><span className="label">{t("显存", "Memory")}</span><Readout v={g.memClock} u="MHz" size="md" /></div>
@@ -202,6 +203,34 @@ function CpuDeep() {
   )
 }
 
+/** CO / PBO writes go straight to the SMU — kept behind a collapsed 高级 section,
+ *  and only mounted (and polled) while open. */
+function Advanced() {
+  const t = useT()
+  const [open, setOpen] = useState(false)
+  const unlocked = useSettings((s) => s.amdTuning)
+  return (
+    <motion.details className="disclose panel" onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
+      variants={{ hidden: { opacity: 0, y: 8 }, show: { opacity: 1, y: 0, transition: { duration: 0.4, ease: EASE } } }}>
+      <summary>
+        <ChevronRight size={16} className="chev" />
+        <span className="col" style={{ "--gap": "2px" } as CSSProperties}>
+          <b style={{ color: "var(--ink)", fontWeight: 600 }}>{t("高级", "Advanced")}</b>
+          <span className="faint" style={{ fontSize: 12 }}>{t("CPU 曲线优化 / PBO · 实时写入 SMU，重启后恢复 BIOS 值", "CPU Curve Optimizer / PBO · live SMU writes, BIOS values return on reboot")}</span>
+        </span>
+        <span className="grow" />
+        <span className="tag warn"><ShieldAlert size={11} />{t("风险操作", "Risky")}</span>
+      </summary>
+      <div style={{ padding: "0 4px 4px" }}>{open && (unlocked ? <Smu /> : (
+        <div className="col" style={{ "--gap": "10px", padding: "4px 16px 16px" } as CSSProperties}>
+          <span className="dim" style={{ fontSize: 12.5, lineHeight: 1.6 }}>{t("曲线优化撤压与 PBO 限制直接写入 Ryzen SMU。设置不当可能导致 WHEA 报错、死机或无法开机；仅支持 Zen 4 / Zen 5 桌面处理器。", "Curve Optimizer undervolts and PBO limits are written straight to the Ryzen SMU. Bad values can cause WHEA errors, crashes or a failed boot; Zen 4 / Zen 5 desktop only.")}</span>
+          <div><button className="btn danger" onClick={async () => { if (await confirmDialog({ title: t("解锁 AMD 调优？", "Unlock AMD tuning?"), body: t("我了解这些写入可能导致系统不稳定。可随时在 设置 → 专家 中关闭。", "I understand these writes can make the system unstable. Turn it off again in Settings → Expert."), ok: t("解锁", "Unlock"), danger: true })) useSettings.getState().set({ amdTuning: true }) }}><ShieldAlert size={13} />{t("我了解风险，解锁", "I understand, unlock")}</button></div>
+        </div>
+      ))}</div>
+    </motion.details>
+  )
+}
+
 export function Tuning() {
   const t = useT()
   const s = useLive((x) => x.sensors)
@@ -209,8 +238,8 @@ export function Tuning() {
     <Page>
       <PageHead idx="06" title={t("超频调校", "Tuning")} sub={t(`GPU 超频与锐龙 SMU 调节 · 当前 CPU ${isNum(s?.cpuPower) ? s!.cpuPower!.toFixed(0) : "—"} W / GPU ${isNum(s?.gpuPower) ? s!.gpuPower!.toFixed(0) : "—"} W`, `GPU overclocking and Ryzen SMU · CPU ${isNum(s?.cpuPower) ? s!.cpuPower!.toFixed(0) : "—"} W / GPU ${isNum(s?.gpuPower) ? s!.gpuPower!.toFixed(0) : "—"} W now`)} />
       <Gpu />
-      <Smu />
       <CpuDeep />
+      <Advanced />
     </Page>
   )
 }

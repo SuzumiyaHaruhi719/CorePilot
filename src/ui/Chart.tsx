@@ -8,7 +8,7 @@ export interface ChartSeries { label: string; color: string; width?: number; fil
 export function Chart({ x, ys, series, height = 180, yFmt, sync }: { x: number[]; ys: (number | null)[][]; series: ChartSeries[]; height?: number; yFmt?: (v: number) => string; sync?: string }) {
   const el = useRef<HTMLDivElement>(null)
   const plot = useRef<uPlot | null>(null)
-  const theme = useSettings((s) => s.theme)
+  const theme = useSettings((s) => s.style)
 
   useEffect(() => {
     const root = el.current!

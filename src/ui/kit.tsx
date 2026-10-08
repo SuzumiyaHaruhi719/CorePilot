@@ -1,8 +1,11 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
-import { AnimatePresence, motion } from "motion/react"
+import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react"
+import { AnimatePresence, motion, useSpring } from "motion/react"
+import { createPortal } from "react-dom"
 import { create } from "zustand"
-import { Inbox } from "lucide-react"
-import { useLive, useSettings, useT } from "../lib/store"
+import { Check, Inbox } from "lucide-react"
+import { celebrate } from "./fx"
+import { NAV } from "./nav"
+import { motionReduced, sysReduce, useLive, useSettings, useT } from "../lib/store"
 import { clamp, isNum } from "../lib/util"
 
 // ------------------------------------------------------------ hooks
@@ -42,7 +45,27 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[] = []) {
   return { ...state, reload: load, set: (data: T) => setState({ data, loading: false }) }
 }
 
-export const useReducedMotion = () => useSettings((s) => s.reduceMotion)
+const subSys = (cb: () => void) => (sysReduce?.addEventListener("change", cb), () => sysReduce?.removeEventListener("change", cb))
+export const useReducedMotion = () => {
+  useSyncExternalStore(subSys, () => !!sysReduce?.matches)
+  const low = useLive((s) => s.lowGpu)
+  return useSettings(motionReduced) || low
+}
+
+// ------------------------------------------------------------ motion system
+// One vocabulary. Nothing bounces for show and nothing floats on hover: things
+// move because you moved them, glide without overshoot, and land with a hint
+// of mass. CSS mirrors these as --ease / --spring (styles.css).
+/** Expo ease-out — entrances and reveals: fast start, long quiet settle. */
+export const EASE = [0.16, 1, 0.3, 1] as const
+/** Accelerating exit — leaving layers get out of the way quickly. */
+export const EASE_IN = [0.4, 0, 1, 1] as const
+/** Sheet curve — drawers slide like a physical panel. */
+export const SHEET = [0.32, 0.72, 0, 1] as const
+/** Indicators (nav pill, segment thumb, highlights): critically damped glide. */
+export const GLIDE = { type: "spring", bounce: 0, visualDuration: 0.3 } as const
+/** Floating layers (dialogs, toasts, palette) landing with a touch of mass. */
+export const SETTLE = { type: "spring", bounce: 0.12, visualDuration: 0.36 } as const
 
 // ------------------------------------------------------------ rolling digits
 const DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
@@ -66,11 +89,35 @@ export function Roll({ value, className }: { value: string; className?: string }
   )
 }
 
-export function Readout({ v, u, size, digits = 0, color, roll = true }: { v: number | null | undefined; u?: string; size?: "md" | "sm"; digits?: number; color?: string; roll?: boolean }) {
-  const s = isNum(v) ? v.toFixed(digits) : "—"
+/**
+ * Spring-tweened number. Writes textContent imperatively — no React render per
+ * frame — and jumps instantly when reduce-motion is on or the window is hidden.
+ */
+export function AnimatedNumber({ value, digits = 0 }: { value: number; digits?: number }) {
+  const ref = useRef<HTMLSpanElement>(null)
+  const reduced = useReducedMotion()
+  const visible = useLive((s) => s.visible)
+  const spring = useSpring(value, { stiffness: 140, damping: 22, mass: 0.6, restDelta: digits ? 0.05 : 0.5 })
+  useEffect(() => {
+    if (reduced || !visible) spring.jump(value)
+    else spring.set(value)
+  }, [value, reduced, visible, spring])
+  useEffect(() => {
+    const write = (v: number) => { if (ref.current) ref.current.textContent = v.toFixed(digits) }
+    const a = spring.on("change", write)
+    const b = spring.on("animationComplete", () => write(value))
+    return () => { a(); b() }
+  }, [spring, digits, value])
+  return <span ref={ref}>{value.toFixed(digits)}</span>
+}
+
+export function Readout({ v, u, size, digits = 0, color, mode = "spring" }: { v: number | null | undefined; u?: string; size?: "md" | "sm"; digits?: number; color?: string; mode?: "spring" | "roll" | "static" }) {
+  const n = isNum(v)
   return (
     <div className={`readout ${size ?? ""}`}>
-      <span className="v" style={color ? { color } : undefined}>{roll && isNum(v) ? <Roll value={s} /> : s}</span>
+      <span className="v" style={color ? { color } : undefined}>
+        {!n ? "—" : mode === "roll" ? <Roll value={v.toFixed(digits)} /> : mode === "spring" ? <AnimatedNumber value={v} digits={digits} /> : v.toFixed(digits)}
+      </span>
       {u && <span className="u">{u}</span>}
     </div>
   )
@@ -82,7 +129,7 @@ export function Panel({ title, color, right, children, className = "", pad = tru
     <motion.section
       className={`panel ${pad ? "pad" : ""} ${className}`}
       style={style}
-      variants={{ hidden: { opacity: 0, y: 10 }, show: { opacity: 1, y: 0, transition: { duration: 0.42, ease: [0.16, 1, 0.3, 1] } } }}
+      variants={{ hidden: { opacity: 0, y: 8 }, show: { opacity: 1, y: 0, transition: { duration: 0.4, ease: EASE } } }}
     >
       {(title || right) && (
         <header className="ph" style={{ padding: pad ? 0 : "14px 16px 0" }}>
@@ -95,11 +142,17 @@ export function Panel({ title, color, right, children, className = "", pad = tru
   )
 }
 
-export function PageHead({ idx, title, sub, actions }: { idx: string; title: string; sub?: ReactNode; actions?: ReactNode }) {
+export function PageHead({ title, sub, actions }: { idx?: string; title: string; sub?: ReactNode; actions?: ReactNode }) {
+  const page = useLive((s) => s.page)
+  const Icon = NAV.find((n) => n.id === page)?.icon
   return (
-    <motion.header className="phead" variants={{ hidden: { opacity: 0, y: 8 }, show: { opacity: 1, y: 0, transition: { duration: 0.4, ease: [0.16, 1, 0.3, 1] } } }}>
-      <div>
-        <div className="idx">{idx}</div>
+    <motion.header className="phead" variants={{ hidden: { opacity: 0, y: 6 }, show: { opacity: 1, y: 0, transition: { duration: 0.4, ease: EASE } } }}>
+      {Icon && (
+        <motion.span className="phead-ic" variants={{ hidden: { scale: 0.6, rotate: -18, opacity: 0 }, show: { scale: 1, rotate: 0, opacity: 1, transition: { ...SETTLE, delay: 0.05 } } }}>
+          <Icon size={21} strokeWidth={1.9} />
+        </motion.span>
+      )}
+      <div style={{ minWidth: 0 }}>
         <h1>{title}</h1>
         {sub && <p>{sub}</p>}
       </div>
@@ -111,7 +164,7 @@ export function PageHead({ idx, title, sub, actions }: { idx: string; title: str
 /** Page wrapper: staggers its direct motion children in. */
 export function Page({ children }: { children: ReactNode }) {
   return (
-    <motion.div className="page" initial="hidden" animate="show" variants={{ hidden: {}, show: { transition: { staggerChildren: 0.035 } } }}>
+    <motion.div className="page" initial="hidden" animate="show" variants={{ hidden: {}, show: { transition: { staggerChildren: 0.03 } } }}>
       {children}
     </motion.div>
   )
@@ -139,7 +192,7 @@ export function Seg<T extends string | number>({ value, options, onChange }: { v
     <div className="seg" role="radiogroup">
       {options.map((o) => (
         <button key={String(o.v)} role="radio" aria-checked={o.v === value} className={o.v === value ? "on" : ""} onClick={() => onChange(o.v)}>
-          {o.v === value && <motion.i className="thumb" layoutId={`seg${id}`} transition={{ type: "spring", stiffness: 520, damping: 38 }} />}
+          {o.v === value && <motion.i className="thumb" layoutId={`seg${id}`} transition={GLIDE} />}
           <span>{o.label}</span>
         </button>
       ))}
@@ -194,16 +247,36 @@ export function Spinner({ size = 14 }: { size?: number }) {
   )
 }
 
-/** Button that shows a spinner while its async action runs. */
-export function AsyncButton({ onClick, children, className = "btn", disabled, title }: { onClick: () => Promise<unknown>; children: ReactNode; className?: string; disabled?: boolean; title?: string }) {
+/** Button that shows a spinner while its async action runs. `fx` (optimization
+ *  actions): on success — anything but undefined/false, which is what `act()` returns
+ *  on failure — the button flips to a check and sparks fly from it. */
+export function AsyncButton({ onClick, children, className = "btn", disabled, title, fx }: { onClick: () => Promise<unknown>; children: ReactNode; className?: string; disabled?: boolean; title?: string; fx?: boolean }) {
   const [busy, setBusy] = useState(false)
+  const [ok, setOk] = useState(false)
+  const ref = useRef<HTMLButtonElement>(null)
+  const click = async () => {
+    setBusy(true)
+    try {
+      const v = await onClick()
+      if (fx && v !== undefined && v !== false) {
+        celebrate(ref.current)
+        setOk(true)
+        setTimeout(() => setOk(false), 1400)
+      }
+    } finally { setBusy(false) }
+  }
   return (
-    <button className={className} title={title} disabled={disabled || busy} onClick={async () => { setBusy(true); try { await onClick() } finally { setBusy(false) } }}>
+    <button ref={ref} className={`${className} ${ok ? "did" : ""}`} title={title} disabled={disabled || busy} onClick={click}>
       {busy && <Spinner size={13} />}
+      {ok && <motion.span className="row" initial={{ scale: 0.3, opacity: 0 }} animate={{ scale: 1, opacity: 1, transition: SETTLE }}><Check size={14} strokeWidth={2.8} /></motion.span>}
       {children}
     </button>
   )
 }
+
+/** Page dialogs render here, above the whole shell: inside a page they sat in the
+ *  page's stacking layer, under the titlebar (the dialog's top was cut off). */
+export const Layer = ({ children }: { children: ReactNode }) => createPortal(children, document.body)
 
 // ------------------------------------------------------------ confirm dialog
 interface Ask { title: string; body?: ReactNode; ok: string; danger?: boolean; resolve: (v: boolean) => void }
@@ -225,8 +298,8 @@ export function ConfirmHost() {
     <AnimatePresence>
       {ask && (
         <>
-          <motion.div className="scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => done(false)} />
-          <motion.div className="modal" role="alertdialog" initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.97 }} transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}>
+          <motion.div className="scrim" initial={{ opacity: 0 }} animate={{ opacity: 1, transition: { duration: 0.2 } }} exit={{ opacity: 0, transition: { duration: 0.14 } }} onClick={() => done(false)} />
+          <motion.div className="modal" role="alertdialog" initial={{ opacity: 0, scale: 0.97, y: 8 }} animate={{ opacity: 1, scale: 1, y: 0, transition: SETTLE }} exit={{ opacity: 0, scale: 0.98, y: 4, transition: { duration: 0.12, ease: EASE_IN } }}>
             <h3>{ask.title}</h3>
             {ask.body && <p>{ask.body}</p>}
             <div className="row end">
@@ -240,10 +313,78 @@ export function ConfirmHost() {
   )
 }
 
+// ------------------------------------------------------------ context menu
+export interface MenuItem { label: string; icon?: ReactNode; onClick?: () => void; danger?: boolean; disabled?: boolean; hint?: string }
+type MenuEntry = MenuItem | "sep" | false | "" | 0 | null | undefined
+const useMenu = create<{ menu: { x: number; y: number; items: (MenuItem | "sep")[] } | null }>(() => ({ menu: null }))
+/** Open the app's right-click menu at the pointer. Falsy entries are skipped. */
+export function contextMenu(e: { clientX: number; clientY: number; preventDefault(): void; stopPropagation(): void }, entries: MenuEntry[]) {
+  e.preventDefault()
+  e.stopPropagation()
+  // drop leading, trailing and doubled separators left by entries that didn't apply
+  const items: (MenuItem | "sep")[] = []
+  for (const it of entries) if (it && !(it === "sep" && (!items.length || items[items.length - 1] === "sep"))) items.push(it)
+  if (items[items.length - 1] === "sep") items.pop()
+  if (items.length) useMenu.setState({ menu: { x: e.clientX, y: e.clientY, items } })
+}
+export function MenuHost() {
+  const menu = useMenu((s) => s.menu)
+  const ref = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ x: number; y: number; ox: string } | null>(null)
+  const close = () => useMenu.setState({ menu: null })
+  // flip at the window edges; the origin follows so it grows out of the pointer
+  useLayoutEffect(() => {
+    if (!menu || !ref.current) return setPos(null)
+    const w = ref.current.offsetWidth, h = ref.current.offsetHeight
+    const left = menu.x + w > innerWidth - 8, up = menu.y + h > innerHeight - 8
+    setPos({ x: left ? Math.max(8, menu.x - w) : menu.x, y: up ? Math.max(8, menu.y - h) : menu.y, ox: `${left ? "right" : "left"} ${up ? "bottom" : "top"}` })
+  }, [menu])
+  useEffect(() => {
+    if (!menu) return
+    // capture: Esc closes the menu without also popping a treemap level / exiting focus
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopImmediatePropagation(); close() } }
+    addEventListener("keydown", key, true)
+    addEventListener("pointerdown", close)
+    addEventListener("blur", close)
+    addEventListener("resize", close)
+    addEventListener("wheel", close, { passive: true })
+    return () => {
+      removeEventListener("keydown", key, true)
+      removeEventListener("pointerdown", close)
+      removeEventListener("blur", close)
+      removeEventListener("resize", close)
+      removeEventListener("wheel", close)
+    }
+  }, [menu])
+  return (
+    <AnimatePresence>
+      {menu && (
+        <motion.div ref={ref} key={`${menu.x},${menu.y}`} className="cmenu" role="menu"
+          style={{ left: pos?.x ?? menu.x, top: pos?.y ?? menu.y, transformOrigin: pos?.ox, visibility: pos ? "visible" : "hidden" }}
+          initial={{ opacity: 0, scale: 0.94 }} animate={{ opacity: 1, scale: 1, transition: { duration: 0.16, ease: EASE } }} exit={{ opacity: 0, scale: 0.97, transition: { duration: 0.1, ease: EASE_IN } }}
+          onPointerDown={(e) => e.stopPropagation()} onContextMenu={(e) => e.preventDefault()}>
+          {menu.items.map((it, i) => it === "sep" ? <hr key={i} /> : (
+            <button key={i} role="menuitem" className={it.danger ? "danger" : ""} disabled={it.disabled} onClick={() => { close(); it.onClick?.() }}>
+              <span className="ic">{it.icon}</span><span className="grow ellipsis">{it.label}</span>{it.hint && <kbd>{it.hint}</kbd>}
+            </button>
+          ))}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  )
+}
+
 // ------------------------------------------------------------ virtual list
 /** Fixed-row-height windowing; renders only rows in view (+overscan). */
-export function VList<T>({ items, row, height = 36, render, className, style }: { items: T[]; row?: (t: T) => string | number; height?: number; render: (t: T, i: number) => ReactNode; className?: string; style?: CSSProperties }) {
+/** Virtual list. `flip` = the sort (key + direction): when it changes, rows that stay
+ *  on screen glide to their new spot and newly revealed rows cascade in — for a
+ *  moment only, so scrolling and live re-sorts don't animate. `onScrollX` lets a
+ *  sticky header outside the scroller follow horizontal scrolling. */
+export function VList<T>({ items, row, height = 36, render, className, style, flip, onScrollX }: { items: T[]; row?: (t: T) => string | number; height?: number; render: (t: T, i: number) => ReactNode; className?: string; style?: CSSProperties; flip?: string | number; onScrollX?: (x: number) => void }) {
   const ref = useRef<HTMLDivElement>(null)
+  const flipAt = useRef({ v: flip, at: 0 })
+  if (flipAt.current.v !== flip) flipAt.current = { v: flip, at: performance.now() }
+  const animating = performance.now() - flipAt.current.at < 700
   const [top, setTop] = useState(0)
   const [vh, setVh] = useState(600)
   useLayoutEffect(() => {
@@ -256,10 +397,15 @@ export function VList<T>({ items, row, height = 36, render, className, style }: 
   const start = Math.max(0, Math.floor(top / height) - 8)
   const end = Math.min(items.length, Math.ceil((top + vh) / height) + 8)
   return (
-    <div ref={ref} className={className} style={{ overflow: "auto", ...style }} onScroll={(e) => setTop(e.currentTarget.scrollTop)}>
+    <div ref={ref} className={`scroller ${className ?? ""}`} style={{ overflow: "auto", ...style }} onScroll={(e) => { setTop(e.currentTarget.scrollTop); onScrollX?.(e.currentTarget.scrollLeft) }}>
       <div style={{ height: items.length * height, position: "relative" }}>
         <div style={{ position: "absolute", top: start * height, left: 0, right: 0 }}>
-          {items.slice(start, end).map((it, k) => <div key={row ? row(it) : start + k}>{render(it, start + k)}</div>)}
+          {items.slice(start, end).map((it, k) => (
+            <motion.div key={row ? row(it) : start + k} layout={animating && row ? "position" : false} transition={{ layout: GLIDE }}
+              initial={animating ? { opacity: 0, y: 10 } : false} animate={{ opacity: 1, y: 0, transition: { duration: 0.32, ease: EASE, delay: Math.min(k, 18) * 0.014 } }}>
+              {render(it, start + k)}
+            </motion.div>
+          ))}
         </div>
       </div>
     </div>
@@ -275,15 +421,18 @@ export const cssVar = (el: Element, v: string) => {
 }
 
 /**
- * Oscilloscope-style live chart. On each new sample the traces glide one step
- * left over `interval` ms (rAF only while gliding — idle otherwise), with a
- * graticule that scrolls with the data.
+ * Oscilloscope-style live chart. Each new sample adds one step of pending
+ * scroll that drains at ~one sample per interval — slightly slower than the
+ * poll, so the glide never stalls waiting for a late sample; unfinished
+ * distance carries into the next one (no jump, no pause). rAF runs only while
+ * distance remains. The graticule scrolls with the data.
  */
-export function Scope({ traces, max, height = 120, tick, interval = 1000, points = 120, grid = true }: { traces: Trace[]; max?: number; height?: number; tick: number; interval?: number; points?: number; grid?: boolean }) {
+export function Scope({ traces, max, height = 120, tick, interval: ivProp, points = 120, grid = true }: { traces: Trace[]; max?: number; height?: number; tick: number; interval?: number; points?: number; grid?: boolean }) {
   const ref = useRef<HTMLCanvasElement>(null)
-  const anim = useRef({ start: 0, raf: 0 })
+  const anim = useRef({ shift: 0, last: 0, raf: 0, tick: -1 })
   const reduced = useReducedMotion()
-  const theme = useSettings((s) => s.theme + s.accent)
+  const theme = useSettings((s) => s.style)
+  const interval = ivProp ?? useSettings((s) => s.pollMs) // eslint-disable-line react-hooks/rules-of-hooks
   const visible = useLive((s) => s.visible)
   const data = useRef({ traces, max, tick })
   data.current = { traces, max, tick }
@@ -338,7 +487,7 @@ export function Scope({ traces, max, height = 120, tick, interval = 1000, points
           ctx.lineTo(xs(0), h)
           ctx.closePath()
           const g = ctx.createLinearGradient(0, 0, 0, h)
-          g.addColorStop(0, colors[ti] + "38")
+          g.addColorStop(0, colors[ti] + "26")
           g.addColorStop(1, colors[ti] + "00")
           ctx.fillStyle = g
           ctx.fill()
@@ -351,9 +500,9 @@ export function Scope({ traces, max, height = 120, tick, interval = 1000, points
       })
     }
     ;(cv as unknown as { __draw: typeof draw }).__draw = draw
-    const ro = new ResizeObserver(() => draw(0))
+    const ro = new ResizeObserver(() => draw(anim.current.shift))
     ro.observe(cv)
-    draw(0)
+    draw(anim.current.shift)
     return () => { ro.disconnect(); cancelAnimationFrame(anim.current.raf) }
   }, [theme, points, grid]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -361,15 +510,20 @@ export function Scope({ traces, max, height = 120, tick, interval = 1000, points
     const cv = ref.current as unknown as { __draw?: (s: number) => void } | null
     const draw = cv?.__draw
     if (!draw) return
-    cancelAnimationFrame(anim.current.raf)
-    if (reduced || !visible) { draw(0); return }
-    anim.current.start = performance.now()
+    const a = anim.current
+    cancelAnimationFrame(a.raf)
+    if (reduced || !visible) { a.shift = 0; a.tick = tick; draw(0); return }
+    if (tick !== a.tick) { a.shift = Math.min(a.shift + 1, 3); a.tick = tick }
+    a.last = performance.now()
     const frame = (now: number) => {
-      const p = clamp((now - anim.current.start) / interval, 0, 1)
-      draw(1 - p)
-      if (p < 1) anim.current.raf = requestAnimationFrame(frame)
+      const dt = now - a.last
+      a.last = now
+      // ~6% slower than the poll; proportional catch-up once more than a step behind
+      a.shift = Math.max(0, a.shift - (dt / interval) * 0.94 * Math.max(1, a.shift))
+      draw(a.shift)
+      if (a.shift > 0) a.raf = requestAnimationFrame(frame)
     }
-    anim.current.raf = requestAnimationFrame(frame)
+    a.raf = requestAnimationFrame(frame)
   }, [tick, reduced, visible, interval])
 
   return <div className="scope" style={{ height }}><canvas ref={ref} /></div>
@@ -387,6 +541,24 @@ export function Spark({ data, color, w = 80, h = 22, max }: { data: number[]; co
   )
 }
 
+/** Task-Manager-style mini graph: framed, gridded, filled, always full width. The
+ *  window is a fixed `points` slots and samples enter at the right edge, so a short
+ *  history reads as "just started" instead of a 3-point line stretched across. */
+export function Mini({ data, color, max = 100, points = 60, h = 40 }: { data: number[]; color: string; max?: number; points?: number; h?: number }) {
+  const d = data.slice(-points)
+  const x0 = points - d.length
+  const y = (v: number) => (100 - (clamp(v, 0, max) / max) * 96).toFixed(2)
+  const line = d.map((v, i) => `${i ? "L" : "M"}${x0 + i},${y(v)}`).join("")
+  return (
+    <svg className="mini" viewBox={`0 0 ${points - 1} 100`} preserveAspectRatio="none" style={{ height: h, "--c": color } as CSSProperties}>
+      {d.length > 1 && <>
+        <path d={`${line}L${points - 1},100L${x0},100Z`} className="mini-fill" />
+        <path d={line} className="mini-line" vectorEffect="non-scaling-stroke" />
+      </>}
+    </svg>
+  )
+}
+
 /**
  * Variants for any wrapper that mounts after the page entrance. Children
  * (Panel/PageHead) animate via inherited "hidden"/"show" labels, so a wrapper
@@ -394,8 +566,8 @@ export function Spark({ data, color, w = 80, h = 22, max }: { data: number[]; co
  */
 export const swapVariants = (dx = 0, dy = 6) => ({
   hidden: { opacity: 0, x: dx, y: dy },
-  show: { opacity: 1, x: 0, y: 0, transition: { duration: 0.24, ease: [0.16, 1, 0.3, 1] as const, staggerChildren: 0.035 } },
-  exit: { opacity: 0, x: -dx, y: -dy / 2, transition: { duration: 0.14 } },
+  show: { opacity: 1, x: 0, y: 0, transition: { duration: 0.3, ease: EASE, staggerChildren: 0.03 } },
+  exit: { opacity: 0, x: -dx, y: -dy / 2, transition: { duration: 0.12, ease: EASE_IN } },
 })
 const SWAP = swapVariants()
 

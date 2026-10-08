@@ -2,9 +2,13 @@
 // one-way config pushes into Rust statics (rule 6), the affinity enforcer and
 // event listeners. Started once after the persisted stores hydrate.
 import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut"
-import { api, on, osdFlags, type FanConfig, type TunedCurve } from "./ipc"
-import { DATA_COLORS, go, HIST, tf, toast, useLive, useProfiles, useSettings, type Series } from "./store"
-import { rgba32 } from "./util"
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification"
+import { getCurrentWindow } from "@tauri-apps/api/window"
+import { api, logUi, on, PRIORITY, type FanConfig, type TunedCurve } from "./ipc"
+import { overlayFlags } from "./osd"
+import { go, HIST, motionReduced, sysReduce, tf, toast, useLive, useProfiles, useSettings, type Group, type Mood, type Series } from "./store"
+import { GLOW_LEVEL, overlayPalette, PALETTE } from "./themes"
+import { maskOf } from "./util"
 
 const push = (arr: number[], v: number) => {
   const a = arr.length >= HIST ? arr.slice(1) : arr.slice()
@@ -12,7 +16,15 @@ const push = (arr: number[], v: number) => {
   return a
 }
 
-export const OSD_PALETTE = [DATA_COLORS.fps, DATA_COLORS.fps, DATA_COLORS.cpu, DATA_COLORS.gpu, DATA_COLORS.gpu, DATA_COLORS.mem, DATA_COLORS.disk, DATA_COLORS.net]
+/** Machine mood with hysteresis (enter at the high mark, leave below the low one),
+ *  so the ambient tint doesn't flicker when load hovers around a threshold. */
+export function moodOf(was: Mood, cpu: number, gpu: number | null, cpuT: number | null, gpuT: number | null, game: boolean): Mood {
+  const hot = was === "hot" ? (cpuT ?? 0) >= 80 || (gpuT ?? 0) >= 78 : (cpuT ?? 0) >= 86 || (gpuT ?? 0) >= 83
+  if (hot) return "hot"
+  if (game) return "game"
+  const busy = was === "busy" ? cpu >= 42 || (gpu ?? 0) >= 50 : cpu >= 60 || (gpu ?? 0) >= 70
+  return busy ? "busy" : "calm"
+}
 
 /** Fold tuned curves into the per-fan configs (autotune result / passive learning). */
 export function applyTunedCurves(curves: TunedCurve[], cpuSrc: string | null, gpuSrc: string | null) {
@@ -36,6 +48,22 @@ function passiveConfig() {
   return { enabled: true, params: r.params, model: r.model, modelGpu: r.modelGpu, calibrations: r.calibrations, pDesign: r.pDesign, pDesignGpu: r.pDesignGpu }
 }
 
+/** Windows notification, permission-guarded and best-effort. */
+async function notify(body: string) {
+  try {
+    const ok = (await isPermissionGranted()) || (await requestPermission()) === "granted"
+    if (ok) sendNotification({ title: "CorePilot", body })
+  } catch (e) { logUi("warn", `notification failed: ${String(e)}`) }
+}
+/** Bring the window to the front (a background process can't just SetForegroundWindow:
+ *  pin on top for a moment, then unpin — same trick as tray.rs). */
+async function surface() {
+  try {
+    const w = getCurrentWindow()
+    await w.show(); await w.unminimize(); await w.setAlwaysOnTop(true); await w.setFocus(); await w.setAlwaysOnTop(false)
+  } catch (e) { logUi("warn", `raising the window failed: ${String(e)}`) }
+}
+
 let started = false
 export function startServices() {
   if (started) return
@@ -49,14 +77,20 @@ export function startServices() {
   on("app://focus", (f) => { if (f) { occluded = false; recompute() } })
   setInterval(async () => { occluded = await api.occluded().catch(() => false); recompute() }, 1500)
 
+  // ---------------- update check (设置 → 自动检查更新)
+  if (useSettings.getState().autoCheckUpdates) setTimeout(() => {
+    api.updateCheck().then((u) => { if (u.available) toast("info", tf(`发现新版本 ${u.latestVersion}`, `Version ${u.latestVersion} available`), tf("在 设置 → 更新 中安装", "Install it in Settings → Updates")) }).catch(() => {})
+  }, 20_000)
+
   // ---------------- static facts
   api.topology().then((topo) => live({ topo })).catch(() => {})
   api.overview().then((overview) => live({ overview })).catch(() => {})
 
   // ---------------- telemetry: one poller feeds every view
   let busy = false
-  setInterval(async () => {
-    if (busy || !useLive.getState().visible) return
+  const sample = async () => {
+    // 后台记录 keeps the history filling while the window is hidden
+    if (busy || (!useLive.getState().visible && !useSettings.getState().bgRecord)) return
     busy = true
     try {
       const [m, s] = await Promise.all([api.metrics(), api.sensors()])
@@ -73,10 +107,20 @@ export function startServices() {
         wr: push(h.wr, s.diskWrite ?? 0),
         cpuW: push(h.cpuW, s.cpuPower ?? 0),
         gpuW: push(h.gpuW, s.gpuPower ?? 0),
+        clk: push(h.clk, s.cpuClock ?? 0),
+        vram: push(h.vram, s.vramUsed != null && s.vramTotal ? (s.vramUsed / s.vramTotal) * 100 : 0),
+        dsk: push(h.dsk, s.diskPct ?? 0),
+        fps: push(h.fps, useLive.getState().fg?.isGame ? useLive.getState().fps?.fps ?? 0 : 0),
       }
-      live((st) => ({ metrics: m, sensors: s, hist: next, tick: st.tick + 1 }))
+      const { coreHist: ch, mood: was, fg } = useLive.getState()
+      const mood = moodOf(was, m.cpuOverall, s.gpuPct, s.cpuTemp, s.gpuTemp, !!fg?.isGame)
+      if (mood !== was) document.documentElement.dataset.mood = mood
+      live((st) => ({ metrics: m, sensors: s, hist: next, coreHist: m.perCore.map((v, i) => push(ch[i] ?? [], v)), mood, tick: st.tick + 1 }))
     } catch { /* keep last frame */ } finally { busy = false }
-  }, 1000)
+  }
+  // 刷新间隔: re-read every round so a change applies on the next sample
+  const loop = () => { void sample(); setTimeout(loop, Math.max(250, useSettings.getState().pollMs)) }
+  loop()
 
   let fgBusy = false
   setInterval(async () => {
@@ -94,23 +138,37 @@ export function startServices() {
   const applySettings = () => {
     const s = useSettings.getState()
     const el = document.documentElement
-    el.dataset.theme = s.theme
-    el.dataset.accent = s.accent
-    el.dataset.motion = s.reduceMotion ? "reduced" : "full"
+    el.dataset.style = s.style
+    el.dataset.glow = s.glow
+    el.style.setProperty("--glow-o", String(GLOW_LEVEL[s.glow]))
+    // GPU 渲染: "low" drops glow, blur and motion; "auto" does that while a game is in front
+    const low = s.gpuMode === "low" || (s.gpuMode === "auto" && !!useLive.getState().fg?.isGame)
+    if (useLive.getState().lowGpu !== low) useLive.setState({ lowGpu: low })
+    el.dataset.gpu = low ? "low" : "full"
+    el.dataset.glass = s.glass ? "on" : "off"
+    el.dataset.motion = motionReduced(s) ? "reduced" : "full"
     el.lang = s.lang === "en" ? "en" : "zh-CN"
   }
   applySettings()
+  sysReduce?.addEventListener("change", applySettings)
+  useLive.subscribe((st, prev) => { if (st.fg?.isGame !== prev.fg?.isGame && useSettings.getState().gpuMode === "auto") applySettings() })
   let last = ""
+  let lastAuto = ""
   const pushSettings = () => {
     const s = useSettings.getState()
     applySettings()
-    const key = JSON.stringify([s.recorder, s.osd, s.taskbar, s.closeToTray, s.opacity])
+    const auto = JSON.stringify(s.automation)
+    if (auto !== lastAuto) { lastAuto = auto; api.automationConfig(s.automation).catch(() => {}) }
+    const key = JSON.stringify([s.recorder, s.osd, s.taskbar, s.closeToTray, s.opacity, s.style])
     if (key === last) return
     last = key
+    const pal = PALETTE[s.style]
+    const tb = s.taskbar
     api.recorderConfig(s.recorder.enabled, s.recorder.white, s.recorder.black, s.osd.targets).catch(() => {})
-    api.tbmonConfig(s.taskbar).catch(() => {})
-    api.overlayConfig(s.osd.mode === "inject", s.osd.injectAllow, osdFlags(s.osd.rows)).catch(() => {})
-    api.overlayPalette(OSD_PALETTE.map(rgba32)).catch(() => {})
+    // empty per-metric colors follow the theme style's palette
+    api.tbmonConfig({ ...tb, themeFps: tb.themeFps || pal.fps, themeCpu: tb.themeCpu || pal.cpu, themeGpu: tb.themeGpu || pal.gpu, themeMem: tb.themeMem || pal.mem, themeDisk: tb.themeDisk || pal.disk, themeNet: tb.themeNet || pal.net }).catch(() => {})
+    api.overlayConfig(s.osd.mode === "inject", s.osd.injectAllow, overlayFlags(s.osd.metrics)).catch(() => {})
+    api.overlayPalette(overlayPalette(s.style)).catch(() => {})
     api.closeToTray(s.closeToTray).catch(() => {})
     api.opacity(s.opacity).catch(() => {})
   }
@@ -146,25 +204,23 @@ export function startServices() {
     }).catch(() => {})
   }
 
-  // ---------------- affinity / priority enforcer (runs even when hidden)
-  const applied = new Map<number, string>() // pid → rule signature already applied
-  setInterval(async () => {
-    const rules = useProfiles.getState().rules.filter((r) => r.on)
-    if (!rules.length) return
-    const procs = await api.processes().catch(() => null)
-    if (!procs) return // stale roster → skip the round, never act on a dead PID
-    const alive = new Set<number>()
-    for (const p of procs) {
-      alive.add(p.pid)
-      const r = rules.find((r) => r.exe === p.name.toLowerCase())
-      if (!r || !p.settable) continue
-      const sig = `${r.mask}|${r.priority}`
-      if (r.mask && p.affinity !== r.mask) await api.setAffinity(p.pid, BigInt(r.mask)).catch(() => {})
-      if (r.priority != null && applied.get(p.pid) !== sig) await api.setPriority(p.pid, r.priority).catch(() => {})
-      applied.set(p.pid, sig)
-    }
-    for (const pid of applied.keys()) if (!alive.has(pid)) applied.delete(pid)
-  }, 5000)
+  // ---------------- core groups: master switch defaults to "optimize on startup"
+  live({ coreOpt: useProfiles.getState().optimizeOnStartup })
+  const applied = new Map<number, string>() // pid → group signature already applied
+  setInterval(() => { if (useLive.getState().coreOpt) enforceGroups(applied) }, 5000)
+  let wasOn = useLive.getState().coreOpt
+  useLive.subscribe((st) => {
+    if (st.coreOpt === wasOn) return
+    wasOn = st.coreOpt
+    if (st.coreOpt) enforceGroups(applied)
+    else { applied.clear(); restoreGroups() }
+  })
+
+  // ---------------- 定时任务: failures and leak alerts surface; everything else stays in the history
+  on("auto://run", (r) => {
+    if (!r.ok) toast("err", tf("定时任务失败", "Scheduled task failed"), r.detail)
+    else if (r.task === "leak_alert") { toast("warn", tf("疑似内存泄漏", "Possible memory leak"), r.detail); notify(r.detail) }
+  })
 
   // ---------------- perf sessions: backend records, we persist + announce
   on("perf://session", async (payload) => {
@@ -172,7 +228,11 @@ export function startServices() {
     try {
       await api.sessionSave(id, JSON.stringify({ id, ...payload }))
       live({ openSession: id })
-      toast("ok", tf("游戏性能报告已生成", "Game performance report ready"), `${payload.meta.exe} · ${payload.summary.avgFps?.toFixed(0) ?? "—"} FPS`)
+      const line = `${payload.meta.exe} · ${payload.summary.avgFps?.toFixed(0) ?? "—"} FPS`
+      toast("ok", tf("游戏性能报告已生成", "Game performance report ready"), line)
+      const s = useSettings.getState()
+      if (s.gameNotify) notify(tf(`${payload.meta.exe} 性能报告已生成`, `${payload.meta.exe} performance report ready`))
+      if (s.autoShowReport) { go("games"); surface() }
     } catch (e) {
       toast("err", tf("报告保存失败", "Report save failed"), String(e))
     }
@@ -199,4 +259,49 @@ export function startServices() {
 
   // ---------------- automation hook (COREPILOT_STARTUP=disk)
   api.startupDirective().then((d) => { if (d === "disk") go("disk") }).catch(() => {})
+}
+
+/** Processes owned by a group (first group claiming the exe name wins). */
+function owner(groups: Group[], name: string) {
+  const n = name.toLowerCase()
+  return groups.find((g) => g.patterns.includes(n))
+}
+
+/** Apply each group's mask/priority to its running members (runs even when hidden). */
+export async function enforceGroups(applied: Map<number, string> = new Map()) {
+  const groups = useProfiles.getState().groups.filter((g) => g.patterns.length)
+  if (!groups.length) return 0
+  const procs = await api.processes().catch(() => null)
+  if (!procs) return 0 // stale roster → skip the round, never act on a dead PID
+  const alive = new Set<number>()
+  let n = 0
+  for (const p of procs) {
+    alive.add(p.pid)
+    const g = owner(groups, p.name)
+    if (!g || !p.settable) continue
+    const sig = `${g.mask}|${g.priority}`
+    if (g.mask !== "0" && p.affinity !== g.mask) { await api.setAffinity(p.pid, BigInt(g.mask)).catch(() => {}); n++ }
+    if (g.priority != null && applied.get(p.pid) !== sig) await api.setPriority(p.pid, g.priority).catch(() => {})
+    applied.set(p.pid, sig)
+  }
+  for (const pid of applied.keys()) if (!alive.has(pid)) applied.delete(pid)
+  return n
+}
+
+/** Master switch off: give group members back every core and normal priority. */
+export async function restoreGroups(only?: Group[]) {
+  const topo = useLive.getState().topo
+  if (!topo) return 0
+  const all = maskOf(topo.logical.map((l) => l.id)).toString()
+  const groups = only ?? useProfiles.getState().groups
+  const procs = await api.processes().catch(() => null)
+  if (!procs) return 0
+  let failed = 0
+  for (const p of procs) {
+    const g = owner(groups, p.name)
+    if (!g || !p.settable) continue
+    if (p.affinity !== all) await api.setAffinity(p.pid, BigInt(all)).catch(() => { failed++ })
+    if (g.priority != null) await api.setPriority(p.pid, PRIORITY.normal).catch(() => {})
+  }
+  return failed
 }

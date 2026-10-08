@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { AnimatePresence, motion } from "motion/react"
-import { ChevronDown, ChevronRight, FolderOpen, Pin, RotateCcw, Search, Square, X } from "lucide-react"
+import { AppWindow, Check, ChevronDown, ChevronRight, Columns3, Copy, FolderOpen, Info, Pin, RotateCcw, Search, Square, X } from "lucide-react"
 import { api, PRIORITY, type Proc } from "../lib/ipc"
-import { act, go, toast, useLive, useProfiles, useT } from "../lib/store"
+import { act, go, groupColor, PROC_COLS, tf, toast, useLive, useProfiles, useSettings, useT, type ProcCol } from "../lib/store"
+import { enforceGroups } from "../lib/boot"
 import { bytes, cpusOf, duration, fixed, maskOf } from "../lib/util"
-import { confirmDialog, Empty, Page, PageHead, Spark, usePoll, VList } from "../ui/kit"
+import { confirmDialog, contextMenu, EASE, EASE_IN, Empty, Page, PageHead, Mini, Seg, SHEET, usePoll, VList } from "../ui/kit"
+import { Perf } from "./Perf"
 
 // ------------------------------------------------------------ icons
 const icons = new Map<string, string | null | Promise<string | null>>()
@@ -21,15 +23,39 @@ function useIcon(path: string | null) {
   }, [path])
   return src
 }
-function ProcIcon({ path, name }: { path: string | null; name: string }) {
+export function ProcIcon({ path, name }: { path: string | null; name: string }) {
   const src = useIcon(path)
-  return src ? <img src={src} width={16} height={16} alt="" style={{ flex: "none" }} /> : (
-    <span style={{ width: 16, height: 16, borderRadius: 4, flex: "none", display: "grid", placeItems: "center", background: "var(--raise)", color: "var(--ink-3)", font: "600 9px var(--f-num)" }}>{name[0]?.toUpperCase()}</span>
+  return src ? <img src={src} width={16} height={16} alt="" draggable={false} style={{ flex: "none" }} /> : (
+    <AppWindow size={15} strokeWidth={1.6} aria-label={name} style={{ flex: "none", color: "var(--ink-4)" }} />
   )
 }
 
+const ENGINE_ZH: Record<string, string> = { "Video Encode": "视频编码", "Video Decode": "视频解码", "Video Processing": "视频处理", Compute: "计算", Copy: "复制", Security: "安全" }
+const engine = (e: string) => tf(ENGINE_ZH[e] ?? e, e)
+/** Per-engine totals across a group's instances, busiest first. */
+function mergeEngines(ps: Proc[]): [string, number][] {
+  const m = new Map<string, number>()
+  for (const p of ps) for (const [e, v] of p.gpuEngines ?? []) m.set(e, (m.get(e) ?? 0) + v)
+  return [...m].map(([e, v]): [string, number] => [e, Math.min(100, v)]).sort((a, b) => b[1] - a[1])
+}
+
+// ------------------------------------------------------------ shared actions (inspector + right-click)
+export function copyPath(path: string) {
+  navigator.clipboard.writeText(path).then(() => toast("ok", tf("已复制路径", "Path copied"), path), () => toast("err", tf("无法写入剪贴板", "Couldn't write to the clipboard")))
+}
+async function endProc(p: Proc, then?: () => void) {
+  const name = p.description || p.name
+  if (await confirmDialog({ title: tf(`结束 ${name}？`, `End ${name}?`), body: tf("未保存的数据将会丢失。", "Unsaved work in this process will be lost."), ok: tf("结束任务", "End task"), danger: true }))
+    await act(api.endTask(p.pid), tf("已结束进程", "Process ended")).then(then)
+}
+async function restartProc(p: Proc) {
+  const name = p.description || p.name
+  if (await confirmDialog({ title: tf(`重启 ${name}？`, `Restart ${name}?`), body: tf("将结束进程并以相同路径重新启动。", "Ends the process and relaunches the same executable."), ok: tf("重启", "Restart") }))
+    await act(api.restartTask(p.pid), tf("进程已重启", "Process restarted"))
+}
+
 // ------------------------------------------------------------ grouping
-type SortKey = "name" | "pid" | "cpu" | "mem" | "gpu" | "gpuMem" | "power" | "threads"
+type SortKey = "name" | "pid" | "cpu" | "mem" | "gpu" | "gpuMem" | "power" | "threads" | "handles" | "cpuTime" | "platform" | "user"
 interface Row { key: string; depth: 0 | 1; group?: { name: string; n: number; open: boolean }; p: Proc }
 const sum = (ps: Proc[], k: keyof Proc) => ps.reduce((a, p) => a + (Number(p[k]) || 0), 0)
 
@@ -46,7 +72,8 @@ function buildRows(procs: Proc[], q: string, sort: SortKey, desc: boolean, open:
   for (const p of list) { const g = by.get(p.name); g ? g.push(p) : by.set(p.name, [p]) }
   const heads = [...by.entries()].map(([name, ps]) => {
     if (ps.length === 1) return { name, ps, agg: ps[0] }
-    const agg: Proc = { ...ps[0], cpu: sum(ps, "cpu"), mem: sum(ps, "mem"), gpu: sum(ps, "gpu"), gpuMem: sum(ps, "gpuMem") || null, power: sum(ps, "power"), threads: sum(ps, "threads"), handles: sum(ps, "handles") }
+    // icon/path from the first instance that has one (protected children report none)
+    const agg: Proc = { ...ps[0], exePath: ps.find((p) => p.exePath)?.exePath ?? null, cpu: sum(ps, "cpu"), mem: sum(ps, "mem"), gpu: Math.min(100, sum(ps, "gpu")), gpuEngines: mergeEngines(ps), gpuMem: sum(ps, "gpuMem") || null, power: sum(ps, "power"), threads: sum(ps, "threads"), handles: sum(ps, "handles") }
     return { name, ps, agg }
   })
   heads.sort((a, b) => cmp(a.agg, b.agg))
@@ -60,7 +87,21 @@ function buildRows(procs: Proc[], q: string, sort: SortKey, desc: boolean, open:
   return rows
 }
 
-const COLS = "minmax(240px, 2.6fr) 64px 70px 92px 64px 80px 64px 64px minmax(80px, .9fr)"
+/** Optional columns (设置 → procCols; toggled from the 列 menu or a header right-click). */
+const COL: Record<ProcCol, { w: string; zh: string; en: string; sort?: SortKey; left?: boolean }> = {
+  pid: { w: "64px", zh: "PID", en: "PID", sort: "pid" },
+  cpu: { w: "70px", zh: "CPU", en: "CPU", sort: "cpu" },
+  mem: { w: "92px", zh: "内存", en: "Memory", sort: "mem" },
+  gpu: { w: "64px", zh: "GPU", en: "GPU", sort: "gpu" },
+  engine: { w: "156px", zh: "GPU 引擎", en: "GPU engine", left: true },
+  vram: { w: "80px", zh: "显存", en: "VRAM", sort: "gpuMem" },
+  power: { w: "76px", zh: "功耗指数", en: "Power impact", sort: "power" },
+  threads: { w: "64px", zh: "线程", en: "Threads", sort: "threads" },
+  handles: { w: "70px", zh: "句柄", en: "Handles", sort: "handles" },
+  cpuTime: { w: "84px", zh: "CPU 时间", en: "CPU time", sort: "cpuTime" },
+  platform: { w: "64px", zh: "平台", en: "Platform", sort: "platform", left: true },
+  user: { w: "minmax(80px, .9fr)", zh: "用户", en: "User", sort: "user", left: true },
+}
 
 // ------------------------------------------------------------ page
 export function Processes() {
@@ -69,9 +110,11 @@ export function Processes() {
   const [q, setQ] = useState("")
   const [sort, setSort] = useState<SortKey>("cpu")
   const [desc, setDesc] = useState(true)
+  const headRef = useRef<HTMLDivElement>(null)
   const [grouped, setGrouped] = useState(true)
   const [open, setOpen] = useState<Set<string>>(new Set())
   const [sel, setSel] = useState<number | null>(null)
+  const [view, setView] = useState<"list" | "perf">("list")
   const memTotal = useLive((s) => s.metrics?.memTotal ?? 1)
   const hist = useRef(new Map<number, number[]>())
 
@@ -90,6 +133,12 @@ export function Processes() {
   const selected = procs?.find((p) => p.pid === sel) ?? null
   const totals = useMemo(() => procs && { cpu: sum(procs, "cpu"), gpu: sum(procs, "gpu"), power: sum(procs, "power") }, [procs])
 
+  const cols = useSettings((s) => s.procCols).filter((c) => COL[c])
+  const gridCols = ["minmax(240px, 2.6fr)", ...cols.map((c) => COL[c].w)].join(" ")
+  const colMenu = (e: { clientX: number; clientY: number; preventDefault(): void; stopPropagation(): void }) => contextMenu(e, PROC_COLS.map((c) => ({
+    label: t(COL[c].zh, COL[c].en), icon: cols.includes(c) ? <Check /> : <span />,
+    onClick: () => useSettings.getState().set({ procCols: cols.includes(c) ? cols.filter((x) => x !== c) : PROC_COLS.filter((x) => x === c || cols.includes(x)) }),
+  })))
   const head = (k: SortKey, label: string, right = true) => (
     <button className={sort === k ? "on" : ""} style={{ justifyContent: right ? "flex-end" : "flex-start" }} onClick={() => { if (sort === k) setDesc(!desc); else { setSort(k); setDesc(k !== "name") } }}>
       {label}{sort === k && <ChevronDown size={11} style={{ transform: desc ? "" : "rotate(180deg)", transition: "transform .2s" }} />}
@@ -100,25 +149,47 @@ export function Processes() {
   return (
     <Page>
       <PageHead idx="02" title={t("进程", "Processes")}
-        sub={procs ? t(`${procs.length} 个进程 · CPU 合计 ${totals!.cpu.toFixed(0)}% · 估算功耗 ${totals!.power.toFixed(0)} W`, `${procs.length} processes · CPU ${totals!.cpu.toFixed(0)}% total · ~${totals!.power.toFixed(0)} W`) : t("正在枚举…", "Enumerating…")}
+        sub={procs ? t(`${procs.length} 个进程 · CPU 合计 ${totals!.cpu.toFixed(0)}%`, `${procs.length} processes · CPU ${totals!.cpu.toFixed(0)}% total`) : t("正在枚举…", "Enumerating…")}
         actions={<>
-          <div className="search"><Search size={14} /><input className="input" style={{ width: 240 }} placeholder={t("名称、描述或 PID", "Name, description or PID")} value={q} onChange={(e) => setQ(e.target.value)} /></div>
+          {/* the switch stays the right-most item, so the list-only tools fade in and
+              out beside it instead of the switch jumping across the header */}
+          <AnimatePresence initial={false}>
+          {view === "list" && <motion.div key="tools" className="row" style={{ "--gap": "10px" } as CSSProperties}
+            initial={{ opacity: 0, x: 14 }} animate={{ opacity: 1, x: 0, transition: { duration: 0.3, ease: EASE } }} exit={{ opacity: 0, x: 14, transition: { duration: 0.14, ease: EASE_IN } }}><div className="search"><Search size={14} /><input className="input" style={{ width: 240 }} placeholder={t("名称、描述或 PID", "Name, description or PID")} value={q} onChange={(e) => setQ(e.target.value)} /></div>
           <button className={`chip ${grouped ? "on" : ""}`} onClick={() => setGrouped(!grouped)}>{t("按应用分组", "Group by app")}</button>
+          <button className="btn ghost sm" title={t("显示的列", "Columns")} onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); colMenu({ clientX: r.left, clientY: r.bottom + 6, preventDefault() {}, stopPropagation() {} }) }}><Columns3 size={14} />{t("列", "Columns")}</button></motion.div>}
+          </AnimatePresence>
+          <Seg value={view} onChange={setView} options={[{ v: "list", label: t("进程", "Processes") }, { v: "perf", label: t("性能", "Performance") }]} />
         </>} />
+      {/* custom = direction, so the EXITING view also slides away from the tab you picked */}
+      <AnimatePresence mode="wait" initial={false} custom={view === "perf" ? 1 : -1}>
+      <motion.div key={view} className="col" style={{ "--gap": "16px" } as CSSProperties} custom={view === "perf" ? 1 : -1} initial="hidden" animate="show" exit="exit"
+        variants={{ hidden: (d: number) => ({ opacity: 0, x: 28 * d }), show: { opacity: 1, x: 0, transition: { duration: 0.32, ease: EASE, staggerChildren: 0.03 } }, exit: (d: number) => ({ opacity: 0, x: -28 * d, transition: { duration: 0.13, ease: EASE_IN } }) }}>
+      {view === "perf" ? <Perf /> : (
       <motion.div className="panel" style={{ position: "relative", overflow: "hidden", height: "calc(100vh - 210px)", minHeight: 380, display: "flex" }}
         variants={{ hidden: { opacity: 0, y: 10 }, show: { opacity: 1, y: 0 } }}>
-        <div className="table grow" style={{ "--cols": COLS } as CSSProperties}>
-          <div className="thead">
-            {head("name", t("名称", "Name"), false)}{head("pid", "PID")}{head("cpu", "CPU")}{head("mem", t("内存", "Memory"))}{head("gpu", "GPU")}{head("gpuMem", "VRAM")}{head("power", t("功耗", "Power"))}{head("threads", t("线程", "Threads"))}
-            <button style={{ justifyContent: "flex-start" }} disabled>{t("用户", "User")}</button>
+        <div className="table grow" style={{ "--cols": gridCols } as CSSProperties}>
+          <div className="thead" ref={headRef} onContextMenu={colMenu}>
+            {head("name", t("名称", "Name"), false)}
+            {cols.map((c) => COL[c].sort ? <span key={c} style={{ display: "contents" }}>{head(COL[c].sort!, t(COL[c].zh, COL[c].en), !COL[c].left)}</span> : <button key={c} style={{ justifyContent: "flex-start" }} disabled>{t(COL[c].zh, COL[c].en)}</button>)}
           </div>
           {!procs ? (
             <div className="col" style={{ padding: 14 }}>{Array.from({ length: 12 }, (_, i) => <div key={i} className="skeleton" style={{ height: 22, opacity: 1 - i * 0.07 }} />)}</div>
           ) : rows.length === 0 ? (
             <Empty title={t("没有匹配的进程", "No matching processes")} />
           ) : (
-            <VList items={rows} row={(r) => r.key} height={36} style={{ flex: 1 }} render={(r) => (
-              <ProcRow r={r} memTotal={memTotal} sel={!r.group && r.p.pid === sel} onClick={() => (r.group ? toggle(r.group.name) : setSel(r.p.pid === sel ? null : r.p.pid))} />
+            <VList items={rows} row={(r) => r.key} height={36} style={{ flex: 1 }} flip={`${sort}:${desc}:${grouped}`} onScrollX={(x) => { if (headRef.current) headRef.current.scrollLeft = x }} render={(r) => (
+              <ProcRow r={r} cols={cols} memTotal={memTotal} sel={!r.group && r.p.pid === sel} onClick={() => (r.group ? toggle(r.group.name) : setSel(r.p.pid === sel ? null : r.p.pid))}
+                onMenu={(e) => contextMenu(e, [
+                  { label: t("在资源管理器中显示", "Show in Explorer"), icon: <FolderOpen />, disabled: !r.p.exePath, onClick: () => act(api.reveal(r.p.exePath!)) },
+                  { label: t("复制路径", "Copy path"), icon: <Copy />, disabled: !r.p.exePath, onClick: () => copyPath(r.p.exePath!) },
+                  "sep",
+                  r.group
+                    ? { label: r.group.open ? t("收起实例", "Collapse instances") : t(`展开 ${r.group.n} 个实例`, `Expand ${r.group.n} instances`), icon: r.group.open ? <ChevronDown /> : <ChevronRight />, onClick: () => toggle(r.group!.name) }
+                    : { label: t("详细信息", "Details"), icon: <Info />, onClick: () => setSel(r.p.pid) },
+                  !r.group && { label: t("重启", "Restart"), icon: <RotateCcw />, disabled: !r.p.exePath, onClick: () => restartProc(r.p) },
+                  !r.group && { label: t("结束任务", "End task"), icon: <Square />, danger: true, onClick: () => endProc(r.p, () => setSel(null)) },
+                ])} />
             )} />
           )}
         </div>
@@ -126,31 +197,42 @@ export function Processes() {
           {selected && <Inspector key="insp" p={selected} trace={hist.current.get(selected.pid) ?? []} onClose={() => setSel(null)} />}
         </AnimatePresence>
       </motion.div>
+      )}
+      </motion.div>
+      </AnimatePresence>
     </Page>
   )
 }
 
-function ProcRow({ r, memTotal, sel, onClick }: { r: Row; memTotal: number; sel: boolean; onClick: () => void }) {
+function ProcRow({ r, cols, memTotal, sel, onClick, onMenu }: { r: Row; cols: ProcCol[]; memTotal: number; sel: boolean; onClick: () => void; onMenu: (e: React.MouseEvent) => void }) {
   const p = r.p
   const heatCell = (a: number, c: string, text: string) => (
-    <span className="cell r heat" style={{ "--c": c, "--a": Math.min(0.3, a * 0.6) } as CSSProperties}><span>{text}</span></span>
+    <span className="cell r heat" style={{ "--c": c, "--a": `${Math.min(28, a * 60).toFixed(1)}%` } as CSSProperties}><span>{text}</span></span>
   )
   return (
-    <div className={`tr ${sel ? "sel" : ""}`} onClick={onClick} role="row" aria-selected={sel}>
+    <div className={`tr ${sel ? "sel" : ""}`} onClick={onClick} onContextMenu={onMenu} role="row" aria-selected={sel}>
       <span className="row" style={{ paddingLeft: r.depth ? 26 : 0, "--gap": "9px" } as CSSProperties}>
         {r.group ? (r.group.open ? <ChevronDown size={13} className="faint" /> : <ChevronRight size={13} className="faint" />) : r.depth === 0 && <span style={{ width: 13 }} />}
         <ProcIcon path={p.exePath} name={p.name} />
         <span className="ellipsis" style={{ color: "var(--ink)" }}>{p.description || p.name}</span>
         {r.group ? <span className="tag">{r.group.n}</span> : p.description && <span className="faint ellipsis" style={{ fontSize: 11.5 }}>{p.name}</span>}
       </span>
-      <span className="cell r faint">{r.group ? "" : p.pid}</span>
-      {heatCell(p.cpu / 100, "var(--cpu)", `${p.cpu.toFixed(1)}%`)}
-      {heatCell((p.mem / memTotal) * 4, "var(--mem)", bytes(p.mem))}
-      {heatCell(p.gpu / 100, "var(--gpu)", p.gpu ? `${p.gpu.toFixed(0)}%` : "—")}
-      <span className="cell r">{p.gpuMem ? bytes(p.gpuMem) : "—"}</span>
-      <span className="cell r">{p.power ? `${p.power.toFixed(1)}W` : "—"}</span>
-      <span className="cell r faint">{p.threads}</span>
-      <span className="cell faint ellipsis">{r.group ? "" : p.user ?? "—"}</span>
+      {cols.map((c) => {
+        switch (c) {
+          case "pid": return <span key={c} className="cell r faint">{r.group ? "" : p.pid}</span>
+          case "cpu": return <span key={c} style={{ display: "contents" }}>{heatCell(p.cpu / 100, "var(--cpu)", `${p.cpu.toFixed(1)}%`)}</span>
+          case "mem": return <span key={c} style={{ display: "contents" }}>{heatCell((p.mem / memTotal) * 4, "var(--mem)", bytes(p.mem))}</span>
+          case "gpu": return <span key={c} style={{ display: "contents" }}>{heatCell(p.gpu / 100, "var(--gpu)", p.gpu >= 0.5 ? `${p.gpu.toFixed(0)}%` : "—")}</span>
+          case "engine": return <span key={c} className="engs">{p.gpuEngines?.filter(([, v]) => v >= 0.5).slice(0, 2).map(([e, v], i) => <span key={e} className={i ? "eng dim" : "eng"} title={`${engine(e)} ${v.toFixed(1)}%`}>{engine(e)}<b className="num">{v.toFixed(0)}%</b></span>)}</span>
+          case "vram": return <span key={c} className="cell r">{p.gpuMem ? bytes(p.gpuMem) : "—"}</span>
+          case "power": return <span key={c} className="cell r">{p.power >= 0.1 ? p.power.toFixed(1) : "—"}</span>
+          case "threads": return <span key={c} className="cell r faint">{p.threads}</span>
+          case "handles": return <span key={c} className="cell r faint">{p.handles || "—"}</span>
+          case "cpuTime": return <span key={c} className="cell r faint">{p.cpuTime ? duration(p.cpuTime) : "—"}</span>
+          case "platform": return <span key={c} className="cell faint">{p.platform ?? "—"}</span>
+          case "user": return <span key={c} className="cell faint ellipsis">{r.group ? "" : p.user ?? "—"}</span>
+        }
+      })}
     </div>
   )
 }
@@ -165,23 +247,20 @@ function Inspector({ p, trace, onClose }: { p: Proc; trace: number[]; onClose: (
   const system = !p.user || /^(SYSTEM|LOCAL SERVICE|NETWORK SERVICE)$/i.test(p.user)
   const name = p.description || p.name
 
-  const end = async () => {
-    if (await confirmDialog({ title: t(`结束 ${name}？`, `End ${name}?`), body: t("未保存的数据将会丢失。", "Unsaved work in this process will be lost."), ok: t("结束任务", "End task"), danger: true }))
-      await act(api.endTask(p.pid), t("已结束进程", "Process ended")).then(onClose)
-  }
-  const restart = async () => {
-    if (await confirmDialog({ title: t(`重启 ${name}？`, `Restart ${name}?`), body: t("将结束进程并以相同路径重新启动。", "Ends the process and relaunches the same executable."), ok: t("重启", "Restart") }))
-      await act(api.restartTask(p.pid), t("进程已重启", "Process restarted"))
-  }
-  const saveRule = () => {
-    const exe = p.name.toLowerCase()
-    const rules = useProfiles.getState().rules.filter((r) => r.exe !== exe)
-    useProfiles.getState().set({ rules: [...rules, { exe, mask: maskOf(cpus).toString(), priority: null, on: true }] })
-    toast("ok", t("已保存核心规则", "Core rule saved"), `${exe} → ${cpus.length} ${t("个逻辑核心", "logical CPUs")}`)
+  const end = () => endProc(p, onClose)
+  const restart = () => restartProc(p)
+  const groups = useProfiles((s) => s.groups)
+  const exe = p.name.toLowerCase()
+  const current = groups.find((g) => g.patterns.includes(exe))
+  const assign = async (id: string) => {
+    const next = groups.map((g) => (g.id === id ? { ...g, patterns: [...new Set([...g.patterns, exe])] } : { ...g, patterns: g.patterns.filter((x) => x !== exe) }))
+    useProfiles.getState().set({ groups: next })
+    if (useLive.getState().coreOpt) await enforceGroups()
+    toast("ok", t(`已加入「${next.find((g) => g.id === id)!.name}」`, `Added to “${next.find((g) => g.id === id)!.name}”`), exe)
   }
 
   return (
-    <motion.aside className="drawer" initial={{ x: 400, opacity: 0.6 }} animate={{ x: 0, opacity: 1 }} exit={{ x: 400, opacity: 0 }} transition={{ type: "spring", stiffness: 380, damping: 40 }}>
+    <motion.aside className="drawer" initial={{ x: "100%" }} animate={{ x: 0, transition: { duration: 0.44, ease: SHEET } }} exit={{ x: "100%", transition: { duration: 0.24, ease: EASE_IN } }}>
       <div className="row" style={{ padding: "16px 16px 14px", borderBottom: "1px solid var(--line)", "--gap": "12px" } as CSSProperties}>
         <div style={{ width: 36, height: 36, borderRadius: 8, background: "var(--panel-2)", display: "grid", placeItems: "center", boxShadow: "inset 0 0 0 1px var(--line)" }}><ProcIcon path={p.exePath} name={p.name} /></div>
         <div className="col grow" style={{ "--gap": "2px" } as CSSProperties}>
@@ -190,16 +269,16 @@ function Inspector({ p, trace, onClose }: { p: Proc; trace: number[]; onClose: (
         </div>
         <button className="btn ghost icon sm" onClick={onClose} aria-label={t("关闭", "Close")}><X size={15} /></button>
       </div>
-      <div className="col" style={{ padding: 16, overflow: "auto", "--gap": "18px" } as CSSProperties}>
+      <div className="col scroller" style={{ padding: 16, overflow: "auto", "--gap": "18px" } as CSSProperties}>
         <div>
           <div className="row spread" style={{ marginBottom: 6 }}><span className="label" style={{ color: "var(--cpu)" }}>CPU</span><span className="num">{p.cpu.toFixed(1)}%</span></div>
-          <Spark data={trace} color="var(--cpu)" w={346} h={44} max={Math.max(10, ...trace)} />
+          <Mini data={trace} color="var(--cpu)" h={64} max={Math.max(10, ...trace) * 1.15} />
         </div>
         <div className="kv">
           <span>{t("内存", "Memory")}</span><span>{bytes(p.mem)}</span>
-          <span>GPU</span><span>{p.gpu ? `${p.gpu.toFixed(1)}% · ${p.gpuEngine ?? ""}` : "—"}</span>
+          <span>GPU</span><span>{p.gpuEngines?.length ? p.gpuEngines.map(([e, v]) => `${engine(e)} ${v.toFixed(0)}%`).join(" · ") : "—"}</span>
           {p.gpuMem != null && <><span>VRAM</span><span>{bytes(p.gpuMem)}</span></>}
-          <span>{t("功耗", "Power")}</span><span>{fixed(p.power, 1, " W")}</span>
+          <span title={t("相对占用指数（0–100），不是瓦数", "Relative impact index (0–100), not watts")}>{t("功耗指数", "Power impact")}</span><span>{fixed(p.power, 1)}</span>
           <span>{t("线程 / 句柄", "Threads / handles")}</span><span>{p.threads} / {p.handles}</span>
           <span>{t("CPU 时间", "CPU time")}</span><span>{duration(p.cpuTime)}</span>
           <span>{t("用户", "User")}</span><span>{p.user ?? "—"}</span>
@@ -240,9 +319,18 @@ function Inspector({ p, trace, onClose }: { p: Proc; trace: number[]; onClose: (
             </div>
             <div className="row" style={{ "--gap": "6px" } as CSSProperties}>
               <button className="btn sm primary" disabled={!p.settable || !cpus.length} onClick={() => act(api.setAffinity(p.pid, maskOf(cpus)), t("亲和性已应用", "Affinity applied"))}>{t("应用", "Apply")}</button>
-              <button className="btn sm" disabled={!cpus.length} onClick={saveRule}><Pin size={12} />{t("保存为规则", "Save as rule")}</button>
-              <button className="btn sm ghost" onClick={() => go("cores")}>{t("管理规则", "Rules")} →</button>
+              <button className="btn sm ghost" onClick={() => go("cores")}>{t("核心分配", "Core groups")} →</button>
             </div>
+            {groups.length > 0 && (
+              <div className="row wrap" style={{ "--gap": "6px" } as CSSProperties}>
+                <span className="faint" style={{ fontSize: 12 }}><Pin size={11} /> {t("分组", "Group")}</span>
+                {groups.map((g) => (
+                  <button key={g.id} className={`chip ${current?.id === g.id ? "on" : ""}`} style={{ height: 24, fontSize: 11.5 }} disabled={!p.settable} onClick={() => assign(g.id)}>
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: groupColor(g.hue) }} />{g.name}
+                  </button>
+                ))}
+              </div>
+            )}
             {!p.settable && <span className="faint" style={{ fontSize: 12 }}>{t("受保护进程，无法修改调度。", "Protected process — scheduling can't be changed.")}</span>}
           </div>
         )}

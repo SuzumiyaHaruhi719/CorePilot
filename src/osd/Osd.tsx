@@ -2,39 +2,30 @@
 // content-sized; Rust owns the HWND (osd.rs), this page only decides WHAT to
 // draw and asks for bounds. Never writes settings — read-only consumer.
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
-import { api, type FpsStats, type GpuInfo, type Metrics, type OsdRow, type Sensors } from "../lib/ipc"
-import { DATA_COLORS, SETTINGS_DEFAULTS, SETTINGS_KEY, type Settings } from "../lib/store"
-import { bytes, isNum } from "../lib/util"
+import { api } from "../lib/ipc"
+import { CAT_LABEL, CAT_ORDER, METRICS, type OsdPosition, type PlateData } from "../lib/osd"
+import { mergeSettings, SETTINGS_DEFAULTS, SETTINGS_KEY, type OsdConfig, type Settings } from "../lib/store"
+import { PALETTE, type ThemeStyle } from "../lib/themes"
 
-export interface PlateData { fps: FpsStats | null; m: Metrics | null; s: Sensors | null; g: GpuInfo | null }
+export type { PlateData }
 
-const n0 = (v: number | null | undefined, u = "") => (isNum(v) ? `${v.toFixed(0)}${u}` : "—")
-const ghz = (mhz: number | null | undefined) => (isNum(mhz) && mhz > 0 ? `${(mhz / 1000).toFixed(2)}G` : "")
-const rateShort = (v: number | null | undefined) => (isNum(v) ? bytes(v, 1).replace(" ", "") : "—")
-
-/** Pure plate render — shared by the OSD window and the in-app preview. */
-export function Plate({ d, rows, scale = 1 }: { d: PlateData; rows: Record<OsdRow, boolean>; scale?: number }) {
-  const { fps, m, s, g } = d
-  const C = DATA_COLORS
-  const line = (k: string, color: string, v: React.ReactNode, x?: React.ReactNode, big = false) => (
-    <>
-      <span className="k" style={{ color }}>{k}</span>
-      <span className={`v ${big ? "big" : ""}`}>{v}</span>
-      <span className="x">{x}</span>
-    </>
-  )
-  const vramTotal = g?.available ? g.memTotalBytes : s?.vramTotal
-  const vramUsed = g?.available ? g.memUsedBytes : s?.vramUsed
+/** Pure plate render — shared by the OSD window and the in-app preview. Metrics
+ *  group by device in a fixed order, so all GPU readings sit together. */
+export function Plate({ d, osd, style }: { d: PlateData; osd: Pick<OsdConfig, "metrics" | "layout" | "scale" | "bg" | "rounded" | "position">; style: ThemeStyle }) {
+  const on = new Set(osd.metrics)
+  const pal = PALETTE[style] ?? PALETTE.midnight
+  const groups = CAT_ORDER.map((cat) => ({ cat, items: METRICS.filter((m) => m.cat === cat && on.has(m.key)) })).filter((g) => g.items.length)
   return (
-    <div className="osd-plate" style={{ zoom: scale }}>
-      {rows.fps && line("FPS", C.fps, n0(fps?.fps), isNum(fps?.low1) ? `1% ${fps!.low1!.toFixed(0)}` : "", true)}
-      {rows.frametime && line("FT", C.fps, isNum(fps?.frametimeMs) ? fps!.frametimeMs!.toFixed(1) : "—", "ms")}
-      {rows.cpu && line("CPU", C.cpu, n0(m?.cpuOverall, "%"), `${n0(s?.cpuTemp, "°")} ${ghz(s?.cpuClock)}`)}
-      {rows.gpu && line("GPU", C.gpu, n0(g?.available ? g.utilizationGpu : s?.gpuPct, "%"), `${n0(g?.available ? g.temperature : s?.gpuTemp, "°")} ${ghz(g?.graphicsClock)}`)}
-      {rows.vram && line("VRAM", C.gpu, bytes(vramUsed ?? null), isNum(vramTotal) ? `/ ${bytes(vramTotal, 0)}` : "")}
-      {rows.ram && line("RAM", C.mem, bytes(m?.memUsed ?? null), m ? `/ ${bytes(m.memTotal, 0)}` : "")}
-      {rows.disk && line("DISK", C.disk, `R ${rateShort(s?.diskRead)}`, `W ${rateShort(s?.diskWrite)}`)}
-      {rows.net && line("NET", C.net, `▼ ${rateShort(s?.netDown)}`, `▲ ${rateShort(s?.netUp)}`)}
+    // text hugs the screen edge it's docked to: labels on the left for left docks, mirrored on the right
+    <div className={`osd-plate ${osd.layout === "column" ? "column" : ""} ${osd.position.endsWith("r") ? "right" : osd.position.endsWith("c") ? "center" : ""}`}
+      style={{ zoom: osd.scale, background: `rgba(6, 9, 16, ${osd.bg})`, borderRadius: osd.rounded ? 8 : 3, boxShadow: osd.bg > 0.05 ? `inset 0 0 0 1px ${pal.fps}55` : "none" }}>
+      {groups.map((g) => (
+        <span key={g.cat} className="grp">
+          <span className="k" style={{ color: pal[g.cat] }}>{CAT_LABEL[g.cat]}</span>
+          {g.items.map((m) => <span key={m.key} className="v">{m.value(d) ?? "—"}</span>)}
+        </span>
+      ))}
+      {!groups.length && <span className="v" style={{ opacity: 0.6 }}>—</span>}
     </div>
   )
 }
@@ -42,14 +33,21 @@ export function Plate({ d, rows, scale = 1 }: { d: PlateData; rows: Record<OsdRo
 async function readSettings(): Promise<Settings> {
   const raw = await api.persistGet(SETTINGS_KEY).catch(() => null)
   try {
-    const st = (typeof raw === "string" ? JSON.parse(raw) : raw)?.state as Partial<Settings> | undefined
-    return { ...SETTINGS_DEFAULTS, ...st, osd: { ...SETTINGS_DEFAULTS.osd, ...st?.osd, rows: { ...SETTINGS_DEFAULTS.osd.rows, ...st?.osd?.rows } } }
+    return mergeSettings((typeof raw === "string" ? JSON.parse(raw) : raw)?.state)
   } catch {
     return SETTINGS_DEFAULTS
   }
 }
 
-const MARGIN = 14
+/** gap between the plate and the monitor edge (logical px); the studio scales it too */
+export const OSD_MARGIN = 14
+const MARGIN = OSD_MARGIN
+function place(pos: OsdPosition, [mx, my, mw, mh]: [number, number, number, number], w: number, h: number) {
+  const x = pos.endsWith("l") ? mx + MARGIN : pos.endsWith("r") ? mx + mw - w - MARGIN : mx + (mw - w) / 2
+  const y = pos.startsWith("t") ? my + MARGIN : my + mh - h - MARGIN
+  return [Math.round(x), Math.round(y)] as const
+}
+
 export function Osd() {
   const [cfg, setCfg] = useState<Settings>(SETTINGS_DEFAULTS)
   const [show, setShow] = useState(false)
@@ -91,7 +89,8 @@ export function Osd() {
         const want = o.mode !== "off" && eligible && !(o.mode === "inject" && injected.current)
         setShow(want)
         if (!want) return
-        const [fps, m, s, g] = await Promise.all([api.fps(), api.metrics(), api.sensors(), o.rows.gpu || o.rows.vram ? api.gpuInfo() : Promise.resolve(null)])
+        const needGpu = o.metrics.some((m) => m.startsWith("gpu."))
+        const [fps, m, s, g] = await Promise.all([api.fps(), api.metrics(), api.sensors(), needGpu ? api.gpuInfo() : Promise.resolve(null)])
         setD({ fps, m, s, g })
       } catch { /* keep last frame */ } finally { busy = false }
     }
@@ -100,31 +99,28 @@ export function Osd() {
     return () => clearInterval(id)
   }, [cfg.osd])
 
-  // bounds: size to the plate, dock to the configured corner of the game's monitor
+  // bounds: size to the plate, dock to the configured spot on the game's monitor
   useLayoutEffect(() => {
     let alive = true
-    const place = async () => {
+    const bounds = async () => {
       if (!show || !plate.current) { await api.osdBounds(-30000, -30000, 1, 1).catch(() => {}); return }
       const r = plate.current.getBoundingClientRect()
       const mon = await api.osdMonitor().catch(() => null)
       if (!alive || !mon) return
-      const [mx, my, mw, mh] = mon
       const w = Math.ceil(r.width) + 2, h = Math.ceil(r.height) + 2
-      const c = cfg.osd.corner
-      const x = c === 1 || c === 3 ? mx + mw - w - MARGIN : mx + MARGIN
-      const y = c >= 2 ? my + mh - h - MARGIN : my + MARGIN
+      const [x, y] = place(cfg.osd.position, mon, w, h)
       await api.osdBounds(x, y, w, h).catch(() => {})
     }
-    place()
+    bounds()
     // re-assert ~1 Hz while showing: keeps the window topmost over rude fullscreen apps
-    const id = show ? setInterval(place, 1000) : undefined
+    const id = show ? setInterval(bounds, 1000) : undefined
     return () => { alive = false; clearInterval(id) }
-  }, [show, cfg.osd.corner, cfg.osd.scale, cfg.osd.rows])
+  }, [show, cfg.osd.position, cfg.osd.scale, cfg.osd.metrics, cfg.osd.layout])
 
   if (!show) return null
   return (
     <div ref={plate} style={{ display: "inline-block", width: "max-content" }}>
-      <Plate d={d} rows={cfg.osd.rows} scale={cfg.osd.scale} />
+      <Plate d={d} osd={cfg.osd} style={cfg.style} />
     </div>
   )
 }

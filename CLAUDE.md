@@ -28,8 +28,9 @@ Tauri v2 (Rust backend, React/zustand frontend, WebView2) system utility: task m
 - `persist.rs` — crash-safe store IO (see rule 3).
 - `osd.rs` — corner OSD webview window: keep-alive + GDI-recycle guard, click-through/toolwindow style re-assert, close-guarded in `lib.rs`.
 - `overlay_inject.rs` — in-game DLL injection OSD; `taskbar_mon.rs` — native taskbar plate (double-buffered paint, debounced fullscreen hide).
+- `automation.rs` — 定时任务 scheduler (per-task minimum intervals enforced here, ISLC-style standby trigger) + memory-leak watcher (per-minute private bytes / kernel pools); `tweaks.rs` registry tweaks are table-driven (`REG_TWEAKS`).
 - `fan.rs`/`fan_autotune/` — fan engine + closed-loop tuning; `smu.rs` + `sensord/` (C#) — SMU/PawnIO sidecar (clean-room, **no GPL code in tree**).
-- Frontend: `src/lib/ipc.ts` (typed `api` + `on()` events — the whole IPC surface), `src/lib/store.ts` (zustand; persisted keys `cp.settings` / `cp.profiles` via persist_get/set; `useT()` i18n), `src/lib/boot.ts` (the ONE telemetry poller, visibility gate, one-way config pushes, affinity enforcer, `perf://session` save), `src/lib/migrate.ts` (one-time import of legacy `corepilot-*` keys), `src/osd/Osd.tsx` (OSD window: visibility, bounds, overlay attach/detach), `src/pages/*`, `src/ui/*` (Shell, kit, Chart).
+- Frontend: `src/lib/ipc.ts` (typed `api` + `on()` events — the whole IPC surface), `src/lib/store.ts` (zustand; persisted keys `cp.settings` / `cp.profiles` via persist_get/set; `useT()` i18n), `src/lib/boot.ts` (the ONE telemetry poller, visibility gate, one-way config pushes, affinity enforcer, `perf://session` save), `src/lib/migrate.ts` (one-time import of legacy `corepilot-*` keys), `src/osd/Osd.tsx` (OSD window: visibility, bounds, overlay attach/detach), `src/pages/*` (`Overview.tsx` = customizable widget board, `widgets.tsx` = widget library + metric registry for user-built widgets, `Perf.tsx` = 进程 → 性能, `Cron.tsx` = 定时任务 + leak panel), `src/ui/*` (Shell, kit incl. `contextMenu`, Chart).
 
 ## Perf-work constraint
 

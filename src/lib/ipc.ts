@@ -18,6 +18,8 @@ export interface Sensors {
 export interface Proc {
   pid: number; name: string; cpu: number; mem: number; threads: number; gpu: number; gpuMem: number | null; power: number
   affinity: string; user: string | null; handles: number; cpuTime: number; platform: string | null; gpuEngine: string | null
+  /** per-engine share, busiest first; `gpu` is only the 3D part */
+  gpuEngines: [string, number][]
   gpuAdapter: string | null; description: string | null; settable: boolean; parentPid: number; exePath: string | null
 }
 export interface MemDetail { total: number; avail: number; used: number; loadPct: number }
@@ -108,7 +110,14 @@ export interface PerfSummary {
   maxGpuPower: number | null; avgGpuClock: number | null; avgVramLoad: number | null; maxVramLoad: number | null; avgMemLoad: number | null
   energyWh: number | null; co2Kg: number | null
 }
-export interface SessionMeta { exe: string; path: string | null; startedAt: number; endedAt: number; durationSec: number; cpuName: string | null; gpuName: string | null }
+export interface MemLists { free: number; standby: number; modified: number; total: number }
+export interface JobCfg { id: string; task: string; enabled: boolean; everySecs: number; cond: boolean; freeMb: number; standbyMb: number; skipInGame: boolean }
+export interface RunRecord { at: number; id: string; task: string; ok: boolean; detail: string }
+export interface AutoStatus { history: RunRecord[]; next: Record<string, number>; mem: MemLists | null }
+export interface LeakSuspect { pid: number; name: string; path: string | null; privateBytes: number; growthBytes: number; slopeMbPerMin: number; minutes: number; trend: number[] }
+export interface KernelMem { paged: number; nonpaged: number; commit: number; commitLimit: number; nonpagedSlopeMbPerMin: number; pagedSlopeMbPerMin: number; nonpagedTrend: number[]; leak: boolean }
+export interface LeakReport { suspects: LeakSuspect[]; growers: LeakSuspect[]; kernel: KernelMem | null; minutes: number; neededMinutes: number }
+export interface SessionMeta { exe: string; name?: string; path: string | null; startedAt: number; endedAt: number; durationSec: number; cpuName: string | null; gpuName: string | null }
 export interface Session { id: string; meta: SessionMeta; summary: PerfSummary; samples: PerfSample[] }
 
 export interface UpdateInfo {
@@ -124,7 +133,22 @@ export interface TbConfig {
 }
 
 // ---------------------------------------------------------------- commands
-const call = <T,>(cmd: string, args?: Record<string, unknown>) => invoke<T>(cmd, args)
+/** Failures go to the backend session log (设置 → 导出调试日志, and the warn file on
+ *  disk) so a report from someone else's PC says what broke. The same message is
+ *  written at most once per 30 min, so a failing poll can't flood the log. */
+const logged = new Map<string, number>()
+export function logUi(level: "warn" | "error", message: string) {
+  const now = Date.now()
+  if ((logged.get(message) ?? -Infinity) > now - 30 * 60_000) return
+  if (logged.size > 400) logged.clear()
+  logged.set(message, now)
+  invoke("ui_log", { level, message }).catch(() => {})
+}
+const call = <T,>(cmd: string, args?: Record<string, unknown>) =>
+  invoke<T>(cmd, args).catch((e) => {
+    logUi("warn", `${cmd} failed: ${String(e)}`)
+    throw e
+  })
 
 export const api = {
   topology: () => call<Topology>("get_topology"),
@@ -140,14 +164,16 @@ export const api = {
   endTask: (pid: number) => call<void>("end_task", { pid }),
   restartTask: (pid: number) => call<void>("restart_task", { pid }),
   reveal: (path: string) => call<void>("reveal_in_explorer", { path }),
+  openFolder: (path: string) => call<void>("reveal_in_explorer", { path, open: true }),
 
   memory: () => call<MemDetail>("get_memory_detail"),
   freeWorkingSets: () => call<void>("free_working_sets"),
   purgeStandby: () => call<void>("purge_standby"),
+  flushModified: () => call<void>("flush_modified"),
   cleanTemp: () => call<CleanResult>("clean_temp"),
   flushDns: () => call<void>("flush_dns"),
-  powerPlan: () => call<"balanced" | "high" | "other">("get_power_plan"),
-  setPowerPlan: (plan: "balanced" | "high") => call<void>("set_power_plan", { plan }),
+  powerPlan: () => call<"balanced" | "high" | "ultimate" | "other">("get_power_plan"),
+  setPowerPlan: (plan: "balanced" | "high" | "ultimate") => call<void>("set_power_plan", { plan }),
   services: () => call<Service[]>("list_services"),
   controlService: (name: string, action: "start" | "stop" | "restart") => call<void>("control_service", { name, action }),
   startup: () => call<StartupItem[]>("list_startup"),
@@ -211,6 +237,10 @@ export const api = {
   sessionDelete: (id: string) => call<void>("perf_session_delete", { id }),
   sessionDeleteAll: () => call<void>("perf_session_delete_all"),
   sessionIds: () => call<string[]>("perf_session_ids"),
+  gameName: (exe: string, path: string | null) => call<string>("game_display_name", { exe, path }),
+  automationConfig: (jobs: JobCfg[]) => call<void>("automation_config", { jobs }),
+  automationStatus: () => call<AutoStatus>("automation_status"),
+  leakReport: () => call<LeakReport>("leak_report"),
 
   closeToTray: (enabled: boolean) => call<void>("set_close_to_tray", { enabled }),
   occluded: () => call<boolean>("ui_occluded"),
@@ -226,6 +256,7 @@ export const api = {
 export interface Events {
   "disk-scan://progress": ScanProgress
   "perf://session": Omit<Session, "id">
+  "auto://run": RunRecord
   "fan-calib-progress": CalibProgress
   "fan-autotune-progress": TuneProgress
   "fan-autotune-aborted": TuneAbort

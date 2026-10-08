@@ -3,6 +3,7 @@ import { expect, test, vi } from "vitest"
 // Backend double: first write is slow, so an unchained second write would land first.
 const disk: string[] = []
 vi.mock("./ipc", () => ({
+  logUi: vi.fn(),
   api: {
     persistGet: vi.fn(async (name: string) => { if (name === "broken") throw new Error("poisoned"); return null }),
     persistSet: vi.fn(async (_name: string, value: string) => {

@@ -1,22 +1,163 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { AnimatePresence, motion } from "motion/react"
-import { Fan, ShieldAlert, Square, Wand2, Waves } from "lucide-react"
+import { Check, Eye, EyeOff, Fan, Gauge, Moon, Pencil, Plus, RotateCcw, Save, ShieldAlert, Square, Wand2, Waves, Wind, X } from "lucide-react"
 import { api, on, type CalibProgress, type CurvePoint, type FanConfig, type FanState, type TuneParams, type TuneProgress } from "../lib/ipc"
 import { applyTunedCurves } from "../lib/boot"
-import { act, toast, useProfiles, useT } from "../lib/store"
+import { act, toast, useProfiles, useSettings, useT, type FanProfile } from "../lib/store"
 import { clamp, curveAt, isNum } from "../lib/util"
-import { confirmDialog, Empty, Field, Meter, Page, PageHead, Panel, Range, Roll, Seg, Switch, usePoll } from "../ui/kit"
+import { confirmDialog, EASE_IN, Empty, Field, GLIDE, Layer, Meter, Page, PageHead, Panel, Range, Roll, Seg, SETTLE, Switch, usePoll } from "../ui/kit"
 
-const PRESETS: Record<string, CurvePoint[]> = {
-  quiet: [{ tempC: 30, duty: 20 }, { tempC: 50, duty: 28 }, { tempC: 65, duty: 42 }, { tempC: 75, duty: 62 }, { tempC: 88, duty: 100 }],
-  balanced: [{ tempC: 30, duty: 25 }, { tempC: 50, duty: 38 }, { tempC: 65, duty: 58 }, { tempC: 75, duty: 78 }, { tempC: 85, duty: 100 }],
-  perf: [{ tempC: 30, duty: 35 }, { tempC: 45, duty: 55 }, { tempC: 60, duty: 75 }, { tempC: 70, duty: 92 }, { tempC: 80, duty: 100 }],
-}
+const pts = (...p: [number, number][]): CurvePoint[] => p.map(([tempC, duty]) => ({ tempC, duty }))
+/** The stock curve 重置默认曲线 restores: 30 % idle, full speed by 85 °C. */
+const DEFAULT_CURVE = pts([30, 30], [45, 38], [55, 50], [65, 65], [75, 85], [85, 100])
+/** Lowest duty a managed fan is driven to (a pump at 0 % stops cooling). */
+const MIN_SAFE_DUTY = 20
+/** One-click machine-wide presets (ids kept from the previous UI so the active one survives the import). */
+const FAN_PRESETS = [
+  { id: "preset-silent", zh: "静音", en: "Silent", icon: Moon, curve: pts([30, 20], [45, 33], [55, 45], [65, 60], [72, 80], [78, 100]) },
+  { id: "preset-standard", zh: "标准", en: "Standard", icon: Gauge, curve: pts([30, 22], [40, 33], [50, 45], [60, 60], [70, 80], [73, 100]) },
+  { id: "preset-turbo", zh: "狂暴", en: "Turbo", icon: Wind, curve: pts([30, 30], [40, 40], [50, 49], [60, 61], [68, 80], [72, 100]) },
+  { id: "preset-fullblast", zh: "全速", en: "Full blast", icon: Fan, curve: null },
+] as const
 const T0 = 20, T1 = 100
 
+const cpuSource = (st: FanState) => (st.temps.find((x) => /cpu|tctl|package/i.test(x.name)) ?? st.temps[0])?.id ?? null
 function defaultConfig(id: string, st: FanState): FanConfig {
-  const cpu = st.temps.find((x) => /cpu|tctl|package/i.test(x.name)) ?? st.temps[0]
-  return { controlId: id, mode: "auto", manualPct: 50, tempSourceId: cpu?.id ?? null, curve: PRESETS.balanced, minDuty: 20, spinUpPct: 100, spinDownPct: 100, tempSourceId2: null, curve2: [] }
+  return { controlId: id, mode: "auto", manualPct: 50, tempSourceId: cpuSource(st), curve: DEFAULT_CURVE, minDuty: MIN_SAFE_DUTY, spinUpPct: 100, spinDownPct: 100, tempSourceId2: null, curve2: [] }
+}
+const cloneFans = (f: Record<string, FanConfig>) => structuredClone(f)
+
+/** Tiny curve thumbnail for preset tiles. */
+function CurveThumb({ curve, color }: { curve: readonly CurvePoint[] | null; color: string }) {
+  const W = 64, H = 26
+  const d = curve
+    ? curve.map((p, i) => `${i ? "L" : "M"}${(((p.tempC - T0) / (T1 - T0)) * W).toFixed(1)},${(H - 2 - (p.duty / 100) * (H - 4)).toFixed(1)}`).join(" ") + ` L${W},${(H - 2 - (H - 4)).toFixed(1)}`
+    : `M0,2 L${W},2`
+  return <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{ overflow: "visible" }}><path d={d} fill="none" stroke={color} strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" /></svg>
+}
+
+// ------------------------------------------------------------ machine-wide presets / profiles
+type Preset = (typeof FAN_PRESETS)[number]
+/** Edit a built-in preset's curve; saving re-applies it when it's the active one. */
+function PresetEditor({ p, curve, onSave, onReset, onClose }: { p: Preset; curve: CurvePoint[]; onSave: (c: CurvePoint[]) => void; onReset: () => void; onClose: () => void }) {
+  const t = useT()
+  const [draft, setDraft] = useState(curve)
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopImmediatePropagation(); onClose() } }
+    addEventListener("keydown", k, true)
+    return () => removeEventListener("keydown", k, true)
+  }, [onClose])
+  return (
+    <Layer>
+      <motion.div className="scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} />
+      <motion.div className="modal wide" role="dialog" initial={{ opacity: 0, scale: 0.97, y: 8 }} animate={{ opacity: 1, scale: 1, y: 0, transition: SETTLE }} exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.12, ease: EASE_IN } }}>
+        <h3>{t(`编辑预设「${p.zh}」`, `Edit preset “${p.en}”`)}</h3>
+        <p style={{ fontSize: 12.5 }}>{t("拖动节点调整曲线，双击空白处添加节点，右键节点删除。保存后，此预设在所有风扇上都使用这条曲线。", "Drag points to shape the curve, double-click to add one, right-click a point to remove it. Saved curves apply to every fan using this preset.")}</p>
+        <div style={{ margin: "14px -6px 0" }}><CurveEditor curve={draft} onCommit={setDraft} liveT={null} liveDuty={null} /></div>
+        <div className="row end">
+          <button className="btn ghost" onClick={onReset}><RotateCcw size={13} />{t("恢复内置曲线", "Restore built-in")}</button>
+          <span className="grow" />
+          <button className="btn ghost" onClick={onClose}>{t("取消", "Cancel")}</button>
+          <button className="btn primary" onClick={() => onSave(draft)}><Check size={14} />{t("保存", "Save")}</button>
+        </div>
+      </motion.div>
+    </Layer>
+  )
+}
+
+function FanPresets({ st, ids }: { st: FanState; ids: string[] }) {
+  const t = useT()
+  const { fans, fanProfiles, fanActive, presetCurves, set } = useProfiles()
+  const [naming, setNaming] = useState<string | null>(null)
+  const [editing, setEditing] = useState<Preset | null>(null)
+  const src = cpuSource(st)
+  const base = (id: string) => fans[id] ?? defaultConfig(id, st)
+  const curveOf = (p: Preset) => presetCurves?.[p.id] ?? p.curve
+
+  const applyPreset = (p: Preset, curve = curveOf(p), quiet = false) => {
+    const next = { ...fans }
+    for (const id of ids) {
+      const prev = base(id)
+      next[id] = curve ? { ...prev, mode: "curve", curve: curve.map((x) => ({ ...x })), tempSourceId: prev.tempSourceId ?? src } : { ...prev, mode: "manual", manualPct: 100 }
+    }
+    set({ fans: next, fanActive: p.id })
+    if (!quiet) toast("ok", t(`已应用「${p.zh}」到 ${ids.length} 个风扇`, `Applied “${p.en}” to ${ids.length} fans`))
+  }
+  const savePreset = (p: Preset, curve: CurvePoint[] | null) => {
+    const pc = { ...(presetCurves ?? {}) }
+    if (curve) pc[p.id] = curve
+    else delete pc[p.id]
+    set({ presetCurves: pc })
+    if (fanActive === p.id) applyPreset(p, curve ?? p.curve, true)
+    setEditing(null)
+    toast("ok", curve ? t(`已保存预设「${p.zh}」`, `Saved preset “${p.en}”`) : t(`「${p.zh}」已恢复内置曲线`, `“${p.en}” restored to built-in`))
+  }
+  const applyProfile = (p: FanProfile) => { set({ fans: cloneFans(p.fans), fanActive: p.id }); toast("ok", t(`已应用配置「${p.name}」`, `Applied profile “${p.name}”`)) }
+  const save = () => {
+    const name = naming?.trim()
+    if (!name) return
+    const id = crypto.randomUUID()
+    set({ fanProfiles: [...fanProfiles, { id, name, fans: cloneFans(fans) }], fanActive: id })
+    setNaming(null)
+  }
+  const del = async (p: FanProfile) => {
+    if (!(await confirmDialog({ title: t(`删除配置「${p.name}」？`, `Delete profile “${p.name}”?`), ok: t("删除", "Delete"), danger: true }))) return
+    set({ fanProfiles: fanProfiles.filter((x) => x.id !== p.id), fanActive: fanActive === p.id ? null : fanActive })
+  }
+  const reset = async () => {
+    if (!(await confirmDialog({ title: t("重置为默认曲线？", "Reset to the default curve?"), body: t("撤销 AI 校准与所有自定义，把每个可控风扇恢复为内置默认曲线（30% 起，85 °C 全速）。校准结果需要重新生成。", "Undoes AI calibration and every custom edit: each controllable fan goes back to the built-in curve (30% idle, full by 85 °C). Calibrated curves would need to be regenerated."), ok: t("重置", "Reset"), danger: true }))) return
+    const next = { ...fans }
+    for (const id of ids) { const prev = base(id); next[id] = { ...prev, mode: "curve", curve: DEFAULT_CURVE.map((x) => ({ ...x })), minDuty: MIN_SAFE_DUTY, tempSourceId: prev.tempSourceId ?? src } }
+    set({ fans: next, fanActive: null })
+    toast("ok", t("已恢复默认曲线", "Default curves restored"))
+  }
+
+  return (
+    <Panel title={t("风扇配置", "Fan profile")} className="span4"
+      right={<span className="row" style={{ "--gap": "6px" } as CSSProperties}>
+        {naming === null
+          ? <button className="btn sm" onClick={() => setNaming("")} disabled={!ids.length}><Save size={13} />{t("另存为", "Save as")}</button>
+          : <form className="row" style={{ "--gap": "6px" } as CSSProperties} onSubmit={(e) => { e.preventDefault(); save() }}>
+              <input className="input" autoFocus style={{ width: 150, height: 26 }} placeholder={t("配置名称", "Profile name")} value={naming} onChange={(e) => setNaming(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setNaming(null)} />
+              <button className="btn sm primary" disabled={!naming.trim()}><Plus size={13} />{t("保存", "Save")}</button>
+              <button type="button" className="btn ghost icon sm" onClick={() => setNaming(null)} aria-label={t("取消", "Cancel")}><X size={13} /></button>
+            </form>}
+        <button className="btn sm" onClick={reset} disabled={!ids.length} title={t("撤销 AI 校准 / 自定义，恢复内置默认曲线", "Undo calibration / custom edits, restore the built-in curve")}><RotateCcw size={13} />{t("重置默认曲线", "Reset default curves")}</button>
+      </span>}>
+      <div className="fanpresets">
+        {FAN_PRESETS.map((p) => {
+          const on = fanActive === p.id
+          const c = curveOf(p)
+          const custom = !!presetCurves?.[p.id]
+          return (
+            <button key={p.id} className={`fp rv ${on ? "on" : ""}`} onClick={() => applyPreset(p)} disabled={!ids.length}>
+              {on && <motion.i className="fp-hl" layoutId="fan-preset" transition={GLIDE} />}
+              <p.icon size={18} strokeWidth={on ? 2.2 : 1.8} />
+              <span className="col" style={{ "--gap": "2px", alignItems: "flex-start", minWidth: 0 } as CSSProperties}>
+                <b>{t(p.zh, p.en)}{custom && <span className="tag" style={{ marginLeft: 6 }}>{t("已自定义", "custom")}</span>}</b>
+                <span className="faint">{c ? t(`${c[0].duty}% 起 · ${c[c.length - 1].tempC}°C 全速`, `${c[0].duty}% idle · full by ${c[c.length - 1].tempC}°C`) : t("固定 100%", "Fixed 100%")}</span>
+              </span>
+              <CurveThumb curve={c} color={on ? "var(--acc-2)" : "var(--ink-3)"} />
+              {p.curve && <span className="fp-edit" role="button" tabIndex={0} title={t("编辑曲线", "Edit curve")} onClick={(e) => { e.stopPropagation(); setEditing(p) }}><Pencil size={12} /></span>}
+            </button>
+          )
+        })}
+      </div>
+      {fanProfiles.length > 0 && (
+        <div className="row wrap" style={{ "--gap": "8px", marginTop: 14 } as CSSProperties}>
+          <span className="label" style={{ marginRight: 4 }}>{t("已保存", "Saved")}</span>
+          {fanProfiles.map((p) => (
+            <span key={p.id} className={`chip ${fanActive === p.id ? "on" : ""}`} style={{ paddingRight: 4 }}>
+              <button onClick={() => applyProfile(p)} style={{ color: "inherit" }}>{p.name}</button>
+              <button className="btn ghost icon sm" style={{ width: 20, height: 20 }} onClick={() => del(p)} aria-label={t("删除", "Delete")}><X size={11} /></button>
+            </span>
+          ))}
+        </div>
+      )}
+      {fanActive === null && <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>{t("当前：自定义（单独调整过风扇）", "Current: custom (fans adjusted individually)")}</div>}
+      <AnimatePresence>{editing && <PresetEditor key={editing.id} p={editing} curve={(curveOf(editing) ?? DEFAULT_CURVE).map((x) => ({ ...x }))} onSave={(c) => savePreset(editing, c)} onReset={() => savePreset(editing, null)} onClose={() => setEditing(null)} />}</AnimatePresence>
+    </Panel>
+  )
 }
 
 // ------------------------------------------------------------ curve editor
@@ -83,16 +224,16 @@ function CurveEditor({ curve, curve2, onCommit, liveT, liveDuty, color = "var(--
 }
 
 // ------------------------------------------------------------ fan card
-function FanCard({ ch, cfg, sel, onSelect }: { ch: FanState["channels"][number]; cfg?: FanConfig; sel: boolean; onSelect: () => void }) {
+function FanCard({ ch, cfg, sel, onSelect, label }: { ch: FanState["channels"][number]; cfg?: FanConfig; sel: boolean; onSelect: () => void; label?: string }) {
   const t = useT()
   const rpm = ch.rpm ?? 0
   const spin = rpm > 0 ? Math.max(0.35, 2400 / rpm) : 0
   return (
-    <motion.button className="panel pad col" onClick={onSelect} disabled={!ch.controllable}
+    <motion.button className="panel pad col lift" onClick={onSelect} disabled={!ch.controllable} whileTap={ch.controllable ? { scale: 0.985 } : undefined}
       style={{ textAlign: "left", "--gap": "10px", borderColor: sel ? "var(--acc-line)" : undefined, background: sel ? "linear-gradient(180deg, var(--acc-soft), transparent 60%), var(--panel)" : undefined, opacity: ch.controllable ? 1 : 0.7 } as CSSProperties}
-      whileHover={ch.controllable ? { y: -2 } : undefined} variants={{ hidden: { opacity: 0, y: 8 }, show: { opacity: 1, y: 0 } }}>
+      variants={{ hidden: { opacity: 0, y: 8 }, show: { opacity: 1, y: 0 } }}>
       <div className="row spread">
-        <span className="ellipsis" style={{ fontWeight: 500 }}>{ch.name}</span>
+        <span className="ellipsis" style={{ fontWeight: 500 }} title={label ? ch.name : undefined}>{label || ch.name}</span>
         <span className={`tag ${cfg?.mode === "curve" ? "acc" : ""}`}>{!ch.controllable ? t("只读", "read-only") : cfg?.mode === "curve" ? t("曲线", "curve") : cfg?.mode === "manual" ? t("手动", "manual") : t("自动", "auto")}</span>
       </div>
       <div className="row" style={{ "--gap": "12px" } as CSSProperties}>
@@ -121,7 +262,7 @@ function AutoTune({ st }: { st: FanState }) {
   const set = useProfiles((s) => s.set)
   const ctl = st.channels.filter((c) => c.controllable)
   const [params, setParams] = useState<TuneParams>(() => tune?.params ?? {
-    targetTempC: 85, targetGpuTempC: 80, quietFloorPct: 25, noiseCeilPct: 100, allowBackgroundLoad: false,
+    targetTempC: 85, targetGpuTempC: 80, quietFloorPct: 25, noiseCeilPct: 100, allowBackgroundLoad: useSettings.getState().tuneAllowBusy,
     groups: Object.fromEntries(ctl.map((c) => [c.id, /cpu|pump|aio|泵|水冷/i.test(c.name) ? "cpu" : "case"])),
   })
   const [prog, setProg] = useState<TuneProgress | null>(null)
@@ -155,7 +296,7 @@ function AutoTune({ st }: { st: FanState }) {
   }
   const pct = prog ? (prog.step / Math.max(1, prog.stepTotal)) * 100 : 0
   return (
-    <Panel title={t("闭环自动调校", "Closed-loop autotune")} color="var(--acc)" className="fill ticks" right={running ? <button className="btn sm danger" onClick={() => api.tuneAbort()}><Square size={11} />{t("中止", "Abort")}</button> : null}>
+    <Panel title={t("闭环自动调校", "Closed-loop autotune")} color="var(--acc)" className="fill" right={running ? <button className="btn sm danger" onClick={() => api.tuneAbort()}><Square size={11} />{t("中止", "Abort")}</button> : null}>
       <AnimatePresence mode="wait" initial={false}>
         {running ? (
           <motion.div key="run" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="col" style={{ "--gap": "16px" } as CSSProperties}>
@@ -248,15 +389,28 @@ export function Thermals() {
   const [sel, setSel] = useState<string | null>(null)
   const [calib, setCalib] = useState<CalibProgress | null>(null)
   const fans = useProfiles((s) => s.fans)
+  const spun = useProfiles((s) => s.spun)
+  const labels = useProfiles((s) => s.fanLabels)
   const set = useProfiles((s) => s.set)
-  usePoll(async () => setSt(await api.fanInfo()), 2000)
+  const [showAll, setShowAll] = useState(false)
+  usePoll(async () => {
+    const s = await api.fanInfo()
+    setSt(s)
+    // remember every header that has ever spun; never-spun ones are empty
+    const now = s.channels.filter((c) => (c.rpm ?? 0) > 0 && !useProfiles.getState().spun.includes(c.id)).map((c) => c.id)
+    if (now.length) set({ spun: [...useProfiles.getState().spun, ...now] })
+  }, 2000)
   useEffect(() => { const u = on("fan-calib-progress", setCalib); return () => { u.then((f) => f()) } }, [])
 
+  const shown = st?.channels.filter((c) => showAll || spun.includes(c.id) || (c.rpm ?? 0) > 0) ?? []
+  const hidden = (st?.channels.length ?? 0) - shown.length
   const ctl = st?.channels.filter((c) => c.controllable) ?? []
-  const selId = sel ?? ctl[0]?.id ?? null
+  const ctlShown = shown.filter((c) => c.controllable)
+  const selId = (sel && shown.some((c) => c.id === sel) ? sel : null) ?? ctlShown[0]?.id ?? null
   const ch = st?.channels.find((c) => c.id === selId)
   const cfg = selId && st ? fans[selId] ?? defaultConfig(selId, st) : null
-  const upd = (p: Partial<FanConfig>) => { if (cfg && selId) set({ fans: { ...fans, [selId]: { ...cfg, ...p } } }) }
+  // any per-fan edit makes the machine profile "custom"
+  const upd = (p: Partial<FanConfig>) => { if (cfg && selId) set({ fans: { ...fans, [selId]: { ...cfg, ...p } }, fanActive: null }) }
   const src = st?.temps.find((x) => x.id === cfg?.tempSourceId)
   const temps = useMemo(() => st?.temps ?? [], [st])
 
@@ -270,7 +424,7 @@ export function Thermals() {
   if (st && (!st.available || !st.supported)) {
     return (
       <Page>
-        <PageHead idx="05" title={t("散热", "Thermals")} />
+        <PageHead idx="05" title={t("风扇", "Fans")} />
         <Panel><Empty icon={<Fan size={30} strokeWidth={1.3} />} title={t("无法控制此主板的风扇", "This board's fans can't be controlled")} body={t("传感器服务未就绪，或主板的 Super I/O 芯片被锁定。温度与转速读数仍会在可用时显示。", "The sensor service isn't ready, or the board's Super I/O chip is locked. Readings still show when available.")} /></Panel>
       </Page>
     )
@@ -278,7 +432,7 @@ export function Thermals() {
 
   return (
     <Page>
-      <PageHead idx="05" title={t("散热", "Thermals")} sub={t("风扇曲线、校准与基于热模型的自动调校", "Fan curves, calibration and model-based autotune")}
+      <PageHead idx="05" title={t("风扇", "Fans")} sub={t("风扇曲线、校准与基于热模型的自动调校", "Fan curves, calibration and model-based autotune")}
         actions={<button className="btn" onClick={calibrate} disabled={!ctl.length || !!calib}>{calib ? t(`校准中 ${calib.fanIndex + 1}/${calib.fanTotal} · ${calib.duty.toFixed(0)}%`, `Calibrating ${calib.fanIndex + 1}/${calib.fanTotal} · ${calib.duty.toFixed(0)}%`) : t("校准风扇", "Calibrate fans")}</button>} />
       {!!st?.dirtyHeaders?.length && (
         <div className="panel pad row" style={{ borderColor: "color-mix(in oklab, var(--warn) 45%, transparent)", color: "var(--warn)" }}>
@@ -289,10 +443,18 @@ export function Thermals() {
       )}
       {!st ? <div className="skeleton" style={{ height: 200 }} /> : (
         <div className="grid g4">
-          {st.channels.map((c) => <FanCard key={c.id} ch={c} cfg={fans[c.id]} sel={c.id === selId} onSelect={() => setSel(c.id)} />)}
+          {ctl.length > 0 && <FanPresets st={st} ids={ctlShown.map((c) => c.id)} />}
+          {shown.map((c) => <FanCard key={c.id} ch={c} cfg={fans[c.id]} label={labels[c.id]} sel={c.id === selId} onSelect={() => setSel(c.id)} />)}
+          {(hidden > 0 || showAll) && (
+            <button className="panel pad col fan-more" onClick={() => setShowAll((v) => !v)}>
+              {showAll ? <EyeOff size={18} strokeWidth={1.6} /> : <Eye size={18} strokeWidth={1.6} />}
+              <b>{showAll ? t("隐藏未接风扇", "Hide empty headers") : t(`显示全部（${hidden} 个未接风扇）`, `Show all (${hidden} empty headers)`)}</b>
+              <span className="faint">{t("从未检测到转速的接口：通常没有接风扇", "Headers that never reported RPM — usually nothing connected")}</span>
+            </button>
+          )}
 
           {ch && cfg && (
-            <Panel title={ch.name} color="var(--acc)" className="fill" right={<Seg value={cfg.mode} onChange={(mode) => upd({ mode })} options={[{ v: "auto", label: t("主板自动", "BIOS auto") }, { v: "manual", label: t("固定转速", "Fixed") }, { v: "curve", label: t("温控曲线", "Curve") }]} />}>
+            <Panel title={<input className="title-input" value={labels[ch.id] ?? ""} placeholder={ch.name} aria-label={t("风扇名称", "Fan name")} onChange={(e) => set({ fanLabels: { ...labels, [ch.id]: e.target.value } })} />} color="var(--acc)" className="fill" right={<Seg value={cfg.mode} onChange={(mode) => upd({ mode })} options={[{ v: "auto", label: t("主板自动", "BIOS auto") }, { v: "manual", label: t("固定转速", "Fixed") }, { v: "curve", label: t("温控曲线", "Curve") }]} />}>
               <AnimatePresence mode="wait" initial={false}>
                 <motion.div key={cfg.mode} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }}>
                   {cfg.mode === "auto" && <Empty title={t("由主板 BIOS 控制", "Controlled by the BIOS")} body={t("切换到“固定转速”或“温控曲线”以接管此风扇。", "Switch to Fixed or Curve to take over this fan.")} />}
@@ -312,7 +474,7 @@ export function Thermals() {
                           </select></div>
                         </div>
                         <div className="field"><div className="ft">{t("预设", "Presets")}</div>
-                          <div className="fc" style={{ gap: 4 }}>{(["quiet", "balanced", "perf"] as const).map((k) => <button key={k} className="btn sm" onClick={() => upd({ curve: PRESETS[k] })}>{t({ quiet: "静音", balanced: "均衡", perf: "性能" }[k], { quiet: "Quiet", balanced: "Balanced", perf: "Perf" }[k])}</button>)}</div>
+                          <div className="fc" style={{ gap: 4 }}>{FAN_PRESETS.filter((p) => p.curve).map((p) => <button key={p.id} className="btn sm" onClick={() => upd({ curve: p.curve!.map((x) => ({ ...x })) })}>{t(p.zh, p.en)}</button>)}</div>
                         </div>
                         <div className="field"><div className="ft">{t("最低转速", "Min duty")} <span className="num faint">{cfg.minDuty}%</span></div><div className="fc" style={{ width: 100 }}><Range value={cfg.minDuty} min={0} max={60} onChange={(minDuty) => upd({ minDuty })} /></div></div>
                         <div className="field"><div className="ft">{t("升速 / 降速", "Ramp up / down")} <span className="num faint">{cfg.spinUpPct}/{cfg.spinDownPct}</span></div>

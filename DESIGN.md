@@ -1,66 +1,77 @@
-# CorePilot — "Instrument" design language
+# CorePilot — design system
 
-A precision instrument, not a gaming dashboard. Calm carbon surfaces, hairline
-structure, DIN numerals, and color that always *means* something.
+An instrument with a pulse: live numbers are the hero, color always means
+something, surfaces have texture and light, and the app visibly *responds* — to
+the machine's state and to every optimization — without costing frames while
+hidden. "No AI slop" means no clichés, not a stripped-down UI.
 
 ## Principles
 
-1. **Color is signal.** One accent (`--acc`, user-selectable) for intent: selection,
-   focus, primary action, the active nav bar. Each metric owns one signal color
-   everywhere — app, OSD plate, taskbar plate, charts:
-   CPU `--cpu` ember · GPU `--gpu` mint · RAM `--mem` sky · Disk `--disk` amber · Net `--net` orchid · FPS `--fps` bone.
-   Status: `--ok` / `--warn` / `--crit`. Nothing else gets saturated color.
-2. **Numbers are the hero.** Live values use Bahnschrift (Windows' DIN) with
-   tabular numerals (`.num`, `.readout`); condensed width for big readouts.
-   Units are typeset smaller and dimmer than the value.
-3. **Structure by hairlines, not boxes.** Panels are flat with a 1 px `--line`
-   border. Hero panels get crop-mark corners (`.ticks`) — the one ornament.
-4. **The UI is alive, never noisy.** Motion conveys change: rolling digits on
-   values, scopes that glide one sample left per tick, a spring-tracked nav
-   indicator, staged page reveals. Anything that updates faster than ~1 Hz
-   (scan counters) stays plain text.
-5. **Chinese-first.** Every string is `t(zh, en)`; layouts assume CJK widths.
+1. **Theme styles, one token set.** Six presets via `[data-style]` on `<html>`:
+   赛博朋克 cyberpunk · 午夜 midnight (default) · 石墨 graphite · 终端 terminal ·
+   瓷白 porcelain · 砂岩 sandstone. Each defines surfaces, ink, lines, the accent
+   (`--acc`/`--acc-2`, `--on-acc` for text on accent) and the per-metric palette.
+2. **Color is signal.** Each metric owns one color per style — `--fps --cpu --gpu
+   --mem --disk --net` — shared by the app, the OSD plate, the injected overlay
+   and the taskbar plate (`lib/themes.ts` `PALETTE`). Canvas colors are hex.
+3. **Texture, never flat.** Every surface carries a top sheen (`--sheen`) — no
+   noise grain (it turns into 2×2 speckle on high-DPI screens); panels are slightly translucent
+   (`--panel-a`) over the ambient light with soft depth (`--panel-shadow`). Each
+   style has its own texture identity in `--tex` (`.app::after`): stars (午夜),
+   neon grid + scanlines (赛博朋克), brushed metal (石墨), phosphor scanlines +
+   dots (终端), dot grid (瓷白), linen (砂岩).
+4. **The machine has a mood.** `lib/boot.ts moodOf` → `calm | busy | game | hot`
+   (with hysteresis) on `<html data-mood>`; `--mood` (a registered color that
+   transitions) tints the ambient light, the titlebar seam, the Overview orb.
+5. **Glow is a dial.** Everything luminous scales with `--glow-o`
+   (Settings → 光晕强度: off / soft / medium / intense).
+6. **Numbers are the hero.** Bahnschrift (Windows' DIN) with tabular numerals;
+   readouts spring-tween (`AnimatedNumber`), the FPS hero rolls (`Roll`).
+7. **Chinese-first, warm voice.** Every string is `t(zh, en)`; the Overview greets
+   by time of day and says how the machine is doing.
 
-## Tokens (`src/styles.css`)
+## Motion & feedback
 
-| Token | Use |
-|---|---|
-| `--bg` / `--bg-rail` / `--panel` / `--panel-2` / `--raise` | surface ladder, darkest → lightest |
-| `--line` / `--line-2` / `--line-3` | hairlines: structure / controls / emphasis |
-| `--ink` / `--ink-2` / `--ink-3` / `--ink-4` | text: primary / secondary / labels / disabled |
-| `--acc`, `--acc-soft`, `--acc-line` | accent fill / tint / outline |
-| `--grid` | chart graticule |
-| `--ease` / `--spring` | `cubic-bezier(.2,.8,.2,1)` / expo-out `(.22,1,.36,1)` — no overshoot |
+- Ambient: three slow light blobs (`.ambient`) + twinkling stars on 午夜 —
+  transform/opacity only; paused hidden (`[data-live="0"]` pauses every CSS
+  animation), in low-GPU mode, under reduced motion and with frosted glass on.
+- Hover light (`.rv`): a glow + lit edge follows the pointer on interactive
+  surfaces (nav, tiles, cards, list items). Shell writes `--mx/--my`.
+- Nav rail: lit spring pill (`layoutId`), glowing active icon, icon lift.
+- Pages: staged reveals (`Page`, `Panel`, `swapVariants`), direction follows the
+  rail; sub-views slide toward the tab you picked (AnimatePresence `custom`).
+- Lists: re-sorting animates for a moment (`VList flip`) — rows glide, newly
+  revealed rows cascade; scrolling and live re-sorts never animate.
+- **Optimizations always celebrate** (`ui/fx.ts`): `celebrate(el, power)` = sparks
+  + shockwave on one self-removing canvas, and a light sweep over the `.fx-card`.
+  一键优化 (`ui/OneClick.tsx`) is the signature: light orbits the border while it
+  runs, each step chip lights and sparks as it lands, then a burst and the
+  results count up. `AsyncButton fx` gives any optimization button the check +
+  sparks moment; tweak switches and 核心优化 spark when turned on.
+- Theme switch: View Transition wash from the click point (`setStyle`).
+- `reduceMotion` sets `[data-motion=reduced]` and `MotionConfig reducedMotion="always"`;
+  effects become no-ops.
 
-Themes: `[data-theme=dark]` "Carbon" (default), `[data-theme=light]` "Bone".
-Accents: `[data-accent=violet|ember|mint|sky]`.
+## Layout
 
-Type: UI `Segoe UI Variable Text` → `Microsoft YaHei UI`; numerals/labels
-`Bahnschrift`; paths/PIDs `Cascadia Mono`. Labels (`.label`) are 10.5 px,
-uppercase, 0.14em tracking.
+- Shell: 46 px titlebar (drag region, GAME/REC pills, Ctrl K palette, mood seam) ·
+  92 px icon rail (icon + label, live badges, CPU/GPU/RAM rings when height
+  allows) · status ticker. Chrome is translucent over the ambient light.
+- Page heads: a section emblem tile (the nav icon) + title + subtitle; Overview
+  replaces it with the greeting hero and the living-core orb.
+- Spacing: page 24/32 px, grid gap 18, panel padding 20/22, radii 4 / 6 / 8 / 12.
+- Charts: big live scopes (`Scope`), and Task-Manager-style framed mini graphs
+  (`Mini`, fixed window, samples enter at the right) for per-core / per-engine.
 
-Radii: 4 (tags, small buttons) · 6 (controls) · 10 (panels). Spacing on a
-4 px base; panels pad 16/18, grids gap 14.
+## OSD plate
 
-## Components (`src/ui/kit.tsx`)
+Single horizontal row by default (column optional), grouped by device in the
+fixed order FPS · CPU · GPU · RAM · DISK · NET, six dock positions (tl tc tr bl
+bc br), background opacity 0–100 %, optional rounding, labels in the style's
+metric palette. The studio is the target monitor in miniature (true scale).
 
-- `Roll` — odometer digits (CSS transform strips, 700 ms expo-out).
-- `Scope` — canvas oscilloscope; rAF runs only while a glide is in flight and
-  never while the window is hidden/occluded or reduce-motion is on.
-- `Panel` / `PageHead` / `Page` — staggered reveal via Motion variants.
-- `Seg` (spring thumb), `Switch`, `Range` (filled track via `--p`), `Field`
-  (title / description / control row), `Meter`, `Spark`, `VList`, `confirmDialog`.
-- `Chart` (`src/ui/Chart.tsx`) — uPlot themed from CSS vars, synced cursors.
+## Taskbar plate
 
-## Shell
-
-Titlebar (drag region, live GAME / REC pills, Ctrl K palette) · left rail whose
-nav items carry live readouts (the navigation is itself a dashboard) · status
-ticker · toasts bottom-right with a life bar. Ctrl+1…9 jumps sections.
-
-## Motion rules
-
-- Transform/opacity only; no layout-property animation.
-- Durations: 140 ms (hover), 200–260 ms (state), 380–420 ms (reveals, treemap zoom).
-- `reduceMotion` (Settings) sets `[data-motion=reduced]` (kills CSS motion) and
-  `MotionConfig reducedMotion="always"` (kills JS motion).
+Native Win32 (`taskbar_mon.rs`). Per device: the label stands vertically
+(letters stacked upright — C / P / U — in the device colour) beside its readings in two calm white rows;
+single-line mode falls back to a horizontal label. Settings shows a live mock.

@@ -1,12 +1,15 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react"
-import { AnimatePresence, motion } from "motion/react"
-import { ArrowLeft, Clock, FilePlus2, Gamepad2, Radar, Trash2 } from "lucide-react"
-import { api, OSD_ROWS, type OverlayStatus, type Session } from "../lib/ipc"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react"
+import { AnimatePresence, motion, useMotionValue } from "motion/react"
+import { ArrowLeft, ChevronRight, Clock, FilePlus2, Gamepad2, Radar, Trash2 } from "lucide-react"
+import { api, type OverlayStatus, type Session } from "../lib/ipc"
+import { CAT_LABEL, CAT_ORDER, METRICS, OSD_POSITIONS, type OsdPosition } from "../lib/osd"
+import { PALETTE } from "../lib/themes"
 import { act, useLive, useSettings, useT, type OsdMode } from "../lib/store"
 import { duration, exeBase, fixed, isNum, lower } from "../lib/util"
-import { confirmDialog, Empty, Page, PageHead, Panel, Range, Readout, Roll, Scope, Seg, Spark, Switch, swapVariants, usePoll, useAsync } from "../ui/kit"
+import { confirmDialog, Empty, Page, PageHead, Panel, Range, Readout, Roll, Scope, Seg, SETTLE, Spark, Switch, swapVariants, usePoll, useAsync } from "../ui/kit"
 import { Chart } from "../ui/Chart"
-import { Plate, type PlateData } from "../osd/Osd"
+import { OSD_MARGIN, Plate, type PlateData } from "../osd/Osd"
+import { ProcIcon } from "./Processes"
 
 // ------------------------------------------------------------ live HUD
 function LiveHud() {
@@ -43,7 +46,7 @@ function LiveHud() {
     )
   }
   return (
-    <Panel title={t("实时帧率", "Live frame rate")} color="var(--fps)" className="span2 ticks" right={<span className="tag ok"><span className="dot pulse" />{fg.exe}</span>}>
+    <Panel title={t("实时帧率", "Live frame rate")} color="var(--fps)" className="span2" right={<span className="tag ok"><span className="dot pulse" />{fg.exe ? <GameTitle exe={fg.exe} path={null} /> : null}</span>}>
       <div className="row" style={{ alignItems: "flex-end", "--gap": "36px", marginBottom: 14 } as CSSProperties}>
         <div className="readout"><span className="v" style={{ fontSize: 64 }}>{isNum(fps?.fps) ? <Roll value={fps!.fps!.toFixed(0)} /> : "—"}</span><span className="u">FPS</span></div>
         <div className="col" style={{ "--gap": "4px" } as CSSProperties}><span className="label">1% Low</span><Readout v={fps?.low1} size="md" /></div>
@@ -93,7 +96,6 @@ function RecorderCard() {
 }
 
 // ------------------------------------------------------------ OSD studio
-const ROW_LABEL: Record<string, [string, string]> = { fps: ["帧率", "FPS"], frametime: ["帧时间", "Frametime"], cpu: ["CPU", "CPU"], gpu: ["GPU", "GPU"], vram: ["显存", "VRAM"], ram: ["内存", "RAM"], disk: ["磁盘", "Disk"], net: ["网络", "Network"] }
 
 function HotkeyInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const t = useT()
@@ -118,6 +120,7 @@ function HotkeyInput({ value, onChange }: { value: string; onChange: (v: string)
 function OsdStudio() {
   const t = useT()
   const osd = useSettings((s) => s.osd)
+  const style = useSettings((s) => s.style)
   const set = useSettings((s) => s.set)
   const m = useLive((s) => s.metrics)
   const sn = useLive((s) => s.sensors)
@@ -125,31 +128,73 @@ function OsdStudio() {
   const up = (p: Partial<typeof osd>) => set({ osd: { ...osd, ...p } })
   const fake = 144 + Math.sin(Date.now() / 900) * 6
   const d: PlateData = { fps: fps?.fps ? fps : { fps: fake, low1: fake * 0.72, low01: fake * 0.6, frametimeMs: 1000 / fake }, m, s: sn, g: null }
-  const corners = [{ c: 0, s: { top: 12, left: 12 } }, { c: 1, s: { top: 12, right: 12 } }, { c: 2, s: { bottom: 12, left: 12 } }, { c: 3, s: { bottom: 12, right: 12 } }] as const
+  // The studio is the target monitor in miniature: its aspect ratio, and the plate at
+  // its real size × (studio width / monitor width), so what you see is what docks.
+  const mon = useAsync(api.osdMonitor)
+  const [mw, mh] = mon.data ? [mon.data[2], mon.data[3]] : [window.screen.width, window.screen.height]
+  const screen = useRef<HTMLDivElement>(null)
+  const plate = useRef<HTMLDivElement>(null)
+  const [sw, setSw] = useState(0)
+  const [nat, setNat] = useState<[number, number]>([0, 0])
+  useLayoutEffect(() => {
+    const ro = new ResizeObserver(() => {
+      if (screen.current) setSw(screen.current.clientWidth)
+      if (plate.current) setNat([plate.current.offsetWidth, plate.current.offsetHeight])
+    })
+    if (screen.current) ro.observe(screen.current)
+    if (plate.current) ro.observe(plate.current)
+    return () => ro.disconnect()
+  }, [osd.mode])
+  const k = sw ? sw / mw : 0.4
+  const margin = OSD_MARGIN * k
+  const zone = (p: OsdPosition): CSSProperties => ({
+    position: "absolute", width: nat[0] * k, height: nat[1] * k,
+    top: p.startsWith("t") ? margin : undefined, bottom: p.startsWith("b") ? margin : undefined,
+    left: p.endsWith("l") ? margin : p.endsWith("c") ? "50%" : undefined, right: p.endsWith("r") ? margin : undefined,
+    translate: p.endsWith("c") ? "-50% 0" : undefined,
+  })
+  const toggle = (k: string) => up({ metrics: osd.metrics.includes(k) ? osd.metrics.filter((x) => x !== k) : [...osd.metrics, k] })
+  const dx = useMotionValue(0), dy = useMotionValue(0)
+  const [dragging, setDragging] = useState(false)
+  const [hoverZone, setHoverZone] = useState<OsdPosition | null>(null)
+  /** which of the six zones the pointer is over (3 columns × top/bottom) */
+  const zoneAt = (e: { clientX: number; clientY: number }): OsdPosition | null => {
+    const r = screen.current?.getBoundingClientRect()
+    if (!r) return null
+    const col = Math.max(0, Math.min(2, Math.floor(((e.clientX - r.left) / r.width) * 3)))
+    return `${e.clientY - r.top < r.height / 2 ? "t" : "b"}${"lcr"[col]}` as OsdPosition
+  }
   return (
     <Panel title={t("OSD 工作室", "OSD studio")} className="fill">
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.25fr) minmax(300px, 1fr)", gap: 22 }}>
-        {/* the preview monitor IS the corner picker */}
-        <div>
-          <div style={{ position: "relative", aspectRatio: "16 / 9", borderRadius: 8, overflow: "hidden", boxShadow: "inset 0 0 0 1px var(--line-2)",
-            background: "radial-gradient(120% 90% at 70% 110%, #3b2a1a 0%, transparent 55%), radial-gradient(90% 80% at 15% -10%, #1d2c46 0%, transparent 60%), linear-gradient(180deg, #11141b, #0b0b0e)" }}>
-            <div style={{ position: "absolute", inset: 0, backgroundImage: "linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px)", backgroundSize: "28px 28px" }} />
-            {corners.map(({ c, s }) => (
-              <button key={c} aria-label={t(`停靠角 ${c + 1}`, `Corner ${c + 1}`)} onClick={() => up({ corner: c })}
-                style={{ position: "absolute", ...s, width: "42%", height: "42%", borderRadius: 6, border: osd.corner === c ? "none" : "1px dashed transparent", transition: "border-color .2s" }}
-                onMouseEnter={(e) => (e.currentTarget.style.borderColor = "rgba(255,255,255,.18)")} onMouseLeave={(e) => (e.currentTarget.style.borderColor = "transparent")} />
-            ))}
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.3fr) minmax(320px, 1fr)", gap: 26 }}>
+        {/* the preview screen IS the position picker — six dock zones */}
+        <div className="col" style={{ "--gap": "10px" } as CSSProperties}>
+          <div ref={screen} className={`osd-screen ${dragging ? "dragging" : ""}`} style={{ aspectRatio: `${mw} / ${mh}` }}>
+            <div style={{ position: "absolute", inset: 0, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gridTemplateRows: "1fr 1fr" }}>
+              {OSD_POSITIONS.map((p) => (
+                <button key={p} aria-label={p} onClick={() => up({ position: p })} className={`osd-zone ${osd.position === p ? "on" : ""} ${hoverZone === p ? "target" : ""}`} />
+              ))}
+            </div>
             <AnimatePresence>
               {osd.mode !== "off" && (
-                <motion.div key="plate" layout style={{ position: "absolute", ...corners[osd.corner].s, pointerEvents: "none" }}
-                  initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }} transition={{ type: "spring", stiffness: 380, damping: 32 }}>
-                  <Plate d={d} rows={osd.rows} scale={osd.scale * 0.82} />
+                // hold and drag the plate anywhere; it docks to the nearest zone on release
+                <motion.div key="plate" layout className="osd-drag" style={{ ...zone(osd.position), x: dx, y: dy }}
+                  drag dragConstraints={screen} dragElastic={0.05} dragMomentum={false}
+                  onDragStart={() => setDragging(true)}
+                  onDrag={(e) => setHoverZone(zoneAt(e as PointerEvent))}
+                  onDragEnd={(e) => { const p = zoneAt(e as PointerEvent); setDragging(false); setHoverZone(null); if (p) up({ position: p }); dx.set(0); dy.set(0) }}
+                  whileDrag={{ scale: 1.04 }}
+                  initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }} transition={SETTLE}>
+                  <div ref={plate} style={{ position: "absolute", left: 0, top: 0, transform: `scale(${k})`, transformOrigin: "0 0" }}><Plate d={d} osd={osd} style={style} /></div>
                 </motion.div>
               )}
             </AnimatePresence>
             {osd.mode === "off" && <div className="empty" style={{ position: "absolute", inset: 0, color: "rgba(255,255,255,.4)" }}>{t("OSD 已关闭", "OSD is off")}</div>}
           </div>
-          <div className="faint" style={{ fontSize: 12, marginTop: 8 }}>{t("点击画面任意一角以停靠 OSD", "Click any corner of the screen to dock the OSD")}</div>
+          <div className="row spread faint" style={{ fontSize: 12 }}>
+            <span>{t(`按住拖动 OSD，或点击任意区域停靠 · 按 ${Math.round(mw)}×${Math.round(mh)} 屏幕等比显示`, `Drag the OSD, or click any zone to dock it · true scale for your ${Math.round(mw)}×${Math.round(mh)} screen`)}</span>
+            <Seg value={osd.layout} onChange={(layout) => up({ layout })} options={[{ v: "row", label: t("横排", "Row") }, { v: "column", label: t("竖排", "Column") }]} />
+          </div>
         </div>
         <div className="col" style={{ "--gap": "0px" } as CSSProperties}>
           <div className="field">
@@ -158,14 +203,17 @@ function OsdStudio() {
             <div className="fc"><Seg<OsdMode> value={osd.mode} onChange={(mode) => up({ mode })} options={[{ v: "off", label: t("关", "Off") }, { v: "window", label: t("窗口", "Window") }, { v: "inject", label: t("注入", "Inject") }]} /></div>
           </div>
           <div className="field">
-            <div className="ft">{t("显示内容", "Rows")}</div>
-            <div className="fc" style={{ gridRow: "auto", gridColumn: "1 / -1", flexWrap: "wrap", gap: 6 }}>
-              {OSD_ROWS.map((r) => <button key={r} className={`chip ${osd.rows[r] ? "on" : ""}`} onClick={() => up({ rows: { ...osd.rows, [r]: !osd.rows[r] } })}>{t(...ROW_LABEL[r])}</button>)}
-            </div>
+            <div className="ft">{t("大小", "Size")} <span className="faint num">{Math.round(osd.scale * 100)}%</span></div>
+            <div className="fc" style={{ width: 170 }}><Range value={osd.scale} min={0.7} max={1.8} step={0.05} onChange={(scale) => up({ scale })} /></div>
           </div>
           <div className="field">
-            <div className="ft">{t("大小", "Size")} <span className="faint num">{Math.round(osd.scale * 100)}%</span></div>
-            <div className="fc" style={{ width: 160 }}><Range value={osd.scale} min={0.7} max={1.8} step={0.05} onChange={(scale) => up({ scale })} /></div>
+            <div className="ft">{t("背景不透明度", "Background")} <span className="faint num">{Math.round(osd.bg * 100)}%</span></div>
+            <div className="fd">{t("0% 时只显示文字", "0% shows text only")}</div>
+            <div className="fc" style={{ width: 170 }}><Range value={osd.bg} min={0} max={1} step={0.05} onChange={(bg) => up({ bg })} /></div>
+          </div>
+          <div className="field">
+            <div className="ft">{t("圆角", "Rounded")}</div>
+            <div className="fc"><Switch on={osd.rounded} onChange={(rounded) => up({ rounded })} /></div>
           </div>
           <div className="field">
             <div className="ft">{t("识别到游戏时自动显示", "Show on detected games")}</div>
@@ -177,6 +225,20 @@ function OsdStudio() {
             <div className="fd">{t("全局生效，游戏中也可用", "Global — works in-game")}</div>
             <div className="fc"><HotkeyInput value={osd.hotkey} onChange={(hotkey) => up({ hotkey })} /></div>
           </div>
+        </div>
+        {/* metric picker, grouped by device in plate order */}
+        <div className="fill" style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0,1fr))", gap: 14, paddingTop: 6, borderTop: "1px solid var(--line)" }}>
+          {CAT_ORDER.map((cat) => (
+            <div key={cat} className="col" style={{ "--gap": "6px", paddingTop: 14 } as CSSProperties}>
+              <span className="label" style={{ color: PALETTE[style][cat] }}>{CAT_LABEL[cat]}</span>
+              {METRICS.filter((x) => x.cat === cat).map((x) => (
+                <label key={x.key} className="row" style={{ "--gap": "8px", fontSize: 12.5, cursor: "pointer", color: osd.metrics.includes(x.key) ? "var(--ink)" : "var(--ink-3)" } as CSSProperties}>
+                  <input type="checkbox" className="check" checked={osd.metrics.includes(x.key)} onChange={() => toggle(x.key)} />
+                  {t(x.zh, x.en)}
+                </label>
+              ))}
+            </div>
+          ))}
         </div>
       </div>
     </Panel>
@@ -207,7 +269,7 @@ function GameList() {
       {lib.loading ? <div className="skeleton" style={{ height: 120 }} /> : rows.length === 0 ? (
         <Empty icon={<Gamepad2 size={28} strokeWidth={1.4} />} title={t("未找到已安装的游戏", "No installed games found")} body={t("支持 Steam / Epic / GOG 库扫描，也可手动添加任意程序。", "Steam, Epic and GOG libraries are scanned; add any program manually.")} />
       ) : (
-        <div className="table" style={{ "--cols": "minmax(200px, 1fr) 80px 110px 110px 230px", maxHeight: 360, overflow: "auto" } as CSSProperties}>
+        <div className="table scroller" style={{ "--cols": "minmax(200px, 1fr) 80px 110px 110px 230px", maxHeight: 360, overflow: "auto" } as CSSProperties}>
           <div className="thead"><button disabled>{t("名称", "Name")}</button><button disabled>{t("来源", "Source")}</button><button disabled>{t("始终 OSD", "Always OSD")}</button><button disabled title={t("仅对白名单内、无反作弊的 64 位游戏注入", "Only allow-listed, anti-cheat-free 64-bit games are injected")}>{t("游戏内注入", "In-game")}</button><button disabled>{t("性能记录", "Recording")}</button></div>
           {rows.map((g) => (
             <div key={g.exe} className="tr" style={{ height: 44 }}>
@@ -234,10 +296,70 @@ function parse(raw: string | null, id: string): Session | null {
   } catch { return null }
 }
 
+/** Game names for reports that predate meta.name (resolved by the backend once per exe). */
+const names = new Map<string, Promise<string>>()
+export function useGameName(exe: string, path: string | null, stored?: string) {
+  const [name, setName] = useState(stored ?? "")
+  useEffect(() => {
+    if (stored) return setName(stored)
+    let p = names.get(exe)
+    if (!p) { p = api.gameName(exe, path).catch(() => exe.replace(/\.exe$/i, "")); names.set(exe, p) }
+    let live = true
+    p.then((n) => live && setName(n))
+    return () => { live = false }
+  }, [exe, path, stored])
+  return name || exe.replace(/\.exe$/i, "")
+}
+
+export function GameTitle({ exe, path, name }: { exe: string; path: string | null; name?: string }) {
+  return <>{useGameName(exe, path, name)}</>
+}
+
+interface GameGroup { exe: string; path: string | null; name?: string; cards: Card[]; best: number; last: number; total: number }
+function GroupRow({ g, open, onToggle, onOpen, onDelete, onDeleteGroup }: { g: GameGroup; open: boolean; onToggle: () => void; onOpen: (id: string) => void; onDelete: (c: Card) => void; onDeleteGroup: () => void }) {
+  const t = useT()
+  const name = useGameName(g.exe, g.path, g.name)
+  return (
+    <div className={`sgroup ${open ? "open" : ""}`}>
+      <div className="shead" role="button" tabIndex={0} onClick={onToggle} onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onToggle()}>
+        <ChevronRight size={14} className="chev" />
+        <span className="sicon"><ProcIcon path={g.path} name={name} /></span>
+        <span className="col" style={{ "--gap": "1px", minWidth: 0 } as CSSProperties}>
+          <b className="ellipsis">{name}</b>
+          <span className="faint mono ellipsis" style={{ fontSize: 11 }}>{g.exe}</span>
+        </span>
+        <span className="grow" />
+        <span className="sstat"><em>{t("场次", "Sessions")}</em><b className="num">{g.cards.length}</b></span>
+        <span className="sstat"><em>{t("总时长", "Played")}</em><b className="num">{duration(g.total)}</b></span>
+        <span className="sstat"><em>{t("最佳平均", "Best avg")}</em><b className="num">{fixed(g.best, 0)} <i>FPS</i></b></span>
+        <span className="sstat wide"><em>{t("最近", "Last")}</em><b className="num">{new Date(g.last).toLocaleDateString()}</b></span>
+        <button className="btn ghost icon sm danger" title={t("删除该游戏的全部报告", "Delete every report of this game")} onClick={(e) => { e.stopPropagation(); onDeleteGroup() }}><Trash2 size={13} /></button>
+      </div>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div className="sbody" initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1, transition: { duration: 0.32, ease: [0.16, 1, 0.3, 1] } }} exit={{ height: 0, opacity: 0, transition: { duration: 0.2, ease: [0.4, 0, 1, 1] } }}>
+            {g.cards.map((c) => (
+              <div key={c.id} className="srow" role="button" tabIndex={0} onClick={() => onOpen(c.id)} onKeyDown={(e) => e.key === "Enter" && onOpen(c.id)}>
+                <span className="num">{new Date(c.meta.startedAt).toLocaleString()}</span>
+                <span className="num faint">{duration(c.meta.durationSec)}</span>
+                <span className="num"><b>{fixed(c.summary.avgFps, 0)}</b> <i>FPS</i></span>
+                <span className="num faint">1% {fixed(c.summary.low1, 0)}</span>
+                <Spark data={c.spark} color="var(--fps)" w={120} h={20} />
+                <button className="btn ghost icon sm danger" title={t("删除", "Delete")} onClick={(e) => { e.stopPropagation(); onDelete(c) }}><Trash2 size={12} /></button>
+              </div>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
 function Sessions({ onOpen }: { onOpen: (id: string) => void }) {
   const t = useT()
   const openId = useLive((s) => s.openSession)
   const [cards, setCards] = useState<Card[] | null>(null)
+  const [open, setOpen] = useState<Set<string> | null>(null)
   const load = async () => {
     const ids = await api.sessionIds()
     const out: Card[] = []
@@ -252,32 +374,42 @@ function Sessions({ onOpen }: { onOpen: (id: string) => void }) {
     setCards(out.sort((a, b) => b.meta.startedAt - a.meta.startedAt))
   }
   useEffect(() => { load() }, [openId]) // new report arrives → refresh
+  // one row per game, most recently played first; the newest game starts unfolded
+  const groups = useMemo(() => {
+    const by = new Map<string, GameGroup>()
+    for (const c of cards ?? []) {
+      let g = by.get(c.meta.exe)
+      if (!g) by.set(c.meta.exe, (g = { exe: c.meta.exe, path: c.meta.path, name: c.meta.name, cards: [], best: 0, last: 0, total: 0 }))
+      g.cards.push(c)
+      g.best = Math.max(g.best, c.summary.avgFps ?? 0)
+      g.last = Math.max(g.last, c.meta.startedAt)
+      g.total += c.meta.durationSec
+      if (!g.path && c.meta.path) g.path = c.meta.path
+      if (!g.name && c.meta.name) g.name = c.meta.name
+    }
+    return [...by.values()].sort((a, b) => b.last - a.last)
+  }, [cards])
+  const isOpen = (exe: string) => (open ? open.has(exe) : groups[0]?.exe === exe)
+  const toggle = (exe: string) => setOpen((o) => { const n = new Set(o ?? (groups[0] ? [groups[0].exe] : [])); n.has(exe) ? n.delete(exe) : n.add(exe); return n })
   const clear = async () => {
     if (await confirmDialog({ title: t("删除全部报告？", "Delete all reports?"), body: t("此操作无法撤销。", "This can't be undone."), ok: t("全部删除", "Delete all"), danger: true })) {
       await act(api.sessionDeleteAll(), t("已删除全部报告", "All reports deleted"))
       load()
     }
   }
+  const delOne = async (c: Card) => { await act(api.sessionDelete(c.id)); load() }
+  const delGroup = async (g: GameGroup) => {
+    if (!(await confirmDialog({ title: t(`删除「${g.exe}」的 ${g.cards.length} 份报告？`, `Delete ${g.cards.length} reports of “${g.exe}”?`), ok: t("删除", "Delete"), danger: true }))) return
+    for (const c of g.cards) await api.sessionDelete(c.id).catch(() => {})
+    load()
+  }
   return (
     <Panel title={t("会话报告", "Session reports")} className="fill" right={cards?.length ? <button className="btn sm ghost danger" onClick={clear}><Trash2 size={12} />{t("全部删除", "Delete all")}</button> : null}>
-      {!cards ? <div className="grid g3">{[0, 1, 2].map((i) => <div key={i} className="skeleton" style={{ height: 118 }} />)}</div> : cards.length === 0 ? (
+      {!cards ? <div className="col" style={{ "--gap": "6px" } as CSSProperties}>{[0, 1, 2].map((i) => <div key={i} className="skeleton" style={{ height: 52 }} />)}</div> : cards.length === 0 ? (
         <Empty icon={<Clock size={28} strokeWidth={1.4} />} title={t("还没有报告", "No reports yet")} body={t("玩一局游戏，退出后这里会出现完整的帧率、温度与功耗报告。", "Play a session — on exit a full frame-rate, thermal and power report appears here.")} />
       ) : (
-        <div className="grid g3">
-          {cards.map((c, i) => (
-            <motion.button key={c.id} className="panel pad col" style={{ textAlign: "left", "--gap": "10px" } as CSSProperties}
-              initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: Math.min(i, 12) * 0.03 }} whileHover={{ y: -2, borderColor: "var(--line-3)" }} onClick={() => onOpen(c.id)}>
-              <div className="row spread">
-                <b className="ellipsis" style={{ fontWeight: 600 }}>{c.meta.exe.replace(/\.exe$/i, "")}</b>
-                <span className="faint num" style={{ fontSize: 11 }}>{duration(c.meta.durationSec)}</span>
-              </div>
-              <div className="row spread" style={{ alignItems: "flex-end" }}>
-                <div className="readout md"><span className="v">{fixed(c.summary.avgFps, 0)}</span><span className="u">FPS · 1% {fixed(c.summary.low1, 0)}</span></div>
-                <Spark data={c.spark} color="var(--acc)" w={96} h={30} />
-              </div>
-              <span className="faint" style={{ fontSize: 11.5 }}>{new Date(c.meta.startedAt).toLocaleString()}</span>
-            </motion.button>
-          ))}
+        <div className="slist">
+          {groups.map((g) => <GroupRow key={g.exe} g={g} open={isOpen(g.exe)} onToggle={() => toggle(g.exe)} onOpen={onOpen} onDelete={delOne} onDeleteGroup={() => delGroup(g)} />)}
         </div>
       )}
     </Panel>
@@ -288,7 +420,7 @@ function Stat({ k, v, u, sub }: { k: string; v: number | null | undefined; u?: s
   return (
     <div className="panel pad col" style={{ "--gap": "8px" } as CSSProperties}>
       <span className="label">{k}</span>
-      <Readout v={v} u={u} size="md" roll={false} />
+      <Readout v={v} u={u} size="md" mode="static" />
       {sub && <span className="faint num" style={{ fontSize: 11.5 }}>{sub}</span>}
     </div>
   )
@@ -323,9 +455,9 @@ function Report({ id, onBack }: { id: string; onBack: () => void }) {
         <span className="grow" />
         <button className="btn sm danger" onClick={del}><Trash2 size={12} />{t("删除", "Delete")}</button>
       </div>
-      <div className="panel pad ticks row spread">
+      <div className="panel pad row spread">
         <div className="col" style={{ "--gap": "4px" } as CSSProperties}>
-          <b style={{ font: "600 24px var(--f-num)" }}>{s.meta.exe.replace(/\.exe$/i, "")}</b>
+          <b className="row" style={{ font: "600 22px var(--f-ui)", "--gap": "10px" } as CSSProperties}><span className="sicon"><ProcIcon path={s.meta.path} name={s.meta.exe} /></span><GameTitle exe={s.meta.exe} path={s.meta.path} name={s.meta.name} /></b>
           <span className="faint">{new Date(s.meta.startedAt).toLocaleString()} · {duration(s.meta.durationSec)} · {s.meta.cpuName ?? ""}{s.meta.gpuName ? ` · ${s.meta.gpuName}` : ""}</span>
         </div>
         <div className="readout"><span className="v">{fixed(sm.avgFps, 0)}</span><span className="u">{t("平均 FPS", "avg FPS")}</span></div>
