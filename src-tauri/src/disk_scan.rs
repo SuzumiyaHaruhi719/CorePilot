@@ -1679,6 +1679,7 @@ mod win {
         };
 
         *handle.current_path.lock() = Arc::from("(reading $MFT…)");
+        let mft_started = std::time::Instant::now();
 
         // The whole unsafe NTFS path lives in `disk_scan_mft`; it builds into a
         // LOCAL arena and returns it whole or `None` (capability/parse/sanity
@@ -1708,6 +1709,16 @@ mod win {
             // Capability/parse/sanity failure → caller runs the proven walk. The
             // builder left the shared state untouched; reset the progress atomics
             // it may have bumped so the walk starts from a clean slate.
+            // Every bail-out inside the builder is silent, so record how far it
+            // got (0 files in ~0 ms = a capability gate; files counted = parse or
+            // sanity) — the walk is ~10x slower, users notice.
+            tracing::warn!(
+                "disk scan {}: MFT fast path fell back to the directory walk after {} ms (files_seen={}, nodes={})",
+                handle.scan_id,
+                mft_started.elapsed().as_millis(),
+                handle.files_seen.load(Ordering::Relaxed),
+                handle.node_count.load(Ordering::Relaxed),
+            );
             handle.files_seen.store(0, Ordering::Relaxed);
             handle.dirs_seen.store(0, Ordering::Relaxed);
             handle.bytes_logical.store(0, Ordering::Relaxed);

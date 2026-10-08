@@ -23,6 +23,7 @@ extern "system" {
 
 const SYSTEM_MEMORY_LIST_INFORMATION: i32 = 80;
 const MEMORY_EMPTY_WORKING_SETS: u32 = 2;
+const MEMORY_FLUSH_MODIFIED_LIST: u32 = 3;
 const MEMORY_PURGE_STANDBY_LIST: u32 = 4;
 
 #[derive(Serialize)]
@@ -92,6 +93,12 @@ fn memory_command(command: u32) -> CoreResult<()> {
 /// Empty the working sets of all processes (trim resident memory).
 pub fn free_working_sets() -> CoreResult<()> {
     memory_command(MEMORY_EMPTY_WORKING_SETS)
+}
+
+/// Write the modified page list back to disk so those pages become standby —
+/// RAMMap's "Empty Modified Page List"; run before a standby purge to free more.
+pub fn flush_modified() -> CoreResult<()> {
+    memory_command(MEMORY_FLUSH_MODIFIED_LIST)
 }
 
 /// Purge the standby list (cached memory) — frees "cached" RAM.
@@ -322,11 +329,19 @@ fn run_powercfg(args: &[&str]) -> CoreResult<()> {
     Ok(())
 }
 
-/// Switch the active Windows power plan ("balanced" | "high").
+/// Switch the active Windows power plan ("balanced" | "high" | "ultimate").
 pub fn set_power_plan(plan: &str) -> CoreResult<()> {
+    use crate::tweaks::{POWER_ULTIMATE, POWER_ULTIMATE_COPY};
     let guid = match plan {
         "balanced" => PLAN_BALANCED,
         "high" => PLAN_HIGH,
+        "ultimate" => {
+            // Ultimate is a hidden template: activate CorePilot's fixed-GUID copy
+            // (shared with the ultimate_power_plan tweak). Duplicating again when
+            // the copy exists fails harmlessly, so this stays idempotent.
+            let _ = run_powercfg(&["-duplicatescheme", POWER_ULTIMATE, POWER_ULTIMATE_COPY]);
+            POWER_ULTIMATE_COPY
+        }
         _ => return Err(CoreError::Msg(format!("unknown power plan: {plan}"))),
     };
     run_powercfg(&["/setactive", guid])
@@ -339,7 +354,9 @@ pub fn get_power_plan() -> CoreResult<String> {
         .output()
         .map_err(|e| CoreError::Msg(e.to_string()))?;
     let text = String::from_utf8_lossy(&output.stdout).to_lowercase();
-    let name = if text.contains(PLAN_HIGH) {
+    let name = if is_ultimate(&text) {
+        "ultimate"
+    } else if text.contains(PLAN_HIGH) {
         "high"
     } else if text.contains(PLAN_BALANCED) {
         "balanced"
@@ -347,6 +364,27 @@ pub fn get_power_plan() -> CoreResult<String> {
         "other"
     };
     Ok(name.to_string())
+}
+
+/// Our copy, the template itself, or a user-made copy (matched by its name —
+/// powercfg prints the localized plan name in parentheses).
+fn is_ultimate(active_scheme_lower: &str) -> bool {
+    use crate::tweaks::{POWER_ULTIMATE, POWER_ULTIMATE_COPY};
+    [POWER_ULTIMATE_COPY, POWER_ULTIMATE, "ultimate performance", "卓越性能"]
+        .iter()
+        .any(|k| active_scheme_lower.contains(k))
+}
+
+#[cfg(test)]
+mod power_tests {
+    use super::is_ultimate;
+
+    #[test]
+    fn ultimate_detected_by_guid_or_name() {
+        assert!(is_ultimate("power scheme guid: c09e7a11-0e5a-4d1f-b2c3-e9a42b02d5df  (卓越性能)"));
+        assert!(is_ultimate("power scheme guid: 1234abcd-0000-0000-0000-000000000000  (ultimate performance)"));
+        assert!(!is_ultimate("power scheme guid: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (高性能)"));
+    }
 }
 
 #[cfg(test)]

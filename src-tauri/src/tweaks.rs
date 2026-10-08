@@ -21,6 +21,13 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, CoreResult};
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{ERROR_SUCCESS, WIN32_ERROR};
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegSetValueExW, HKEY, HKEY_CLASSES_ROOT,
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_SET_VALUE, REG_DWORD, REG_EXPAND_SZ,
+    REG_OPTION_NON_VOLATILE, REG_QWORD, REG_SZ, REG_VALUE_TYPE,
+};
 
 /// `CREATE_NO_WINDOW` — never flash a console for the helper processes.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -79,15 +86,81 @@ fn run_capture(program: &str, args: &[&str]) -> (bool, String) {
 
 // --- small helpers around the standard tools ----------------------------------
 
-fn reg_add(key: &str, name: &str, kind: &str, data: &str) -> CoreResult<()> {
-    run(
-        "reg",
-        &["add", key, "/v", name, "/t", kind, "/d", data, "/f"],
-    )
+// Registry WRITES are native, not `reg add`: Windows' UCPD driver denies reg.exe /
+// PowerShell / regedit (matched by image) writes to some values — e.g. the Widgets
+// policy HKLM\SOFTWARE\Policies\Microsoft\Dsh AllowNewsAndInterests — with
+// "Access is denied" even though Administrators hold FullControl on the key.
+// Reads (`reg query` in capture_reg) aren't blocked.
+
+fn split_hive(key: &str) -> CoreResult<(HKEY, &str)> {
+    let (hive, sub) = key.split_once('\\').unwrap_or((key, ""));
+    let root = match hive.to_ascii_uppercase().as_str() {
+        "HKLM" | "HKEY_LOCAL_MACHINE" => HKEY_LOCAL_MACHINE,
+        "HKCU" | "HKEY_CURRENT_USER" => HKEY_CURRENT_USER,
+        "HKCR" | "HKEY_CLASSES_ROOT" => HKEY_CLASSES_ROOT,
+        "HKU" | "HKEY_USERS" => HKEY_USERS,
+        _ => return Err(CoreError::Msg(format!("未知的注册表根键: {key}"))),
+    };
+    Ok((root, sub))
 }
 
+/// `reg add /d` number syntax: decimal, or hex with 0x.
+fn parse_reg_num(data: &str) -> Option<u64> {
+    let d = data.trim();
+    match d.strip_prefix("0x").or_else(|| d.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => d.parse().ok(),
+    }
+}
+
+/// Typed payload for RegSetValueExW (REG_DWORD/QWORD little-endian, strings UTF-16 + NUL).
+fn reg_payload(kind: &str, data: &str) -> CoreResult<(REG_VALUE_TYPE, Vec<u8>)> {
+    let bad = || CoreError::Msg(format!("无效的注册表数据 {kind} {data}"));
+    Ok(match kind.to_ascii_uppercase().as_str() {
+        "REG_DWORD" => (REG_DWORD, u32::try_from(parse_reg_num(data).ok_or_else(bad)?).map_err(|_| bad())?.to_le_bytes().to_vec()),
+        "REG_QWORD" => (REG_QWORD, parse_reg_num(data).ok_or_else(bad)?.to_le_bytes().to_vec()),
+        k @ ("REG_SZ" | "REG_EXPAND_SZ") => (
+            if k == "REG_SZ" { REG_SZ } else { REG_EXPAND_SZ },
+            data.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect(),
+        ),
+        _ => return Err(CoreError::Msg(format!("不支持的注册表类型 {kind}"))),
+    })
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn reg_add(key: &str, name: &str, kind: &str, data: &str) -> CoreResult<()> {
+    let (root, sub) = split_hive(key)?;
+    let (ty, bytes) = reg_payload(kind, data)?;
+    let fail = |what: &str, rc: WIN32_ERROR| CoreError::Msg(format!("写入 {key}\\{name} 失败（{what} 错误 {}）", rc.0));
+    let (sub_w, name_w) = (wide(sub), wide(name));
+    let mut hkey = HKEY::default();
+    let rc = unsafe {
+        RegCreateKeyExW(root, PCWSTR(sub_w.as_ptr()), None, PCWSTR::null(), REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut hkey, None)
+    };
+    if rc != ERROR_SUCCESS {
+        return Err(fail("RegCreateKeyExW", rc));
+    }
+    let rc = unsafe { RegSetValueExW(hkey, PCWSTR(name_w.as_ptr()), None, ty, Some(&bytes)) };
+    unsafe {
+        let _ = RegCloseKey(hkey);
+    }
+    if rc != ERROR_SUCCESS {
+        return Err(fail("RegSetValueExW", rc));
+    }
+    Ok(())
+}
+
+/// Best effort, like `reg delete /f`: a missing key or value is fine.
 fn reg_del(key: &str, name: &str) {
-    run_soft("reg", &["delete", key, "/v", name, "/f"]);
+    if let Ok((root, sub)) = split_hive(key) {
+        let (sub_w, name_w) = (wide(sub), wide(name));
+        unsafe {
+            let _ = RegDeleteKeyValueW(root, PCWSTR(sub_w.as_ptr()), PCWSTR(name_w.as_ptr()));
+        }
+    }
 }
 
 /// Set a service start type ("disabled" | "auto" | "demand" | "delayed-auto").
@@ -112,12 +185,12 @@ const MMCSS_GAMES: &str =
 const MMCSS_PROFILE: &str =
     r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile";
 const POWER_BALANCED: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
-const POWER_ULTIMATE: &str = "e9a42b02-d5df-448d-aa00-03f14749eb61";
+pub(crate) const POWER_ULTIMATE: &str = "e9a42b02-d5df-448d-aa00-03f14749eb61";
 /// Fixed GUID for CorePilot's copy of the Ultimate Performance template. A
 /// GUID-less `-duplicatescheme` minted a new plan on every apply (they piled up
 /// in the control panel) and then activated the hidden template instead of the
 /// copy; duplicating to one fixed GUID is idempotent (a repeat fails harmlessly).
-const POWER_ULTIMATE_COPY: &str = "c09e7a11-0e5a-4d1f-b2c3-e9a42b02d5df";
+pub(crate) const POWER_ULTIMATE_COPY: &str = "c09e7a11-0e5a-4d1f-b2c3-e9a42b02d5df";
 
 // --- reversible-state snapshot / restore ---------------------------------------
 //
@@ -319,7 +392,41 @@ const KNOWN_TWEAKS: &[&str] = &[
 ];
 
 fn is_known_tweak(id: &str) -> bool {
-    KNOWN_TWEAKS.contains(&id)
+    KNOWN_TWEAKS.contains(&id) || reg_tweak(id).is_some()
+}
+
+// --- registry-only tweaks: one table drives apply, capture/revert allow-list and
+//     the no-snapshot fallback -----------------------------------------------------
+
+/// One registry value a table tweak sets. `off` is Windows' default (`None` =
+/// the value is normally absent, so the fallback revert deletes it).
+struct RegSet {
+    key: &'static str,
+    name: &'static str,
+    ty: &'static str,
+    on: &'static str,
+    off: Option<&'static str>,
+}
+const fn rs(key: &'static str, name: &'static str, ty: &'static str, on: &'static str, off: Option<&'static str>) -> RegSet {
+    RegSet { key, name, ty, on, off }
+}
+const GAMEBAR: &str = r"HKCU\Software\Microsoft\GameBar";
+const MOUSE: &str = r"HKCU\Control Panel\Mouse";
+const REG_TWEAKS: &[(&str, &[RegSet])] = &[
+    ("game_mode_on", &[rs(GAMEBAR, "AutoGameModeEnabled", "REG_DWORD", "1", None), rs(GAMEBAR, "AllowAutoGameMode", "REG_DWORD", "1", None)]),
+    ("mouse_accel_off", &[rs(MOUSE, "MouseSpeed", "REG_SZ", "0", Some("1")), rs(MOUSE, "MouseThreshold1", "REG_SZ", "0", Some("6")), rs(MOUSE, "MouseThreshold2", "REG_SZ", "0", Some("10"))]),
+    ("startup_delay_off", &[rs(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize", "StartupDelayInMSec", "REG_DWORD", "0", None)]),
+    ("background_apps_off", &[rs(r"HKLM\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy", "LetAppsRunInBackground", "REG_DWORD", "2", None)]),
+    ("power_throttling_off", &[rs(r"HKLM\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling", "PowerThrottlingOff", "REG_DWORD", "1", None)]),
+    ("global_timer_res", &[rs(r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\kernel", "GlobalTimerResolutionRequests", "REG_DWORD", "1", None)]),
+    ("delivery_p2p_off", &[rs(r"HKLM\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization", "DODownloadMode", "REG_DWORD", "0", None)]),
+    ("widgets_off", &[rs(r"HKLM\SOFTWARE\Policies\Microsoft\Dsh", "AllowNewsAndInterests", "REG_DWORD", "0", None)]),
+    ("edge_preload_off", &[rs(r"HKLM\SOFTWARE\Policies\Microsoft\Edge", "StartupBoostEnabled", "REG_DWORD", "0", None), rs(r"HKLM\SOFTWARE\Policies\Microsoft\Edge", "BackgroundModeEnabled", "REG_DWORD", "0", None)]),
+    ("transparency_off", &[rs(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "EnableTransparency", "REG_DWORD", "0", Some("1"))]),
+    ("hags_on", &[rs(r"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers", "HwSchMode", "REG_DWORD", "2", None)]),
+];
+fn reg_tweak(id: &str) -> Option<&'static [RegSet]> {
+    REG_TWEAKS.iter().find(|(k, _)| *k == id).map(|(_, v)| *v)
 }
 
 // --- which targets each tweak touches -------------------------------------------
@@ -345,7 +452,16 @@ const WU_AU: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
 const GAME_CONFIG: &str = r"HKCU\System\GameConfigStore";
 const GAME_DVR_POLICY: &str = r"HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR";
 
-fn targets(id: &str) -> &'static [Target] {
+/// Every target a tweak may touch: the hand-written list plus the table tweaks.
+fn targets(id: &str) -> Vec<Target> {
+    let mut v = static_targets(id).to_vec();
+    if let Some(sets) = reg_tweak(id) {
+        v.extend(sets.iter().map(|r| Target::Reg(r.key, r.name)));
+    }
+    v
+}
+
+fn static_targets(id: &str) -> &'static [Target] {
     use Target::{Power, Reg, Service};
     match id {
         // ---- SAFE ----
@@ -635,7 +751,10 @@ fn tweak_apply_blocking(id: &str) -> CoreResult<String> {
             "1",
         ),
 
-        other => Err(CoreError::Msg(format!("未知的优化项: {other}"))),
+        other => match reg_tweak(other) {
+            Some(sets) => sets.iter().try_for_each(|r| reg_add(r.key, r.name, r.ty, r.on)),
+            None => Err(CoreError::Msg(format!("未知的优化项: {other}"))),
+        },
     };
     if let Err(e) = applied {
         if let Err(rollback) = restore_from_snapshot(id, &snapshot) {
@@ -749,7 +868,16 @@ fn tweak_revert_blocking(id: &str, snapshot: &str) -> CoreResult<()> {
             Ok(())
         }
 
-        other => Err(CoreError::Msg(format!("未知的优化项: {other}"))),
+        other => match reg_tweak(other) {
+            Some(sets) => sets.iter().try_for_each(|r| match r.off {
+                Some(d) => reg_add(r.key, r.name, r.ty, d),
+                None => {
+                    reg_del(r.key, r.name);
+                    Ok(())
+                }
+            }),
+            None => Err(CoreError::Msg(format!("未知的优化项: {other}"))),
+        },
     }
 }
 
@@ -873,10 +1001,47 @@ mod revert_validation_tests {
     }
 
     #[test]
+    fn table_tweaks_declare_their_targets() {
+        for (id, sets) in REG_TWEAKS {
+            assert!(is_known_tweak(id), "{id}");
+            assert_eq!(targets(id).len(), sets.len(), "{id}");
+        }
+    }
+
+    #[test]
     fn every_known_tweak_but_defender_declares_targets() {
         for id in KNOWN_TWEAKS {
             assert_eq!(targets(id).is_empty(), *id == "defender_rt_off", "{id}");
         }
         assert!(is_guid(POWER_ULTIMATE_COPY));
+    }
+}
+
+#[cfg(test)]
+mod native_reg_tests {
+    use super::*;
+
+    #[test]
+    fn payloads_match_reg_add_syntax() {
+        assert_eq!(parse_reg_num("10"), Some(10));
+        assert_eq!(parse_reg_num("0xffffffff"), Some(0xffff_ffff));
+        assert_eq!(reg_payload("REG_DWORD", "4294967295").unwrap().1, vec![0xff; 4]);
+        assert!(reg_payload("REG_DWORD", "4294967296").is_err());
+        assert_eq!(reg_payload("REG_SZ", "Hi").unwrap().1, vec![b'H', 0, b'i', 0, 0, 0]);
+        assert!(split_hive(r"HKXX\Foo").is_err());
+    }
+
+    /// Native write → `reg query` read-back (the capture path) → native delete.
+    #[test]
+    fn hkcu_roundtrip() {
+        let key = r"HKCU\Software\CorePilot-test-native-reg";
+        reg_add(key, "D", "REG_DWORD", "0x1a").unwrap();
+        reg_add(key, "S", "REG_SZ", "high prio").unwrap();
+        assert!(matches!(capture_reg(key, "D"), Snapshot::Reg { data: Some(d), .. } if d == "26"));
+        assert!(matches!(capture_reg(key, "S"), Snapshot::Reg { data: Some(d), .. } if d == "high prio"));
+        reg_del(key, "D");
+        reg_del(key, "S");
+        assert!(matches!(capture_reg(key, "D"), Snapshot::Reg { data: None, .. }));
+        run_soft("reg", &["delete", key, "/f"]);
     }
 }

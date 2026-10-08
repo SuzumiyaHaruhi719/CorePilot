@@ -753,8 +753,21 @@ fn is_non_game(exe: &str) -> bool {
         "widgetservice.exe",
         "corepilot.exe",
         "msedgewebview2.exe",
+        // fullscreen video / streaming / browsers / chat present at ≥20 fps and
+        // cover the monitor too, but they're not games (user report: OBS and
+        // PotPlayer sessions in the game reports)
+        "obs64.exe", "obs32.exe", "obs.exe", "streamlabs obs.exe",
+        "vlc.exe", "mpv.exe", "wmplayer.exe", "video.ui.exe", "microsoft.media.player.exe", "kmplayer.exe", "kmplayer64x.exe", "gom.exe", "daumplayer.exe",
+        "chrome.exe", "msedge.exe", "firefox.exe", "opera.exe", "brave.exe", "vivaldi.exe", "iexplore.exe",
+        "discord.exe", "spotify.exe", "telegram.exe", "weixin.exe", "wechat.exe", "qq.exe", "zoom.exe", "ms-teams.exe", "teams.exe", "slack.exe",
+        "steamwebhelper.exe", "epicgameslauncher.exe", "battle.net.exe", "eadesktop.exe", "galaxyclient.exe", "upc.exe", "ubisoftconnect.exe",
+        "nvidia share.exe", "nvidia app.exe", "radeonsoftware.exe", "code.exe", "devenv.exe", "photos.exe",
     ];
-    NOT_GAMES.contains(&exe)
+    // families with many builds (PotPlayerMini64, mpc-hc64, mpc-be64, …)
+    const PREFIXES: &[&str] = &["potplayer", "mpc-hc", "mpc-be", "bilibili", "neteasecloudmusic"];
+    // the exe keeps its on-disk case ("PotPlayerMini64.exe"): compare lowercased
+    let e = exe.to_ascii_lowercase();
+    NOT_GAMES.contains(&e.as_str()) || PREFIXES.iter().any(|p| e.starts_with(p))
 }
 
 /// Minimum present rate (frames/sec) for auto game-detection. Many non-game apps

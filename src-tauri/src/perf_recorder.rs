@@ -204,6 +204,8 @@ struct SessionPayload {
 #[serde(rename_all = "camelCase")]
 struct SessionMeta {
     exe: String,
+    /// What the game is called ("War Thunder"), resolved once at session start.
+    name: String,
     path: Option<String>,
     started_at: f64,
     ended_at: f64,
@@ -217,6 +219,8 @@ struct SessionMeta {
 struct ActiveSession {
     /// Lowercased exe name of the detected game.
     exe: String,
+    /// Display name (game_library::display_name), resolved at start.
+    name: String,
     /// Full executable path, resolved once at session start (icon + path display).
     /// (The session's PID is its key in the recorder's `active` map.)
     path: Option<String>,
@@ -707,6 +711,7 @@ fn finalize(app: &AppHandle, pid: u32, session: ActiveSession) {
     let payload = SessionPayload {
         meta: SessionMeta {
             exe: session.exe,
+            name: session.name,
             path: session.path,
             started_at: session.started_at,
             ended_at,
@@ -725,9 +730,11 @@ fn finalize(app: &AppHandle, pid: u32, session: ActiveSession) {
 /// Begin tracking a freshly-detected foreground game (resolves CPU/GPU names once,
 /// mirrors the frontend `start`).
 fn start(app: &AppHandle, exe: &str, pid: u32) -> ActiveSession {
+    let path = exe_path(app, pid);
     ActiveSession {
         exe: exe.to_lowercase(),
-        path: exe_path(app, pid),
+        name: crate::game_library::display_name(path.as_deref(), exe),
+        path,
         started_at: now_epoch_ms(),
         cpu_name: cpu_name(app),
         gpu_name: gpu_name(),

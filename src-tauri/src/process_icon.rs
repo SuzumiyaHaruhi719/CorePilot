@@ -1,15 +1,16 @@
 //! Per-executable icon extraction for the Task-Manager process view.
 //!
 //! Windows Task Manager shows each process's real shell icon. We replicate that
-//! by pulling the small (16×16) icon for an executable via `SHGetFileInfoW`,
+//! by pulling the shell icon for an executable via `SHGetFileInfoW`,
 //! rasterizing it into a 32-bit top-down DIB with `DrawIconEx`, converting the
 //! GDI BGRA pixels to RGBA, and PNG-encoding the result as a base64 `data:` URL
 //! the frontend can drop straight into an `<img src>`.
 //!
 //! Icons are stable for the lifetime of a binary, so every distinct exe path is
-//! resolved exactly once and cached (the extraction touches the shell + GDI and
-//! is comparatively expensive). `None`/empty results are cached too, so a binary
-//! without an icon (or one we can't read) is never re-probed.
+//! resolved once and cached (the extraction touches the shell + GDI and is
+//! comparatively expensive). Only successes are cached: a failure is usually
+//! transient, and caching it pinned the letter placeholder for the session.
+//! (The frontend dedupes its own requests per path.)
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -25,17 +26,21 @@ use windows::Win32::Graphics::Gdi::{
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
 };
 use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::Shell::{
-    SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGFI_USEFILEATTRIBUTES,
+    SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_USEFILEATTRIBUTES,
 };
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, DrawIconEx, DI_NORMAL, HICON};
 
-/// Edge length (px) of the extracted icon — matches Task Manager's small icon.
-const ICON_SIZE: i32 = 16;
+/// Rasterized at 32 px and shown at 16 CSS px: crisp on 150–200 % displays,
+/// where a 16 px bitmap would be upscaled and blurry.
+const ICON_SIZE: i32 = 32;
 
 /// Cache of exe-path → optional base64 PNG `data:` URL. `None` means "no icon /
 /// unreadable" so we don't keep re-probing. Bounded by the set of distinct
 /// executables seen on the machine; icons never change for a given binary.
+static SHELL_LOCK: Mutex<()> = Mutex::new(());
+
 static ICON_CACHE: Lazy<Mutex<HashMap<String, Option<String>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -60,8 +65,14 @@ fn process_icon_blocking(exe_path: String) -> Option<String> {
     if let Some(cached) = ICON_CACHE.lock().get(&exe_path) {
         return cached.clone();
     }
+    // SHGetFileInfoW requires COM on the calling thread. S_OK/S_FALSE must be
+    // balanced; RPC_E_CHANGED_MODE means COM is already up (works too).
+    let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     let result = extract_icon_data_url(Path::new(&exe_path));
-    {
+    if com.is_ok() {
+        unsafe { CoUninitialize() };
+    }
+    if result.is_some() {
         let mut cache = ICON_CACHE.lock();
         // Bounded by distinct exe paths, but cap it so a very long session can't
         // grow the cache without bound; clear (rather than evict) past the cap.
@@ -73,10 +84,14 @@ fn process_icon_blocking(exe_path: String) -> Option<String> {
     result
 }
 
-/// Fetch the small shell icon for `path` and encode it to a PNG data URL.
+/// Fetch the shell icon for `path` and encode it to a PNG data URL.
 /// Returns `None` on any failure; never panics (no `unwrap` on FFI).
 fn extract_icon_data_url(path: &Path) -> Option<String> {
-    let hicon = small_icon(path)?;
+    // Concurrent SHGetFileInfoW calls fail (measured: 1 of 32 parallel calls got
+    // an icon), and a fresh process list requests every icon at once, so all but
+    // one or two rows fell back to the placeholder. One extraction at a time.
+    let _serial = SHELL_LOCK.lock();
+    let hicon = shell_icon(path)?;
     // Always destroy the icon, even if rasterization fails partway.
     let rgba = rasterize_icon(hicon);
     unsafe {
@@ -87,11 +102,11 @@ fn extract_icon_data_url(path: &Path) -> Option<String> {
     Some(format!("data:image/png;base64,{}", BASE64.encode(png)))
 }
 
-/// Resolve the small (16×16) `HICON` for an executable path via the shell.
+/// Resolve the `ICON_SIZE` `HICON` for an executable path via the shell.
 /// Uses `SHGFI_USEFILEATTRIBUTES` so the lookup works from the path alone
 /// without touching the file, and falls back to the generic file icon when the
 /// binary has none. The caller owns the returned icon and must `DestroyIcon` it.
-fn small_icon(path: &Path) -> Option<HICON> {
+fn shell_icon(path: &Path) -> Option<HICON> {
     let wide: Vec<u16> = path
         .as_os_str()
         .encode_wide()
@@ -104,7 +119,7 @@ fn small_icon(path: &Path) -> Option<HICON> {
             FILE_FLAGS_AND_ATTRIBUTES(0),
             Some(&mut info),
             std::mem::size_of::<SHFILEINFOW>() as u32,
-            SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES,
+            SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES,
         );
         if ret == 0 || info.hIcon.is_invalid() {
             return None;
@@ -203,4 +218,43 @@ fn encode_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
         writer.write_image_data(rgba).ok()?;
     }
     Some(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A real exe must yield its own icon, not None and not the generic exe glyph
+    // the shell returns for a path it never opened.
+    #[test]
+    fn real_exe_gets_its_own_icon() {
+        let generic = process_icon_blocking(r"C:\__corepilot_nope__\x.exe".into());
+        for p in [
+            r"C:\Windows\explorer.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Windows\System32\taskmgr.exe",
+        ] {
+            if !Path::new(p).exists() {
+                continue;
+            }
+            let got = process_icon_blocking(p.into());
+            eprintln!("{p}: {}", match &got { None => "None", Some(g) if Some(g) == generic.as_ref() => "GENERIC", _ => "own icon" });
+            assert!(got.is_some(), "{p}: no icon");
+            assert_ne!(got, generic, "{p}: generic exe icon");
+        }
+    }
+
+    // The process list asks for every icon at once.
+    #[test]
+    fn concurrent_requests_all_get_icons() {
+        let paths = [r"C:\Windows\explorer.exe", r"C:\Windows\regedit.exe", r"C:\Windows\System32\notepad.exe", r"C:\Windows\System32\taskmgr.exe"];
+        let handles: Vec<_> = (0..32)
+            .map(|i| {
+                let p = paths[i % paths.len()];
+                std::thread::spawn(move || extract_icon_data_url(Path::new(p)).is_some())
+            })
+            .collect();
+        let ok = handles.into_iter().map(|h| h.join().unwrap()).filter(|&b| b).count();
+        assert_eq!(ok, 32);
+    }
 }

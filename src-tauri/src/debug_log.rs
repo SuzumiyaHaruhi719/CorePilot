@@ -265,3 +265,22 @@ mod ring_tests {
         assert_eq!(text.matches("older log lines dropped").count(), 1);
     }
 }
+
+/// Frontend failures (failed IPC calls, uncaught errors, error toasts) into the
+/// same tracing stream, so the exported log and the on-disk warn file show what
+/// a user on different hardware actually hit. Untrusted input: the level is
+/// whitelisted and the text is flattened to one line and capped.
+#[tauri::command]
+pub async fn ui_log(level: String, message: String) {
+    let line: String = message
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(2000)
+        .collect();
+    if level == "error" {
+        tracing::error!(target: "ui", "{line}");
+    } else {
+        tracing::warn!(target: "ui", "{line}");
+    }
+}
+

@@ -320,3 +320,85 @@ fn reg_query(key: &str, extra: &[&str]) -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default()
 }
+
+/// The name a person calls this game: the storefront's title when the exe lives
+/// in a known library ("War Thunder", "HEAVEN BURNS RED"), else the exe's own
+/// ProductName / FileDescription with engine boilerplate dropped ("DCS World"),
+/// else a tidied exe name. Never empty.
+pub fn display_name(path: Option<&str>, exe: &str) -> String {
+    if let Some(p) = path.filter(|p| !p.is_empty()) {
+        let lower = p.to_lowercase();
+        ensure_fresh();
+        let hit = CACHE.lock().ok().and_then(|c| c.games.iter().find(|g| under(&lower, &g.path)).map(|g| g.name.clone()));
+        if let Some(name) = hit.filter(|n| !n.trim().is_empty()) {
+            return name;
+        }
+        let pb = std::path::Path::new(p);
+        for key in ["ProductName", "FileDescription"] {
+            if let Some(n) = crate::process::exe_version_string(pb, key).and_then(|v| clean_name(&v)) {
+                return n;
+            }
+        }
+    }
+    pretty_exe(exe)
+}
+
+/// Version-resource text → a game name, or `None` when it's engine/vendor
+/// boilerplate ("Unreal Engine", "UE4 Game") rather than the title.
+fn clean_name(v: &str) -> Option<String> {
+    let mut s = v.trim().trim_matches('\0').to_string();
+    let lower = s.to_lowercase();
+    const GENERIC: &[&str] = &["unreal engine", "ue4", "ue5", "unity", "game", "launcher", "bootstrappackagedgame", "epic games", "microsoft® windows® operating system", "application"];
+    if s.is_empty() || s.chars().count() > 60 || GENERIC.contains(&lower.as_str()) || lower.starts_with("unreal engine") || lower.starts_with("ue4") {
+        return None;
+    }
+    for suffix in [" Client", " (64-bit)", " 64-bit", " x64", " Launcher", " Shipping"] {
+        if s.ends_with(suffix) {
+            s.truncate(s.len() - suffix.len());
+        }
+    }
+    let s = s.trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// "aces.exe" → "Aces", "Wukong-Win64-Shipping.exe" → "Wukong".
+fn pretty_exe(exe: &str) -> String {
+    let stem = exe.trim();
+    let stem = stem.strip_suffix(".exe").or_else(|| stem.strip_suffix(".EXE")).unwrap_or(stem);
+    let lower = stem.to_lowercase();
+    let mut cut = stem.len();
+    for tail in ["-win64-shipping", "-wingdk-shipping", "_dx12", "_dx11", "-dx12", "-dx11", "_x64", "64"] {
+        if lower.ends_with(tail) && lower.len() > tail.len() + 2 {
+            cut = cut.min(stem.len() - tail.len());
+        }
+    }
+    let base = &stem[..cut];
+    let mut c = base.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => exe.to_string(),
+    }
+}
+
+/// Tauri command: display name for a recorded game (old reports carry only the exe).
+#[tauri::command]
+pub async fn game_display_name(exe: String, path: Option<String>) -> String {
+    crate::commands::run_blocking_default("game_display_name", move || display_name(path.as_deref(), &exe)).await
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn names() {
+        assert_eq!(clean_name("War Thunder Client").as_deref(), Some("War Thunder"));
+        assert_eq!(clean_name("DCS World").as_deref(), Some("DCS World"));
+        assert_eq!(clean_name("Unreal Engine"), None);
+        assert_eq!(clean_name("UE4 Game"), None);
+        assert_eq!(pretty_exe("aces.exe"), "Aces");
+        assert_eq!(pretty_exe("Wukong-Win64-Shipping.exe"), "Wukong");
+        assert_eq!(display_name(None, "heavenburnsred.exe"), "Heavenburnsred");
+    }
+}
+

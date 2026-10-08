@@ -1,4 +1,5 @@
 pub mod affinity;
+pub mod automation;
 pub mod commands;
 pub mod debug_log;
 pub mod disk_scan;
@@ -84,7 +85,9 @@ static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 /// carried `--remote-debugging-port=9222` for release-build CDP diagnosis)
 /// became a hard mismatch and the OSD window vanished. Any new switch must be
 /// added to BOTH places or neither.
-pub const WEBVIEW_ARGS: &str = "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --no-proxy-server --disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling";
+/// `--disable-lcd-text`: grayscale text AA everywhere. ClearType's colour fringes read as
+/// jagged on the dark UI (the old glass UI got grayscale implicitly via backdrop-filter).
+pub const WEBVIEW_ARGS: &str = "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --no-proxy-server --disable-lcd-text --disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling";
 
 #[cfg(test)]
 mod config_tests {
@@ -268,6 +271,7 @@ pub fn run() {
             // sensors snapshots). The ONLY caller that refreshes the System or
             // samples sensors; commands read its snapshots. See crate::sampler.
             crate::sampler::start(app.handle().clone());
+            crate::automation::start(app.handle().clone());
 
             // A tray failure must never crash startup; log and continue. The
             // close handler below only hides to the tray when the tray exists,
@@ -387,6 +391,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             debug_log::export_debug_logs,
+            debug_log::ui_log,
+            game_library::game_display_name,
+            automation::automation_config,
+            automation::automation_status,
+            automation::leak_report,
             commands::get_topology,
             commands::get_overview,
             commands::list_processes,
@@ -399,6 +408,7 @@ pub fn run() {
             commands::get_memory_detail,
             commands::free_working_sets,
             commands::purge_standby,
+            commands::flush_modified,
             commands::clean_temp,
             commands::flush_dns,
             commands::end_task,

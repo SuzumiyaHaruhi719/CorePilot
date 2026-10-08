@@ -503,7 +503,15 @@ fn apply_once() {
     if CALIBRATING.load(Ordering::SeqCst) {
         return;
     }
-    let cfgs = FAN_CONFIG.lock().clone();
+    // only headers the current snapshot reports as controllable (configs pushed
+    // before the sidecar was up are kept, never sent to an unknown id)
+    let controllable = controllable_ids();
+    let cfgs: Vec<FanChannelConfig> = FAN_CONFIG
+        .lock()
+        .iter()
+        .filter(|c| controllable.contains(&c.control_id))
+        .cloned()
+        .collect();
     let dirty = DIRTY.lock().clone();
     if cfgs.is_empty() && dirty.is_empty() {
         return;
@@ -861,12 +869,17 @@ pub fn fan_set_config(configs: Vec<FanChannelConfig>) -> crate::error::CoreResul
         return Ok(());
     }
 
+    // Before the sidecar's first snapshot nothing is controllable yet: that's
+    // startup order (the UI pushes at launch), not a bad config, and rejecting it
+    // left the curves unapplied until the user next edited a fan. Keep the
+    // sanitized configs; apply_once re-checks ids against every snapshot.
+    let ready = SNAP.lock().got_any;
     let controllable = controllable_ids();
 
     let validated: Vec<FanChannelConfig> = configs
         .iter()
         .filter(|c| is_valid_control_id(&c.control_id))
-        .filter(|c| controllable.contains(&c.control_id))
+        .filter(|c| !ready || controllable.contains(&c.control_id))
         .filter_map(sanitize_config)
         .collect();
 
@@ -1092,6 +1105,19 @@ pub async fn fan_calibrate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The UI pushes at launch, before the sidecar's first snapshot: keep the
+    // config instead of rejecting it; once headers are known, unknown ids fail.
+    #[test]
+    fn config_pushed_before_sidecar_is_kept() {
+        let c = FanChannelConfig { mode: "auto".into(), ..cfg(vec![], vec![]) };
+        *SNAP.lock() = Raw::default();
+        assert!(fan_set_config(vec![c.clone()]).is_ok());
+        assert_eq!(config_snapshot().len(), 1);
+        SNAP.lock().got_any = true;
+        assert!(fan_set_config(vec![c]).is_err());
+        *FAN_CONFIG.lock() = Vec::new();
+    }
 
     fn cfg(curve: Vec<CurvePoint>, curve2: Vec<CurvePoint>) -> FanChannelConfig {
         FanChannelConfig {

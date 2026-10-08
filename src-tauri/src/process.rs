@@ -67,6 +67,11 @@ pub struct ProcInfo {
     /// Dominant GPU engine label for this process (e.g. "3D", "Compute"), or
     /// `None` when GPU usage is negligible / unattributable.
     pub gpu_engine: Option<String>,
+    /// Per-engine utilization for this process, busiest first (e.g.
+    /// `[["Video Encode", 51.0], ["3D", 9.0]]`); empty below the attribution
+    /// threshold. `gpu` is only the 3D share, so this keeps encode/decode/
+    /// compute visible (OBS's load is mostly Video Encode, not 3D).
+    pub gpu_engines: Vec<(String, f32)>,
     /// Human name of the GPU adapter this process is primarily using (e.g.
     /// "NVIDIA GeForce RTX 4090"), or `None` when unknown.
     pub gpu_adapter: Option<String>,
@@ -356,12 +361,14 @@ fn dominant_key<K: Clone>(sums: &HashMap<K, f32>) -> Option<K> {
 
 /// Per-PID GPU attribution derived from one PDH array read.
 ///
-/// * `util` — summed engine utilization per PID, clamped to 0..100 (drives
-///   `ProcInfo.gpu`).
+/// * `util` — summed utilization over ALL engines per PID, clamped to 0..100
+///   (attribution threshold + the power index).
+/// * `engines` — per-PID per-engine breakdown, busiest first.
 /// * `attribution` — dominant `(engine label, adapter name)` per PID, only for
 ///   PIDs whose total utilization clears [`GPU_ATTRIBUTION_THRESHOLD`].
 pub(crate) struct GpuSnapshot {
     pub(crate) util: HashMap<u32, f32>,
+    pub(crate) engines: HashMap<u32, Vec<(String, f32)>>,
     pub(crate) attribution: HashMap<u32, (String, Option<String>)>,
     /// Whole-GPU utilization (sum of all engine instances, clamped 0..100). `None`
     /// when PDH is unavailable / on the priming sample — mirrors the old gpu_util
@@ -393,6 +400,7 @@ impl Default for GpuFullSnapshot {
 fn empty_engine_snapshot() -> GpuSnapshot {
     GpuSnapshot {
         util: HashMap::new(),
+        engines: HashMap::new(),
         attribution: HashMap::new(),
         aggregate: None,
         per_engine: HashMap::new(),
@@ -502,11 +510,22 @@ pub(crate) fn gpu_map() -> GpuSnapshot {
     }
     let aggregate = Some((raw_total as f32).clamp(0.0, 100.0));
 
-    // Derive dominant engine + adapter for PIDs with meaningful GPU usage.
+    // Derive dominant engine + adapter (and the breakdown) for PIDs with
+    // meaningful GPU usage.
     let mut attribution: HashMap<u32, (String, Option<String>)> = HashMap::new();
+    let mut engines: HashMap<u32, Vec<(String, f32)>> = HashMap::new();
     for (&pid, &total) in &util {
         if total <= GPU_ATTRIBUTION_THRESHOLD {
             continue;
+        }
+        if let Some(m) = by_engtype.get(&pid) {
+            let mut list: Vec<(String, f32)> = m
+                .iter()
+                .filter(|(_, &v)| v > GPU_ATTRIBUTION_THRESHOLD)
+                .map(|(t, &v)| (engine_label(t), v.clamp(0.0, 100.0)))
+                .collect();
+            list.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            engines.insert(pid, list);
         }
         let engine = by_engtype
             .get(&pid)
@@ -524,6 +543,7 @@ pub(crate) fn gpu_map() -> GpuSnapshot {
 
     GpuSnapshot {
         util,
+        engines,
         attribution,
         aggregate,
         per_engine,
@@ -744,6 +764,15 @@ pub(crate) fn gpu_vram_map() -> HashMap<u32, u64> {
     map
 }
 
+/// Windows' own `Dedicated Usage` counter sometimes reports nonsense for a process
+/// (seen: OBS with an NVENC session at 1.34 TB on a 24 GB card). No process can
+/// hold more dedicated memory than the adapter has, so such readings are dropped
+/// (the column shows "—"). Unknown total → a 256 GiB ceiling no consumer GPU reaches.
+fn drop_impossible_vram(map: &mut HashMap<u32, u64>, adapter_total: Option<u64>) {
+    let cap = adapter_total.filter(|&t| t > 0).unwrap_or(256 << 30);
+    map.retain(|_, v| *v <= cap);
+}
+
 /// Refresh and snapshot all processes. `logical` is the logical-CPU count
 /// used to normalize sysinfo's per-core CPU% into a Task-Manager-style total%.
 /// What a row needs from sysinfo, copied out under the `state.sys` lock so the
@@ -800,7 +829,8 @@ pub fn build_rows(raw: Vec<RawProc>, threads: &HashMap<u32, u32>, logical: f32) 
     // list (and, via the shared blocking pool, everything else).
     let snap = crate::telemetry::gpu_snapshot();
     let gpu = &snap.engine;
-    let gpu_vram = gpu_vram_map();
+    let mut gpu_vram = gpu_vram_map();
+    drop_impossible_vram(&mut gpu_vram, crate::sampler::sensors_snapshot().vram_total);
     // PIDs seen this refresh, used afterwards to prune the detail cache.
     let mut live_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let out: Vec<ProcInfo> = raw
@@ -808,7 +838,9 @@ pub fn build_rows(raw: Vec<RawProc>, threads: &HashMap<u32, u32>, logical: f32) 
         .map(|r| {
             let id = r.pid;
             let cpu = r.cpu_usage / logical;
+            // all engines (encode/decode/copy too); the per-engine split is in gpu_engines
             let gpu_pct = gpu.util.get(&id).copied().unwrap_or(0.0);
+            let gpu_engines = gpu.engines.get(&id).cloned().unwrap_or_default();
             // Processes not in the attribution map get None/None.
             let (gpu_engine, gpu_adapter) = match gpu.attribution.get(&id) {
                 Some((engine, adapter)) => (Some(engine.clone()), adapter.clone()),
@@ -849,6 +881,7 @@ pub fn build_rows(raw: Vec<RawProc>, threads: &HashMap<u32, u32>, logical: f32) 
                 cpu_time: details.cpu_time,
                 platform: details.platform,
                 gpu_engine,
+                gpu_engines,
                 gpu_adapter,
                 description,
                 // A process is only "settable" if we can both open it for
@@ -1039,9 +1072,14 @@ fn description_for(path: Option<&Path>) -> Option<String> {
 }
 
 /// Read the `FileDescription` string from an executable's version resource.
-/// Returns `None` when the file has no version info / no description. Never
-/// panics; written defensively with no `unwrap`.
 fn exe_description(path: &Path) -> Option<String> {
+    exe_version_string(path, "FileDescription")
+}
+
+/// Read one string (`FileDescription`, `ProductName`, …) from an executable's
+/// version resource. `None` when the file has no version info / no such value.
+/// Never panics; written defensively with no `unwrap`.
+pub(crate) fn exe_version_string(path: &Path, key: &str) -> Option<String> {
     let wide: Vec<u16> = path
         .as_os_str()
         .encode_wide()
@@ -1085,7 +1123,7 @@ fn exe_description(path: &Path) -> Option<String> {
             (0x0409u16, 0x04B0u16)
         };
 
-        let sub = format!("\\StringFileInfo\\{lang:04x}{cp:04x}\\FileDescription");
+        let sub = format!("\\StringFileInfo\\{lang:04x}{cp:04x}\\{key}");
         let sub_w: Vec<u16> = sub.encode_utf16().chain(std::iter::once(0)).collect();
         let mut val_ptr: *mut c_void = std::ptr::null_mut();
         let mut val_len: u32 = 0;
@@ -1320,6 +1358,17 @@ fn process_details(pid: u32, accumulated_cpu_ms: u64) -> ProcDetails {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn impossible_vram_is_dropped() {
+        let mut m: HashMap<u32, u64> = [(1, 3_764 << 20), (2, 1_338_006_835_200)].into_iter().collect();
+        drop_impossible_vram(&mut m, Some(24 << 30));
+        assert_eq!(m.len(), 1);
+        assert!(m.contains_key(&1));
+        let mut m: HashMap<u32, u64> = [(2, 1_338_006_835_200)].into_iter().collect();
+        drop_impossible_vram(&mut m, None);
+        assert!(m.is_empty());
+    }
 
     /// The persistent VRAM query must keep working across collects (it used to
     /// be reopened every time). Needs a GPU with processes using VRAM.

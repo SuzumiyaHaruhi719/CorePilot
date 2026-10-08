@@ -76,6 +76,7 @@ mod imp {
     /// Attribute type codes.
     const ATTR_STANDARD_INFORMATION: u32 = 0x10;
     const ATTR_FILE_NAME: u32 = 0x30;
+    const ATTR_ATTRIBUTE_LIST: u32 = 0x20;
     const ATTR_DATA: u32 = 0x80;
     const ATTR_END: u32 = 0xFFFF_FFFF;
 
@@ -374,6 +375,137 @@ mod imp {
             off += alen;
         }
         None
+    }
+
+    /// From a raw `$ATTRIBUTE_LIST` value: the (StartingVcn, MFT record number) of
+    /// every UNNAMED `$DATA` segment living in an EXTENSION record (record ≠
+    /// `own`), sorted by VCN. Entries: type@0 u32, length@4 u16, name_len@6 u8,
+    /// StartingVcn@8 u64, segment reference@0x10 (low 48 bits = record number).
+    pub(super) fn data_segments_from_list(list: &[u8], own: u64) -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        let mut off = 0usize;
+        while off + 0x1A <= list.len() {
+            let (Some(atype), Some(len)) = (u32_at(list, off), u16_at(list, off + 4)) else { break };
+            let len = len as usize;
+            if atype == ATTR_END || len < 0x1A || off + len > list.len() {
+                break;
+            }
+            let name_len = list[off + 6];
+            let vcn = u64_at(list, off + 8).unwrap_or(0);
+            let rec = u64_at(list, off + 0x10).unwrap_or(0) & 0x0000_FFFF_FFFF_FFFF;
+            if atype == ATTR_DATA && name_len == 0 && rec != own && !out.iter().any(|&(_, r)| r == rec) {
+                out.push((vcn, rec));
+            }
+            off += len;
+        }
+        out.sort_by_key(|&(v, _)| v);
+        out
+    }
+
+    /// The unnamed non-resident `$DATA` attribute in one record: its LowestVcn and
+    /// run list. `None` if the record holds no such attribute.
+    fn data_runs_in_record(rec: &[u8]) -> Option<(u64, Vec<Extent>)> {
+        let mut off = u16_at(rec, 0x14)? as usize;
+        while off + 4 <= rec.len() {
+            let atype = u32_at(rec, off)?;
+            if atype == ATTR_END {
+                break;
+            }
+            let alen = u32_at(rec, off + 4)? as usize;
+            if alen == 0 || off + alen > rec.len() {
+                return None;
+            }
+            if atype == ATTR_DATA && *rec.get(off + 9)? == 0 && *rec.get(off + 8)? == 1 {
+                let lowest = u64_at(rec, off + 0x10)?;
+                let runs_off = u16_at(rec, off + 0x20)? as usize;
+                return Some((lowest, parse_runs(rec.get(off + runs_off..off + alen)?)?));
+            }
+            off += alen;
+        }
+        None
+    }
+
+    /// Read whole clusters `[lcn, lcn+n)` (cluster reads are always sector-aligned,
+    /// which raw volume handles require — a bare 1 KB record read is not on 4Kn).
+    fn read_clusters(h: HANDLE, lcn: i64, n: u64, bpc: u64) -> Option<Vec<u8>> {
+        let mut buf = vec![0u8; (n * bpc) as usize];
+        read_at(h, lcn * bpc as i64, &mut buf).then_some(buf)
+    }
+
+    /// A `$MFT` too fragmented for record #0 continues its `$DATA` runs in
+    /// extension records listed by #0's `$ATTRIBUTE_LIST`. Follow them and return
+    /// the runs that come AFTER #0's own (in VCN order). `None` → caller walks.
+    fn mft_continuation(h: HANDLE, rec0: &[u8], known: &[Extent], bpc: u64, rec_size: usize) -> Option<Vec<Extent>> {
+        // 1. #0's attribute list (resident, or in clusters of its own)
+        let mut off = u16_at(rec0, 0x14)? as usize;
+        let mut list: Option<Vec<u8>> = None;
+        while off + 4 <= rec0.len() {
+            let atype = u32_at(rec0, off)?;
+            if atype == ATTR_END {
+                break;
+            }
+            let alen = u32_at(rec0, off + 4)? as usize;
+            if alen == 0 || off + alen > rec0.len() {
+                return None;
+            }
+            if atype == ATTR_ATTRIBUTE_LIST {
+                if *rec0.get(off + 8)? == 0 {
+                    let vlen = u32_at(rec0, off + 0x10)? as usize;
+                    let voff = u16_at(rec0, off + 0x14)? as usize;
+                    list = Some(rec0.get(off + voff..off + voff + vlen)?.to_vec());
+                } else {
+                    let size = u64_at(rec0, off + 0x30)? as usize;
+                    let runs_off = u16_at(rec0, off + 0x20)? as usize;
+                    let mut bytes = Vec::new();
+                    for e in parse_runs(rec0.get(off + runs_off..off + alen)?)? {
+                        bytes.extend(read_clusters(h, e.start_lcn?, e.clusters, bpc)?);
+                    }
+                    bytes.truncate(size);
+                    list = Some(bytes);
+                }
+                break;
+            }
+            off += alen;
+        }
+        let segments = data_segments_from_list(&list?, 0);
+        if segments.is_empty() {
+            return None;
+        }
+        // 2. read each extension record through the runs known so far
+        let mut all: Vec<Extent> = known.iter().map(|e| Extent { start_lcn: e.start_lcn, clusters: e.clusters }).collect();
+        let mut extra = Vec::new();
+        for (start_vcn, rec_no) in segments {
+            let next_vcn: u64 = all.iter().map(|e| e.clusters).sum();
+            if start_vcn != next_vcn {
+                return None; // gap / overlap in the chain — don't guess
+            }
+            let byte = rec_no.checked_mul(rec_size as u64)?;
+            let (vcn, within) = (byte / bpc, (byte % bpc) as usize);
+            let span = (within + rec_size).div_ceil(bpc as usize) as u64;
+            let mut base = 0u64;
+            let mut found = None;
+            for e in &all {
+                if vcn >= base && vcn + span <= base + e.clusters {
+                    found = Some(e.start_lcn? + (vcn - base) as i64);
+                    break;
+                }
+                base += e.clusters;
+            }
+            let buf = read_clusters(h, found?, span, bpc)?;
+            let mut rec = buf.get(within..within + rec_size)?.to_vec();
+            if !apply_fixup(&mut rec) {
+                return None;
+            }
+            let (lowest, runs) = data_runs_in_record(&rec)?;
+            if lowest != start_vcn {
+                return None;
+            }
+            for e in runs {
+                all.push(Extent { start_lcn: e.start_lcn, clusters: e.clusters });
+                extra.push(e);
+            }
+        }
+        Some(extra)
     }
 
     /// Extract the unnamed (default) `$DATA` stream's (logical, alloc) bytes from a
@@ -806,22 +938,30 @@ mod imp {
         if !apply_fixup(&mut rec0) {
             return None;
         }
-        let extents = mft_extents(&rec0)?;
+        let mut extents = mft_extents(&rec0)?;
         if extents.is_empty() {
             return None;
         }
         // Record #0's own $DATA runs must cover the whole valid table. A $MFT
-        // fragmented enough to continue its runs in an $ATTRIBUTE_LIST extension
-        // record leaves them short — reading only these would silently drop every
-        // file past the gap, so take the walk instead.
-        let covered = extents
-            .iter()
-            .map(|e| e.clusters)
-            .sum::<u64>()
-            .saturating_mul(bytes_per_cluster);
-        if covered < mft_valid {
-            tracing::info!("disk: $MFT runs cover {covered} of {mft_valid} bytes; using the walk");
-            return None;
+        // fragmented enough to continue its runs in $ATTRIBUTE_LIST extension
+        // records leaves them short (a big, busy C: — 12M+ files — routinely is):
+        // follow the list to the remaining runs. Reading only #0's would silently
+        // drop every file past the gap; giving up sent such drives to the ~10x
+        // slower walk (816 s instead of ~30 s), so the walk is only the last resort.
+        let covered_by = |ex: &[Extent]| ex.iter().map(|e| e.clusters).sum::<u64>().saturating_mul(bytes_per_cluster);
+        if covered_by(&extents) < mft_valid {
+            match mft_continuation(vol.0, &rec0, &extents, bytes_per_cluster, rec_size) {
+                Some(more) => extents.extend(more),
+                None => {
+                    tracing::warn!("disk: fragmented $MFT — couldn't follow its $ATTRIBUTE_LIST; using the walk");
+                    return None;
+                }
+            }
+            let covered = covered_by(&extents);
+            if covered < mft_valid {
+                tracing::warn!("disk: $MFT runs cover {covered} of {mft_valid} bytes even via $ATTRIBUTE_LIST; using the walk");
+                return None;
+            }
         }
 
         // --- Pass 1: sequential bulk read + record parse ----------------------
@@ -1448,6 +1588,34 @@ pub(crate) fn try_build_arena_from_mft(
         imp::build(walk_root, root_display, cancel, handle)
     }))
     .unwrap_or(None)
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod attr_list_tests {
+    use super::imp::data_segments_from_list;
+
+    fn entry(atype: u32, name_len: u8, vcn: u64, rec: u64) -> Vec<u8> {
+        let mut e = vec![0u8; 0x20];
+        e[0..4].copy_from_slice(&atype.to_le_bytes());
+        e[4..6].copy_from_slice(&0x20u16.to_le_bytes());
+        e[6] = name_len;
+        e[8..16].copy_from_slice(&vcn.to_le_bytes());
+        e[0x10..0x18].copy_from_slice(&(rec | (7u64 << 48)).to_le_bytes()); // seq no. in the top 16 bits
+        e
+    }
+
+    #[test]
+    fn picks_unnamed_data_segments_in_vcn_order() {
+        let mut list = Vec::new();
+        list.extend(entry(0x10, 0, 0, 0)); // $STANDARD_INFORMATION in #0 — ignored
+        list.extend(entry(0x80, 0, 0, 0)); // #0's own $DATA head — ignored (own record)
+        list.extend(entry(0x80, 0, 9000, 42)); // later segment first in the list
+        list.extend(entry(0x80, 0, 4000, 17));
+        list.extend(entry(0x80, 4, 0, 99)); // a NAMED stream — ignored
+        list.extend(entry(0x80, 0, 4000, 17)); // duplicate reference — once
+        assert_eq!(data_segments_from_list(&list, 0), vec![(4000, 17), (9000, 42)]);
+        assert!(data_segments_from_list(&[], 0).is_empty());
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]

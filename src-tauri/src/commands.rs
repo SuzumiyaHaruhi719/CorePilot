@@ -262,10 +262,12 @@ pub(crate) fn warn_slow<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
     // `list_processes` waits for a fresh walk by design after an idle gap (the
     // affinity enforcer every 8 s): that is not a stall, and at WARN it pushed
     // real evidence out of the 1 MB warn log within a day.
-    let budget = if name == "list_processes" {
-        1_500
-    } else {
-        SLOW_COMMAND_WARN_MS
+    // process_icon extractions are serialized (process_icon.rs SHELL_LOCK), so a
+    // fresh list's burst of requests queues by design.
+    let budget = match name {
+        "list_processes" => 1_500,
+        "process_icon" => 5_000,
+        _ => SLOW_COMMAND_WARN_MS,
     };
     if ms > budget {
         tracing::warn!("slow command body: {name} took {ms} ms (off the main thread)");
@@ -300,6 +302,11 @@ pub async fn free_working_sets() -> CoreResult<()> {
 #[tauri::command]
 pub async fn purge_standby() -> CoreResult<()> {
     run_blocking(optimize::purge_standby).await
+}
+
+#[tauri::command]
+pub async fn flush_modified() -> CoreResult<()> {
+    run_blocking(optimize::flush_modified).await
 }
 
 #[tauri::command]
@@ -445,7 +452,7 @@ pub fn cpu_sensors() -> Vec<crate::sensors::CpuSensor> {
 /// returns a non-zero exit code even on success, so we only fail if it can't be
 /// spawned at all.
 #[tauri::command]
-pub async fn reveal_in_explorer(path: String) -> CoreResult<()> {
+pub async fn reveal_in_explorer(path: String, open: Option<bool>) -> CoreResult<()> {
     // Spawning a child process (and the path-exists stat) can block; run it on the
     // blocking pool so the main thread's message pump never stalls.
     tauri::async_runtime::spawn_blocking(move || -> CoreResult<()> {
@@ -470,8 +477,14 @@ pub async fn reveal_in_explorer(path: String) -> CoreResult<()> {
         }
         // `explorer /select,"<full path>"` — pass verbatim via raw_arg so the path
         // (which may contain spaces) is quoted correctly for explorer's parser.
+        // `open` on a folder opens the folder itself instead (disk analyzer menu).
+        let arg = if open == Some(true) && std::path::Path::new(p).is_dir() {
+            format!("\"{p}\"")
+        } else {
+            format!("/select,\"{p}\"")
+        };
         std::process::Command::new(system_tool("explorer"))
-            .raw_arg(format!("/select,\"{p}\""))
+            .raw_arg(arg)
             .creation_flags(0x0800_0000)
             .spawn()
             .map_err(|e| crate::error::CoreError::Msg(format!("打开资源管理器失败: {e}")))?;
